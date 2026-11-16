@@ -25,6 +25,7 @@ function Panel({ onWallets }) {
           <button className="btn" onClick={async () => { setErr(''); try { await createWallet(); } catch (e) { setErr(String((e && e.message) || e)); } }}>Create Solana wallet</button>{' '}
         </span>
       ) : null}
+      {wReady ? <span className="faint" style={{ display: 'block' }}>Privy handed over {wallets.length} wallet{wallets.length === 1 ? '' : 's'}{wallets.map(w => { const need = ['standard:connect', 'solana:signMessage', 'solana:signTransaction'].filter(f => !(w.features && f in w.features)); return ` · ${w.name}${need.length ? ' (missing: ' + need.join(', ') + ')' : ' (can sign)'}`; }).join('')}. </span> : null}
       {wReady && wallets.length > 0 ? <span className="faint">{wallets.length} Solana wallet{wallets.length > 1 ? 's' : ''} ready: choose it under "Sign in with your wallet" below. </span> : null}
       {err ? <span className="dn">{err} </span> : null}
       <button className="btn" onClick={() => logout()}>Log out of Privy</button>

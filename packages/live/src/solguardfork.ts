@@ -59,6 +59,32 @@ async function main() {
     await sm.killSwitch(true); check('L7 the emergency stop works without a session', await refused(() => sm.prepare({ ...LS, mint, side: 'buy', sol: '0.01', slippagePct: 3 }), /kill switch/));
     check('L8 turning it back off needs the session', await refused(async () => { sm.killSwitch(false, {}); }, /sign in again/)); await sm.killSwitch(false, LS);
     const ld = await sm.disconnect(LS); check('L9 signing out disconnects the wallet and clears the session', !ld.connected && (ld as any).__setSession === '');
+
+    // ---- standing orders and TWAP (pasted-key mode: nothing needs a browser to approve a fire) ----
+    const k2 = await sm.connect({ key: base58(seed) }); const K = { __session: (k2 as any).__setSession as string };
+    await sm.setLimits({ ...K, maxTradeSol: '0.05', dailyCapSol: '0.5', maxSlippagePct: '5' });
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms)); const ords = async () => (await sm.listOrders(K)) as any;
+    const until = async (f: () => Promise<boolean>, ms = 60_000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await f()) return true; await sleep(500); } return false; };
+    const ctx = await sm.orderContext({ ...K, mint }); const px = ctx.priceSol as number, hold = async () => (await rpc.call<any>('getTokenAccountsByOwner', [k2.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }])).value.reduce((x: bigint, a: any) => x + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
+    check('O1 the order form gets the live price, decimals and balance', typeof px === 'number' && px > 0 && ctx.decimals >= 0 && BigInt(ctx.balanceRaw) > 0n, JSON.stringify(ctx).slice(0, 160));
+    check('O2 an order is refused without the acknowledgement, and a limit buy above the per-trade limit is refused', await refused(() => sm.createOrder({ ...K, type: 'limit_buy', mint, sol: '0.01', price: px * 0.5 }), /ack/) && await refused(() => sm.createOrder({ ...K, ack: true, type: 'limit_buy', mint, sol: '0.06', price: px * 0.5 }), /per-trade limit/));
+    const far = await sm.createOrder({ ...K, ack: true, type: 'limit_sell', mint, pct: 10, price: px * 5 }) as any; await sleep(6000);
+    check('O3 a limit sell far above the market is accepted and stays active', far.order.status === 'active' && (await ords()).orders.find((o: any) => o.id === far.order.id)?.status === 'active', JSON.stringify(far).slice(0, 200));
+    const h0 = await hold(), lb = await sm.createOrder({ ...K, ack: true, type: 'limit_buy', mint, sol: '0.02', price: px * 1.5 }) as any;
+    check('O4 a limit buy whose trigger is already met fires by itself and the wallet receives tokens', await until(async () => (await ords()).orders.find((o: any) => o.id === lb.order.id)?.status === 'fired') && await until(async () => (await hold()) > h0), JSON.stringify((await ords()).orders.find((o: any) => o.id === lb.order.id)).slice(0, 220));
+    const br = await sm.createOrder({ ...K, ack: true, type: 'bracket', mint, pct: 10, tpPrice: px * 4, slPrice: px * 0.2 }) as any;
+    check('O5 a bracket (take profit and stop loss) places two linked orders', br.orders?.length === 2 && br.orders[0].oco === br.orders[1].oco, JSON.stringify(br).slice(0, 200));
+    const tr = await sm.createOrder({ ...K, ack: true, type: 'trailing_stop', mint, pct: 10, trailPct: 20 }) as any; check('O6 a trailing stop is accepted', tr.order.kind === 'trailing_stop' && tr.order.trailPct === 20);
+    await sm.cancelOrder({ ...K, id: far.order.id }); check('O7 cancelling an order frees it', (await ords()).orders.find((o: any) => o.id === far.order.id)?.status === 'cancelled');
+    (sm as any).ticking = true; await sleep(2500);   // hold the order loop while the order is placed, so the order cannot fire before the kill switch is on
+    const h1 = await hold(), lb2 = await sm.createOrder({ ...K, ack: true, type: 'limit_buy', mint, sol: '0.01', price: px * 2 }) as any; await sm.killSwitch(true); (sm as any).ticking = false; await sleep(7000);
+    const heldKilled = (await ords()).orders.find((o: any) => o.id === lb2.order.id)?.status === 'active' && (await hold()) === h1;
+    await sm.killSwitch(false, K); const fired2 = await until(async () => (await ords()).orders.find((o: any) => o.id === lb2.order.id)?.status === 'fired');
+    check('O8 while the kill switch is on no order fires; when it is turned off the waiting order fires', heldKilled && fired2, `heldKilled ${heldKilled} fired ${fired2}`);
+    const h2 = await hold(), tw = await sm.createOrder({ ...K, ack: true, type: 'twap', side: 'buy', mint, sol: '0.02', slices: 2, intervalMin: 0.2 }) as any;
+    check('O9 a TWAP buy of 2 slices spaced 12 seconds apart fills both slices and the wallet receives tokens', await until(async () => ((await ords()).twaps.find((t: any) => t.id === tw.twap.id)?.filled ?? 0) >= 2, 90_000) && (await hold()) > h2, JSON.stringify((await ords()).twaps).slice(0, 200));
+    check('O10 a TWAP whose slices exceed the per-trade limit is refused', await refused(() => sm.createOrder({ ...K, ack: true, type: 'twap', side: 'buy', mint, sol: '0.2', slices: 2, intervalMin: 1 }), /per-trade limit/));
+    await sm.disconnect(K);
     const pass = checks.every(c => c.pass); mkdirSync('docs/live-verification', { recursive: true });
     const file = `docs/live-verification/${new Date().toISOString().replace(/[:.]/g, '-')}-sol-guard.md`;
     writeFileSync(file, ['# Guarded Solana trading path on a local validator', '', `Run: ${new Date().toISOString()}`, 'Node: local solana-test-validator with the pump.fun program and a live curve cloned. NOT mainnet. Fake SOL, throwaway key.', `Result: **${pass ? 'PASS' : 'FAIL'}** (${checks.filter(c => c.pass).length}/${checks.length})`, '', ...checks.map(c => `- ${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.pass ? '' : ' - ' + c.detail}`), '',

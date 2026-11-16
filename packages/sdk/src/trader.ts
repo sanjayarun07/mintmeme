@@ -210,6 +210,7 @@ export class Trader {
     let run: TwapRunner; try { run = new TwapRunner({ engine: this.engine, chain: this.chain, spec, persistPath: this.path('twap', tid) }); } catch (e) { throw new SdkError('bad_request', (e as Error).message); }
     this.twaps.set(tid, run); this.sides.set(`twap:${tid}`, spec.side); this.saveMeta(); await run.tick().catch(() => {}); this.diff(); return run.summary();
   }
+  listTwaps() { return [...this.twaps.values()].map(r => r.summary()); }
   twapStatus(tid: string) { const r = this.twaps.get(tid); if (!r) throw new SdkError('not_found', `no twap order ${tid}`, undefined, 404); return r.summary(); }
   cancelTwap(tid: string) { const r = this.twaps.get(tid); if (!r) throw new SdkError('not_found', `no twap order ${tid}`, undefined, 404); r.cancel(); return r.summary(); }
 
@@ -240,7 +241,7 @@ export class Trader {
   positions() { const prices = new Map<string, { num: bigint; den: bigint }>(); for (const t of new Set(this.portfolio.positions(this.userId).map(x => x.token))) { const px = this.spotE18(t); if (px !== undefined) prices.set(t, { num: px, den: E18 }); } return this.portfolio.positions(this.userId, prices); }
   history(token?: string) { return this.portfolio.history(this.userId, token); }
   /** Best venue spot price of `token` in the quote token, x1e18, or undefined when no authorized venue can report one. */
-  spotE18(token: string): bigint | undefined { let best: bigint | undefined, liq = -1n; for (const v of this.chain.venues()) { if (v.status !== 'active' || !v.spotPriceE18 || !v.supports(token, this.quoteToken) || !(this.c.venues.includes(v.id) || this.c.venues.includes(v.family))) continue; try { const q = v.quote(this.quoteToken, token, 10n ** 6n); if (q.liquidity > liq) { liq = q.liquidity; best = v.spotPriceE18(token, this.quoteToken); } } catch { /* unquotable */ } } return best; }
+  spotE18(token: string): bigint | undefined { let best: bigint | undefined, liq = -1n; for (const v of this.chain.venues()) { if (v.status !== 'active' || !v.spotPriceE18 || !v.supports(token, this.quoteToken) || !(this.c.venues.includes(v.id) || this.c.venues.includes(v.family))) continue; try { let q; try { q = v.quote(this.quoteToken, token, 10n ** 6n); } catch { q = v.quote(token, this.quoteToken, 10n ** 6n); }   /* a one-direction venue (Jupiter) only quotes the way it was built */ if (q.liquidity > liq) { liq = q.liquidity; best = v.spotPriceE18(token, this.quoteToken); } } catch { /* unquotable */ } } return best; }
   /** Pause NEW automated buys (orders, bulk, TWAP, snipe, copy). Sells, stop losses and manual sells are unaffected. Buys through buy() are refused with a clear message too. */
   pauseEntries() { this.paused = true; this.saveMeta(); } resumeEntries() { this.paused = false; this.saveMeta(); } get entriesPaused() { return this.paused; }
   /** Everything still unfinished, for a dashboard. */

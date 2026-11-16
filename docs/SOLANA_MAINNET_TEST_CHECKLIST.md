@@ -35,3 +35,12 @@
   - Not checked: an actual Privy login, embedded-wallet creation, or signing a transaction through a Privy wallet. Privy's docs name a hook `useSolanaStandardWallets`; the installed version (3.51.4) exports it as `useStandardWallets`, and the docs disagree with each other on the embedded-wallet config key, so expect to adjust after the first real login.
   - The Privy bundle pulls in about 800 npm packages (wallet SDKs). It is isolated from the core, which has no dependencies.
 - **Verified:** the server side (login, session, signing requests, refusal of bad or changed signatures, declines) on a local validator with fake SOL (`npm run verify:sol-guard`), and the page's wallet discovery and sign-in in the browser with a mock wallet. **Not verified:** a real wallet extension, and any mainnet trade.
+
+## Orders and TWAP (added)
+
+- The Solana page now offers: market buy and sell, limit buy, limit sell, take profit, stop loss, trailing stop, a take-profit plus stop-loss bracket, and TWAP (buy or sell, 2 to 50 slices), with an open-orders list and Cancel.
+- Orders spend nothing when placed. They trade later by themselves, within the same per-trade limit, slippage limit and daily cap as a market trade. At most 20 active orders. The kill switch stops all firing.
+- **With a wallet login, every fire needs your approval in the wallet, so the page must stay open.** A fire nobody approves within about 90 seconds fails and nothing is sent. Only the pasted-key mode fires unattended, and only while the server runs.
+- Orders are evaluated every 2 seconds by polling, not by the account stream.
+- **Verified** on a local validator with fake SOL and a pump.fun curve (33 of 33 checks in `npm run verify:sol-guard`): limit buy fires and fills, limit sell stays active until its trigger, bracket, trailing stop, cancel, kill switch holds then releases, a 2-slice TWAP fills both slices, and bad inputs are refused.
+- **Not verified:** orders on Jupiter-routed tokens (a one-direction price fix was made and unit tests pass, but no run fires a Jupiter order), unattended behaviour after a long wait, and anything on mainnet.

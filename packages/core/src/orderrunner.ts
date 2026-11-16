@@ -65,7 +65,9 @@ export class OrderRunner {
     if (!best.v.spotPriceE18) { this.skipped.set(o.id, `venue ${best.v.id} cannot report a spot price`); return undefined; }
     this.skipped.delete(o.id);
     const { v } = best;
-    return { priceE18: v.spotPriceE18!(o.token, o.quoteToken), ts: this.lastVenueRefreshMs, liquidity: best.liq, executableOut: od => { const s = od.kind !== 'limit_buy'; try { return v.quote(s ? od.token : od.quoteToken, s ? od.quoteToken : od.token, od.amount).amountOut; } catch { return 0n; } } };
+    // A one-direction venue (Jupiter) only reports a spot price the way it was built: when the token->quote price is unavailable, invert the quote->token one.
+    const spot = (): bigint => { try { return v.spotPriceE18!(o.token, o.quoteToken); } catch { const inv = v.spotPriceE18!(o.quoteToken, o.token); return inv > 0n ? 10n ** 36n / inv : 0n; } };
+    return { priceE18: spot(), ts: this.lastVenueRefreshMs, liquidity: best.liq, executableOut: od => { const s = od.kind !== 'limit_buy'; try { return v.quote(s ? od.token : od.quoteToken, s ? od.quoteToken : od.token, od.amount).amountOut; } catch { return 0n; } } };
   }
 
   /** One pass: refresh -> evaluate -> execute fired -> settle what is in flight. */
