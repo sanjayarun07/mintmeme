@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Original multichain spot-memecoin trading platform (local simulation vertical slice)",
   "scripts": {
-    "test": "node --experimental-transform-types --no-warnings --test \"packages/core/test/*.test.ts\" \"apps/telegram/*.test.ts\" \"apps/scraper/*.test.ts\" \"packages/evm/test/*.test.ts\" \"packages/live/test/*.test.ts\" \"packages/sol/test/*.test.ts\" \"packages/sdk/test/*.test.ts\"",
+    "test": "node --experimental-transform-types --no-warnings --test \"packages/core/test/*.test.ts\" \"apps/telegram/*.test.ts\" \"apps/scraper/*.test.ts\" \"packages/evm/test/*.test.ts\" \"packages/live/test/*.test.ts\" \"packages/sol/test/*.test.ts\" \"packages/sdk/test/*.test.ts\" \"apps/web/test/*.test.ts\"",
     "bench": "node --experimental-transform-types --no-warnings bench/bench.ts",
     "verify:local": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/localrun.ts",
     "verify:fork": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/forkrun.ts",

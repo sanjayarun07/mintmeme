@@ -273,7 +273,7 @@ async function watchTradesRoute(body: any) {
   tradesCache.set(k, { at: Date.now(), data }); if (tradesCache.size > 100) tradesCache.delete(tradesCache.keys().next().value as string); return data;
 }
 // Routes that only read real public data. One table so the practice and real-node servers share them.
-const REAL_ROUTES: Record<string, (body: any) => Promise<any>> = { '/api/markets': () => realMarkets(), '/api/whales': b => whalesRoute(b), '/api/buybot/preview': b => buybotPreview(b), '/api/tokeninfo': b => tokenInfoRoute(b), '/api/launches': () => launchesRoute(), '/api/watch/wallet': b => watchWalletRoute(b), '/api/watch/pulse': b => pulseRoute(b), '/api/watch/trades': b => watchTradesRoute(b) };
+const REAL_ROUTES: Record<string, (body: any) => Promise<any>> = { '/api/markets': () => realMarkets(), '/api/whales': b => whalesRoute(b), '/api/buybot/preview': b => buybotPreview(b), '/api/tokeninfo': b => tokenInfoRoute(b), '/api/launches': () => launchesRoute(), '/api/sol/search': async b => (await import('./solroutes.ts')).solSearch(b), '/api/sol/token': async b => (await import('./solroutes.ts')).solToken(b), '/api/sol/simulate': async b => (await import('./solroutes.ts')).solSimulate(b), '/api/watch/wallet': b => watchWalletRoute(b), '/api/watch/pulse': b => pulseRoute(b), '/api/watch/trades': b => watchTradesRoute(b) };
 async function api(path: string, body: any, method: string) {
   if (REAL_ROUTES[path]) return REAL_ROUTES[path](body);
   switch (path) {
@@ -461,7 +461,7 @@ http.createServer(async (req, res) => {
   if (req.method === 'POST') { const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer); try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { return send(400, '{}'); } }
   if (u.pathname.startsWith('/api/telegram/')) { const r = telegramApi(u.pathname); return r === undefined ? send(404, '{}') : send(200, ser(r)); }
   try { const r = REAL_ROUTES[u.pathname] ? await REAL_ROUTES[u.pathname](body) : live ? await live.api(u.pathname, body, req.method!) : await api(u.pathname, body, req.method!); return r === undefined ? send(404, '{}') : send(200, ser(r)); }
-  catch (e) { return send(500, ser({ ok: false, title: 'Something went wrong', why: (e as Error).message, fix: 'Reload the page. Your balances are safe in this simulation.' })); }
+  catch (e) { return send((e as any).status ?? 500, ser({ ok: false, title: 'Something went wrong', why: (e as Error).message, fix: 'Reload the page. Your balances are safe in this simulation.' })); }
 }).listen(Number(process.env.PORT ?? 3000), '127.0.0.1', () => console.log(`${live ? 'Real-node' : 'Practice'} terminal on http://localhost:${process.env.PORT ?? 3000} (localhost only, no login: do not expose)`));
 void startTelegramBot();   // practice terminal: simulated chain; fork terminal: the local anvil fork (fake ETH). Never a live chain.
 // With real data on, start the launch stream at boot so the Sniper "New on Solana" board keeps filling while no page is open.
