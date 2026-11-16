@@ -32,6 +32,8 @@ export async function solSimulate(body: any) {
     const { rpc } = rpcFor(), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL, pools: [], pump: { mints: [] }, jupiter: { pairs: [] } }, rpc, new DevSolSigner()); await chain.addToken(mint);
     const v = chain.venues().find(x => x.supports(NATIVE, mint)); if (!v) throw bad('no venue can trade this token');
     const tx: any = { kind: 'swap', wallet, venue: v.id, tokenIn: NATIVE, tokenOut: mint, amountIn: LAMPORTS, minOut: 0n, platformFeeBps: 0, nonce: 0, hash: '', deadline: 0 };
-    const b = await chain.simulate(tx); return { venue: v.id, status: b.receipt.status, reason: b.receipt.reason?.slice(0, 300) ?? null, sent: false, notice: 'Simulation only. Nothing was signed or sent.' };
+    const b = await chain.simulate(tx); let reason = b.receipt.reason?.slice(0, 300) ?? null;
+    if (reason && reason.includes('AccountNotFound')) reason += ' (This wallet has never received SOL, so it does not exist on-chain yet. Send it a little SOL, then simulate again. This is expected for a new wallet.)';
+    return { venue: v.id, status: b.receipt.status, reason, sent: false, notice: 'Simulation only. Nothing was signed or sent.' };
   });
 }
