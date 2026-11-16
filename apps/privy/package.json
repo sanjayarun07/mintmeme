@@ -1,0 +1,21 @@
+{
+  "name": "memedesk-privy-bundle",
+  "private": true,
+  "type": "module",
+  "description": "Builds the Privy login bundle (React) for the terminal. Isolated from the dependency-free core: nothing else in the repo imports this folder.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@privy-io/react-auth": "3.51.4",
+    "@solana-program/memo": "0.10.0",
+    "@solana-program/system": "0.10.0",
+    "@solana-program/token": "0.9.0",
+    "@solana/kit": "5.5.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

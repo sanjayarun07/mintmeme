@@ -43,6 +43,7 @@
     "verify:jupiter-swap": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/jupswapfork.ts",
     "verify:jupiter": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/jupquote.ts",
     "verify:live": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/run.ts",
+    "build:privy": "cd apps/privy && npm install && npm run build",
     "build:sdk": "cd packages/sdk && node scripts/build.mjs",
     "pack:sdk": "npm run build:sdk && cd packages/sdk && npm pack",
     "api": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/api/start.ts",
