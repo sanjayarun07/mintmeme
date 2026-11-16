@@ -2,7 +2,7 @@
 import { createPrivateKey, createPublicKey, randomBytes, sign, verify } from 'node:crypto';
 import { base58, b58decode } from './tx.ts';
 
-export interface SolSigner { sign(wallet: string, message: Uint8Array): Uint8Array }
+export interface SolSigner { sign(wallet: string, message: Uint8Array): Uint8Array | Promise<Uint8Array> }   // a remote wallet answers later, so the result may be a promise
 const PKCS8 = Buffer.from('302e020100300506032b657004220420', 'hex'), SPKI = Buffer.from('302a300506032b6570032100', 'hex');
 export class DevSolSigner implements SolSigner {
   private keys = new Map<string, ReturnType<typeof createPrivateKey>>();

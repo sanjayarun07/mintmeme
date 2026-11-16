@@ -25,3 +25,10 @@
 
 - Real fills differ from quotes: price impact, competing bots, and fees. Third-party search data can be spoofed, so confirm the mint address yourself.
 - Mainnet results from one wallet are anecdotes, not a benchmark.
+
+## Wallet login (updated)
+
+- The terminal signs you in with a **Wallet Standard** wallet (Phantom, Solflare, Backpack, or any wallet that registers itself). Your private key stays in the wallet. The server only sees a signature over a one-time login message and, later, a signature for each trade you confirm.
+- Each trade shows up in your wallet for approval. A transaction the wallet changes will not match what the server built, and the server rejects it. Some wallets add their own protections to transactions, which can cause this: that is a known limit and has not been tested here with a real wallet.
+- **Privy:** Privy's documented browser login is React-only, so it is not wired in. Privy's embedded wallet can work here only if an app registers it as a Wallet Standard wallet. That needs a React build with your Privy App ID and your Privy dashboard set up for the terminal's address. Not built, not tested.
+- **Verified:** the server side (login, session, signing requests, refusal of bad or changed signatures, declines) on a local validator with fake SOL (`npm run verify:sol-guard`), and the page's wallet discovery and sign-in in the browser with a mock wallet. **Not verified:** a real wallet extension, and any mainnet trade.

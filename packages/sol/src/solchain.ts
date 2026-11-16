@@ -235,10 +235,10 @@ export class SolanaChain implements ChainPort {
 
   async prepare(tx: SimTx) {
     const jv = this.jupVenue(tx);
-    if (jv) { const { message } = await this.buildJupiter(tx, jv); const sig = this.signer.sign(tx.wallet, message); return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) }; }
+    if (jv) { const { message } = await this.buildJupiter(tx, jv); const sig = await this.signer.sign(tx.wallet, message); return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) }; }
     const ixs = this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; if (extra) ixs.push(extra);
     const bh: any = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-    const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig));
+    const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = await this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig));
     return { raw: Buffer.from(wireTx(message, [sig])).toString('base64'), hash: base58(sig) };
   }
 
