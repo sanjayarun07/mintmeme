@@ -30,6 +30,7 @@
     "verify:pump-devnet": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/pumpdevnet.ts",
     "verify:robinhood": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/robinhoodfork.ts",
     "check:sol-mainnet": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/solmainnetcheck.ts",
+    "verify:sol-guard": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/solguardfork.ts",
     "verify:stream": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/streamfork.ts",
     "verify:twap": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/twapfork.ts",
     "telegram": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/telegram/run.ts",
