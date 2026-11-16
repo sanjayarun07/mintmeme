@@ -99,7 +99,7 @@ const ICONS={
   automation:'<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/>',
   more:'<path d="M4 7h16M4 12h16M4 17h16"/>'};
 const ico=n=>`<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[n]||'<circle cx="12" cy="12" r="3"/>'}</svg>`;
-const MAIN=[['discover','Discover'],['trade','Trade'],['copy','Copy trade'],['sniper','Sniper'],['orders','Orders'],['portfolio','Portfolio'],['signals','Signals'],['wallets','Wallets']];
+const MAIN=[['discover','Discover'],['trade','Trade'],['copy','Copy trade'],['sniper','Sniper'],['orders','Orders'],['portfolio','Portfolio'],['signals','Signals'],['wallets','Wallets'],['solana','Solana lookup']];
 const MORE=[['whales','Whale alerts'],['bots','Community bots'],['referrals','Referrals'],['cashback','Cashback'],['plan','Subscriptions'],['support','Support']];
 const KEYS={d:'discover',t:'trade',c:'copy',s:'sniper',o:'orders',p:'portfolio',i:'signals',w:'wallets'};
 const BRAND=`<svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true"><path d="M3 21 11 3h5L8 21z" fill="#e4e4e4"/><path d="M12 21 19 7h4l-7 14z" fill="#2fcb73"/></svg>`;

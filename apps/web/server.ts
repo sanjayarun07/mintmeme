@@ -453,7 +453,7 @@ if (process.env.TERMINAL_MODE === 'fork') {
 http.createServer(async (req, res) => {
   const u = new URL(req.url!, 'http://x');
   const send = (code: number, body: string, type = 'application/json') => { res.writeHead(code, { 'content-type': type + '; charset=utf-8' }); res.end(body); };
-  const STATIC: Record<string, string> = { '/styles.css': 'text/css', '/data.js': 'text/javascript', '/app.js': 'text/javascript', '/views.js': 'text/javascript', '/views2.js': 'text/javascript' };
+  const STATIC: Record<string, string> = { '/styles.css': 'text/css', '/data.js': 'text/javascript', '/app.js': 'text/javascript', '/views.js': 'text/javascript', '/views2.js': 'text/javascript', '/views3.js': 'text/javascript' };
   if (STATIC[u.pathname]) return send(200, readFileSync(new URL('.' + u.pathname, import.meta.url), 'utf8'), STATIC[u.pathname]);
   if (u.pathname === '/') return send(200, readFileSync(new URL('./index.html', import.meta.url), 'utf8'), 'text/html');
   if (u.pathname === '/api/launches/stream') return launchStreamRoute(req, res).catch(() => { try { res.end(); } catch { /* closed */ } });
