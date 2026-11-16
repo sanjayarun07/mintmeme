@@ -29,7 +29,7 @@ async function swPoll(){if(SW.busy||!SW.wallet)return;SW.busy=true;try{const r=a
     const tx=new Uint8Array(1+64+msg.length);tx[0]=1;tx.set(msg,65);
     try{const [out]=await SW.wallet.features['solana:signTransaction'].signTransaction({account:SW.account,transaction:tx,chain:'solana:mainnet'});const sig=out.signedTransaction.slice(1,65);
       const sr=await api('/api/sol/sign/submit',{id:it.id,signature:b64(sig)});if(sr&&sr.ok===false)toast('error','The wallet signed a different transaction',esc(sr.why||''))}
-    catch(e){await api('/api/sol/sign/reject',{id:it.id});toast('warn','Signing was cancelled','Nothing was sent.')}}}finally{SW.busy=false}}
+    catch(e){await api('/api/sol/sign/reject',{id:it.id});toast('warn','Signing was cancelled','Nothing was sent.')}}}catch{/* the terminal was unreachable for a moment: try again next second */}finally{SW.busy=false}}
 
 V.solana={title:'Solana lookup',
 html(){return head('Solana lookup','Search any Solana token by name, symbol or mint. Searching, quoting and simulating only read; a trade needs a signed-in wallet and your confirmation.')+
