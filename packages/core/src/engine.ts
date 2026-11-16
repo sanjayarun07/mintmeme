@@ -135,7 +135,7 @@ export class Engine {
         try { lk = await chain.lookup(r.tx!.hash); } catch { return false; }
         if (lk === 'none') { this.go(r, 'unresolved', 'tx not found at node'); return true; }
         if (lk === 'pending') { if (r.state === 'submitted') { this.go(r, 'observed', 'in mempool'); return true; } return false; }
-        const rc = (await chain.receipt(r.tx!.hash))!;
+        const rc = await chain.receipt(r.tx!.hash); if (!rc) return false;   // the node found the transaction but cannot give its receipt yet: look again on the next step, never guess
         if (r.state === 'submitted') { this.go(r, 'observed', 'included'); return true; }
         if (rc.status === 'reverted') { r.fill = undefined; r.confirmedBlock = rc.block; this.fail(r, `reverted on-chain: ${rc.reason}`); return true; }   // included => signer charge stays
         if (r.tx!.kind !== 'noop' && r.tx!.kind !== 'approve') r.fill = this.fillOf(r, rc);   // fill always from the CURRENT receipt

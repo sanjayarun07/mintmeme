@@ -44,14 +44,14 @@ export async function runStream(env: PumpEnv): Promise<{ checks: Check[]; facts:
   for (let round = 0; round < 4; round++) {
     const mode = round % 2 === 0 ? 'poll' : 'stream'; if (mode === 'poll') unwatch(); const off = mode === 'stream' ? stream.watch(curveAddr, trig.onChange) : () => {};
     await sleep(1500); const p = trader.spotE18(T)!, id = `ls${round}`;
-    await trader.limitSell({ id, walletId: w1, token: T, amount: (await tokOf(w1)) / 10n, priceE18: String(p * 103n / 100n), slippageBps: 1500 });
+    const ord = await trader.limitSell({ id, walletId: w1, token: T, amount: (await tokOf(w1)) / 10n, priceE18: String(p * 103n / 100n), slippageBps: 1500 });
     await sleep(800);   // let a tick see "not met" first
     const up = await trader.buy({ walletId: mover, token: T, amount: 6n * SOLN, slippageBps: 2000, key: `up${round}` });
     let sigHash = ''; for (let i = 0; i < 200 && !sigHash; i++) { sigHash = trader.trade_(up.key)?.txHash ?? ''; if (!sigHash) { await trader.advance(up.key).catch(() => {}); await sleep(50); } }
-    const t0 = await confirmedAt(sigHash); let fired = 0; for (let i = 0; i < 400; i++) { await sleep(25); const o = trader.getOrder(`u1.${id}`); if (o && o.status !== 'active') { fired = Date.now(); break; } }
-    const ms = fired ? fired - t0 : -1; if (ms >= 0) lat[mode].push(ms); console.log(`  round ${round} (${mode}): order fired ${ms} ms after the price move confirmed; order ${JSON.stringify(trader.orderStatus(`u1.${id}`), (_k, v) => typeof v === 'bigint' ? v.toString() : v)}; spot ${trader.spotE18(T)} vs trigger ${p * 103n / 100n}`);
+    const t0 = await confirmedAt(sigHash); let fired = 0; for (let i = 0; i < 400; i++) { await sleep(25); const o = trader.getOrder(ord.id); if (o && o.status !== 'active') { fired = Date.now(); break; } }
+    const ms = fired ? fired - t0 : -1; if (ms >= 0) lat[mode].push(ms); console.log(`  round ${round} (${mode}): order fired ${ms} ms after the price move confirmed; order ${JSON.stringify(trader.orderStatus(ord.id), (_k, v) => typeof v === 'bigint' ? v.toString() : v)}; spot ${trader.spotE18(T)} vs trigger ${p * 103n / 100n}`);
     await settle(up.key); const down = await trader.sell({ walletId: mover, token: T, pctBps: 10000, slippageBps: 2000, key: `down${round}` }); await settle(down.key); off(); if (mode === 'poll') stream.watch(curveAddr, trig.onChange);
-    for (let i = 0; i < 60; i++) { const o = trader.getOrder(`u1.${id}`); if (o && ['fired'].includes(o.status) && DONE.includes(engine.d.store.records.get(`order:u1.${id}:a0`)?.state ?? '')) break; await sleep(500); }
+    for (let i = 0; i < 60; i++) { const o = trader.getOrder(ord.id); if (o && ['fired'].includes(o.status) && DONE.includes(engine.d.store.records.get(`order:${ord.id}:a0`)?.state ?? '')) break; await sleep(500); }
   }
   clearInterval(timer);
   const mp = median(lat.poll), ms = median(lat.stream);
