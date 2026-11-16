@@ -28,7 +28,11 @@ export function parseKey(text: string): Uint8Array {
   return bytes.length === 64 ? bytes.slice(0, 32) : bytes;
 }
 
+/** Hard ceilings for the server-held trading key. Settings cannot go above these. */
+export const TRADING_KEY_CAPS = { maxTradeLamports: 50_000_000n, dailyCapLamports: 250_000_000n, maxBalanceLamports: 500_000_000n };
+
 export class SolMainnet {
+  private keyExpiry?: number;
   private guard: TradeGuard; private settingsFile: string;
   private ticker?: ReturnType<typeof setInterval>; private ticking = false; private decs = new Map<string, number>();
   private nonces = new Map<string, { message: string; exp: number }>(); private session?: string; private remote?: RemoteSolSigner;
@@ -48,7 +52,7 @@ export class SolMainnet {
     if (this.conn) { try { balance = BigInt((await this.conn.rpc.call<any>('getBalance', [this.conn.address, { commitment: 'confirmed' }])).value).toString(); } catch { balance = null; } }
     return { connected: !!this.conn, signer: this.remote ? 'wallet' : this.conn ? 'key' : null, address: this.conn?.address ?? null, balanceLamports: balance, killed: this.guard.killed, spentTodayLamports: this.guard.spentToday().toString(),
       limits: { maxTradeLamports: l.maxTradeLamports.toString(), dailyCapLamports: l.dailyCapLamports.toString(), maxSlippageBps: l.maxSlippageBps },
-      notice: 'The key lives in this process only (memory). Restarting the server disconnects the wallet. The terminal has no login: use a wallet funded only for testing.' };
+      tradingKey: this.tradingKeyInfo(), notice: 'The key lives in this process only (memory). Restarting the server disconnects the wallet. The terminal has no login: use a wallet funded only for testing.' };
   }
 
   private attach(address: string, signer: SolSigner) {
@@ -71,6 +75,35 @@ export class SolMainnet {
     const seed = parseKey(String(body?.key ?? '')); const signer = new DevSolSigner(), address = signer.add(seed);
     this.attach(address, signer); this.remote = undefined; return { ...(await this.status()), __setSession: this.session };
   }
+  // ---- Trading key: a separate throwaway wallet the server holds so orders can fire without the browser open. Not your main wallet: you fund it with a small amount. ----
+  private keyFile() { return join(this.dir, 'trading-key.json'); }
+  private readKey(): { seed: Uint8Array; address: string; createdAt: number; expiresAt: number } | undefined {
+    try { const j = JSON.parse(readFileSync(this.keyFile(), 'utf8')); const kp = Uint8Array.from(j.keypair as number[]); return { seed: kp.slice(0, 32), address: String(j.address), createdAt: Number(j.createdAt), expiresAt: Number(j.expiresAt) }; } catch { return undefined; }
+  }
+  /** Public facts about the saved trading key (never the key itself). */
+  tradingKeyInfo() {
+    const k = this.readKey(); const c = TRADING_KEY_CAPS;
+    return { exists: !!k, address: k?.address ?? null, expiresAt: k?.expiresAt ?? null, expired: k ? k.expiresAt < Date.now() : false, active: !!this.conn && this.conn.address === k?.address && !this.remote,
+      maxTradeSol: Number(c.maxTradeLamports) / 1e9, dailyCapSol: Number(c.dailyCapLamports) / 1e9, maxBalanceSol: Number(c.maxBalanceLamports) / 1e9, file: '.state/sol-mainnet/trading-key.json' };
+  }
+  /** Create a new trading key (refused when one exists, so a funded key is never overwritten). Saved on this computer as a Solana CLI keypair file (mode 0600) so funds can always be recovered by importing it. */
+  tradingKeyCreate(b: any) {
+    if (this.readKey()) throw bad('a trading key already exists. Use it, or move the file away yourself to make a new one', 409);
+    const hours = Math.min(168, Math.max(1, Number(b?.hours ?? 24) || 24)), signer = new DevSolSigner(), seed = randomBytes(32), address = signer.add(seed);
+    const keypair = Array.from(Buffer.concat([seed, b58decode(address)]));
+    writeFileSync(this.keyFile(), JSON.stringify({ address, keypair, createdAt: Date.now(), expiresAt: Date.now() + hours * 3_600_000, note: 'Solana CLI keypair. Import it into a wallet to recover any funds. Never share it.' }), { mode: 0o600 });
+    return this.tradingKeyInfo();
+  }
+  /** Connect the saved trading key. Orders then fire on their own while the server runs, within the limits, until the key expires or the kill switch is turned on. */
+  async tradingKeyUse() {
+    const k = this.readKey(); if (!k) throw bad('create a trading key first', 404); if (k.expiresAt < Date.now()) throw bad('this trading key has expired. Create a new one (move the old file away first, after taking any funds out)', 410);
+    const signer = new DevSolSigner(); if (signer.add(k.seed) !== k.address) throw bad('the saved trading key is damaged', 500);
+    // Hard ceilings for this mode: limits are lowered to them, never raised.
+    const l = this.guard.limits, c = TRADING_KEY_CAPS; if (l.maxTradeLamports > c.maxTradeLamports || l.dailyCapLamports > c.dailyCapLamports) { this.guard.limits = { ...l, maxTradeLamports: l.maxTradeLamports > c.maxTradeLamports ? c.maxTradeLamports : l.maxTradeLamports, dailyCapLamports: l.dailyCapLamports > c.dailyCapLamports ? c.dailyCapLamports : l.dailyCapLamports }; this.persist(); }
+    this.attach(k.address, signer); this.remote = undefined; this.keyExpiry = k.expiresAt;
+    try { const bal = BigInt((await this.conn!.rpc.call<any>('getBalance', [k.address, { commitment: 'confirmed' }])).value); if (bal > c.maxBalanceLamports) { await this.drop(); throw bad(`this key holds ${Number(bal) / 1e9} SOL. The trading key is limited to ${Number(c.maxBalanceLamports) / 1e9} SOL: move the rest out first`, 422); } } catch (e) { if (e instanceof GuardError) throw e; }
+    return { ...(await this.status()), __setSession: this.session };
+  }
   /** Wallet login step 1: a one-time message for the wallet to sign. Signing it proves the browser controls the address; it moves no funds and the message says so. */
   authNonce(b: any) {
     const address = String(b?.address ?? '').trim(); if (!looksLikeMint(address)) throw bad('that is not a Solana address');
@@ -90,7 +123,8 @@ export class SolMainnet {
   pendingSigns(b: any) { this.needSession(b); if (!this.conn || !this.remote) return { items: [] }; return { items: this.remote.pending(this.conn.address).map(p => ({ id: p.id, wallet: p.wallet, message: Buffer.from(p.message).toString('base64'), expiresAt: p.expiresAt })) }; }
   submitSign(b: any) { this.needSession(b); if (!this.remote) throw bad('no wallet is waiting to sign', 409); try { this.remote.submit(String(b?.id ?? ''), Uint8Array.from(Buffer.from(String(b?.signature ?? ''), 'base64'))); } catch (e) { throw bad((e as Error).message, e instanceof SignRequestError ? 422 : 400); } return { ok: true }; }
   rejectSign(b: any) { this.needSession(b); this.remote?.reject(String(b?.id ?? '')); return { ok: true }; }
-  async disconnect(b?: any) { this.needSession(b); if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
+  async disconnect(b?: any) { this.needSession(b); return this.drop(); }
+  private async drop() { this.keyExpiry = undefined; if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
   /** Turning the kill switch ON never needs a session (it is the emergency stop). Turning it off does. */
   killSwitch(on: boolean, b?: any) { if (!on) this.needSession(b); this.guard.setKill(!!on); return this.status(); }
 
@@ -98,13 +132,15 @@ export class SolMainnet {
     this.needSession(b);
     const num = (v: unknown, k: string) => { if (typeof v === 'string' && /^\d+(\.\d+)?$/.test(v) || typeof v === 'number' && v >= 0) return Number(v); throw bad(`${k} must be a number`); };
     const toLam = (sol: number) => BigInt(Math.round(sol * 1e9)); const max = toLam(num(b?.maxTradeSol, 'maxTradeSol')), cap = toLam(num(b?.dailyCapSol, 'dailyCapSol')), slip = num(b?.maxSlippagePct, 'maxSlippagePct') * 100;
-    if (max <= 0n || cap < max) throw bad('the daily cap must be at least the per-trade limit, and both above zero'); if (!Number.isInteger(slip) || slip < 0 || slip > 5000) throw bad('slippage must be between 0 and 50 percent, in steps of 0.01');
+    if (max <= 0n || cap < max) throw bad('the daily cap must be at least the per-trade limit, and both above zero');
+    if (this.keyExpiry !== undefined && (max >TRADING_KEY_CAPS.maxTradeLamports || cap > TRADING_KEY_CAPS.dailyCapLamports)) throw bad(`with the trading key, the limits cannot exceed ${Number(TRADING_KEY_CAPS.maxTradeLamports) / 1e9} SOL per trade and ${Number(TRADING_KEY_CAPS.dailyCapLamports) / 1e9} SOL per day`); if (!Number.isInteger(slip) || slip < 0 || slip > 5000) throw bad('slippage must be between 0 and 50 percent, in steps of 0.01');
     this.guard.limits = { ...this.guard.limits, maxTradeLamports: max, dailyCapLamports: cap, maxSlippageBps: slip }; this.persist();
     if (this.conn) { this.conn.policy.maxPerTx[NATIVE] = max; this.conn.policy.dailyLimit[NATIVE] = cap; } return this.status();
   }
 
 
-  private async tickOnce() { const c = this.conn; if (!c || this.ticking || this.guard.killed) return; this.ticking = true; try { await c.chain.refresh('venues'); await c.trader.tick(); } catch { /* the next tick retries; a failed evaluation never trades */ } finally { this.ticking = false; } }
+  private async tickOnce() { const c = this.conn; if (c && this.keyExpiry && !this.remote && Date.now() > this.keyExpiry) { await this.drop(); return; }
+    if (!c || this.ticking || this.guard.killed) return; this.ticking = true; try { await c.chain.refresh('venues'); await c.trader.tick(); } catch { /* the next tick retries; a failed evaluation never trades */ } finally { this.ticking = false; } }
   /** After a restart the engine reloads saved orders; make sure their tokens have venues again. */
   private async reloadTokens() { const c = this.conn; if (!c) return; try { await c.chain.refresh('venues'); for (const m of new Set([...c.trader.listOrders({ status: 'active' }).map(o => o.token), ...c.trader.listTwaps().filter(t => !t.done && !t.cancelled).map(() => '')].filter(Boolean))) await c.chain.addToken(m); } catch { /* shown as "no venue" on the order until it works */ } }
   private async decimals(mint: string) { let d = this.decs.get(mint); if (d === undefined) { d = (await mintFacts(this.need().rpc, mint)).decimals ?? 0; this.decs.set(mint, d); } return d; }

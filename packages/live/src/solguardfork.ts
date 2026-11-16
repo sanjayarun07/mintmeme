@@ -1,7 +1,7 @@
 /** GUARDED TRADING PATH, END TO END, ON A LOCAL SOLANA VALIDATOR WITH FAKE SOL. The same `SolMainnet` module the terminal uses (key connect, limits, kill switch, prepare, confirm) is pointed at a loopback
  *  solana-test-validator that has the pump.fun program and one live curve cloned into it. Throwaway key, fake funds, nothing reaches mainnet and no mainnet trade is made.
  *  usage: npm run verify:sol-guard (needs ALCHEMY_API_KEY in .env and solana-test-validator). Writes a redacted report to docs/live-verification/. */
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -85,6 +85,26 @@ async function main() {
     check('O9 a TWAP buy of 2 slices spaced 12 seconds apart fills both slices and the wallet receives tokens', await until(async () => ((await ords()).twaps.find((t: any) => t.id === tw.twap.id)?.filled ?? 0) >= 2, 90_000) && (await hold()) > h2, JSON.stringify((await ords()).twaps).slice(0, 200));
     check('O10 a TWAP whose slices exceed the per-trade limit is refused', await refused(() => sm.createOrder({ ...K, ack: true, type: 'twap', side: 'buy', mint, sol: '0.2', slices: 2, intervalMin: 1 }), /per-trade limit/));
     await sm.disconnect(K);
+
+    // ---- trading key: a server-held throwaway wallet so orders fire with no browser open. Local validator, fake SOL. ----
+    const air = async (addr: string, sol: number) => { const sg = await rpc.call<string>('requestAirdrop', [addr, Math.round(sol * 1e9)]); for (let i = 0; i < 80; i++) { const s: any = await rpc.call('getSignatureStatuses', [[sg]]); if (s.value[0]?.confirmationStatus) return; await sleep(500); } };
+    const kd = (sm as any).dir as string, kf = join(kd, 'trading-key.json');
+    check('K1 before creation there is no trading key', (sm.tradingKeyInfo() as any).exists === false);
+    const ki = sm.tradingKeyCreate({ hours: 24 }) as any, kj = JSON.parse(readFileSync(kf, 'utf8')), kp = Uint8Array.from(kj.keypair as number[]);
+    check('K2 creating a key saves a Solana CLI keypair file readable only by the owner, and the response never contains the key', ki.exists && (statSync(kf).mode & 0o777) === 0o600 && kp.length === 64 && base58(kp.slice(32)) === ki.address && !JSON.stringify(ki).includes(String(kj.keypair[0]) + ',' + String(kj.keypair[1])), JSON.stringify(ki).slice(0, 160));
+    check('K3 a second create is refused so a funded key is never overwritten', await refused(async () => { sm.tradingKeyCreate({}); }, /already exists/));
+    const ku = await sm.tradingKeyUse() as any, KS = { __session: ku.__setSession as string };
+    check('K4 using it connects that address as a key signer and lowers the limits to the key ceilings', ku.connected && ku.address === ki.address && ku.signer === 'key' && ku.tradingKey.active && ku.limits.dailyCapLamports === '250000000', JSON.stringify(ku.limits));
+    check('K5 limits above the trading-key ceilings are refused', await refused(async () => { sm.setLimits({ ...KS, maxTradeSol: '0.06', dailyCapSol: '0.1', maxSlippagePct: '5' }); }, /cannot exceed/));
+    await air(ki.address, 0.3); await sm.killSwitch(false, KS).catch(() => {});
+    const holdK = async () => (await rpc.call<any>('getTokenAccountsByOwner', [ki.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]).catch(() => ({ value: [] }))).value.reduce((x: bigint, a: any) => x + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
+    const kh0 = await holdK(), kord = await sm.createOrder({ ...KS, ack: true, type: 'limit_buy', mint, sol: '0.01', price: px * 1.5 }) as any;
+    check('K6 with the trading key a limit buy fires by itself, with no browser and no wallet approval, and the key receives tokens', await until(async () => (await sm.listOrders(KS) as any).orders.find((o: any) => o.id === kord.order.id)?.status === 'fired') && await until(async () => (await holdK()) > kh0), JSON.stringify((await sm.listOrders(KS) as any).orders.find((o: any) => o.id === kord.order.id)).slice(0, 200));
+    (sm as any).keyExpiry = Date.now() - 1; check('K7 when the key expires the server disconnects it by itself', await until(async () => !(await sm.status()).connected, 15_000));
+    const kj2 = JSON.parse(readFileSync(kf, 'utf8')); kj2.expiresAt = Date.now() - 1000; writeFileSync(kf, JSON.stringify(kj2), { mode: 0o600 });
+    check('K8 an expired key cannot be used', await refused(() => sm.tradingKeyUse(), /expired/));
+    kj2.expiresAt = Date.now() + 3_600_000; writeFileSync(kf, JSON.stringify(kj2), { mode: 0o600 }); await air(ki.address, 0.6);
+    check('K9 a key holding more than the balance ceiling is refused and nothing stays connected', await refused(() => sm.tradingKeyUse(), /limited to/) && !(await sm.status()).connected);
     const pass = checks.every(c => c.pass); mkdirSync('docs/live-verification', { recursive: true });
     const file = `docs/live-verification/${new Date().toISOString().replace(/[:.]/g, '-')}-sol-guard.md`;
     writeFileSync(file, ['# Guarded Solana trading path on a local validator', '', `Run: ${new Date().toISOString()}`, 'Node: local solana-test-validator with the pump.fun program and a live curve cloned. NOT mainnet. Fake SOL, throwaway key.', `Result: **${pass ? 'PASS' : 'FAIL'}** (${checks.filter(c => c.pass).length}/${checks.length})`, '', ...checks.map(c => `- ${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.pass ? '' : ' - ' + c.detail}`), '',
