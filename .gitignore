@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+node_modules/
+
+.devnet-wallets.json
+.cache/
+.claude/
+*.log
+test-ledger/

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MemeDesk test console</title>
+<style>
+:root{--bg:#f6f7f9;--panel:#fff;--ink:#14181f;--mut:#667085;--line:#e3e6eb;--acc:#0b6bcb;--ok:#13795b;--bad:#b42318;--warn:#a15c07;--chip:#eef1f5}
+@media (prefers-color-scheme:dark){:root{--bg:#0e1116;--panel:#161b22;--ink:#e6e9ee;--mut:#8b96a5;--line:#262d38;--acc:#4da3ff;--ok:#3ccf9a;--bad:#ff7b72;--warn:#e3a53b;--chip:#202734}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}
+header{display:flex;flex-wrap:wrap;gap:12px 28px;align-items:baseline;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:16px;margin:0}.sub{color:var(--mut);font-size:12px}
+.price{font-size:20px;font-variant-numeric:tabular-nums;font-weight:600}
+main{display:grid;grid-template-columns:minmax(300px,380px) 1fr;gap:16px;padding:16px 20px;max-width:1400px;margin:0 auto}
+@media(max-width:900px){main{grid-template-columns:1fr;padding:12px 16px}}
+section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:16px}
+h2{font-size:13px;margin:0 0 10px;letter-spacing:.02em}
+label{display:block;font-size:12px;color:var(--mut);margin:8px 0 3px}
+input,select{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+.row{display:flex;gap:8px}.row>*{flex:1}
+button{padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--chip);color:var(--ink);font:inherit;font-weight:600;cursor:pointer}
+button.p{background:var(--acc);border-color:var(--acc);color:#fff}button.d{color:var(--bad)}button:disabled{opacity:.5;cursor:default}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px}.num{text-align:right}
+.tag{display:inline-block;padding:1px 7px;border-radius:10px;background:var(--chip);font-size:12px}
+.finalized,.fired,.filled{color:var(--ok)}.failed,.expired{color:var(--bad)}.active,.pending{color:var(--warn)}.cancelled{color:var(--mut)}
+#msg{position:sticky;top:0;z-index:5;padding:9px 20px;font-size:13px;display:none;border-bottom:1px solid var(--line);background:var(--chip)}
+.hint{color:var(--mut);font-size:12px;margin:6px 0 0}.mono{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}.tabs button{font-weight:500;padding:5px 10px}.tabs button[aria-pressed=true]{background:var(--acc);color:#fff;border-color:var(--acc)}
+.checks label{display:flex;align-items:center;gap:8px;margin:4px 0;color:var(--ink)}.checks input{width:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>MemeDesk test console</h1>
+  <span class="sub" id="chain">connecting...</span>
+  <span>Price <span class="price" id="price">-</span> <span class="sub">SOL per token</span></span>
+  <span class="sub" id="mint"></span>
+  <span class="sub">Local only: fake SOL, throwaway keys. Nothing here can touch real funds.</span>
+</header>
+<div id="msg" role="status" aria-live="polite"></div>
+<main>
+<div>
+  <section>
+    <h2>Market trade</h2>
+    <label for="mw">Wallet</label><select id="mw"></select>
+    <div class="row"><div><label for="bamt">Buy with (SOL)</label><input id="bamt" value="1" inputmode="decimal"></div><div><label for="slip">Slippage (%)</label><input id="slip" value="3" inputmode="decimal"></div></div>
+    <div class="row" style="margin-top:10px"><button class="p" id="buy">Buy</button><button id="quote">Quote only</button></div>
+    <div class="row"><div><label for="spct">Sell (% of balance)</label><input id="spct" value="50" inputmode="decimal"></div><div style="align-self:end"><button id="sell" style="width:100%">Sell</button></div></div>
+    <p class="hint" id="qout"></p>
+  </section>
+  <section>
+    <h2>Orders</h2>
+    <div class="tabs" id="otabs"></div>
+    <label for="ow">Wallet</label><select id="ow"></select>
+    <div class="row"><div><label for="oamt" id="oamtl">Amount</label><input id="oamt" value="1" inputmode="decimal"></div><div><label for="opx" id="opxl">Trigger (% from current price)</label><input id="opx" value="-10" inputmode="decimal"></div></div>
+    <button class="p" id="oplace" style="margin-top:10px;width:100%">Place order</button>
+    <p class="hint" id="ohint"></p>
+  </section>
+  <section>
+    <h2>Bulk buy and TWAP</h2>
+    <div class="checks" id="bw"></div>
+    <label for="btot">Bulk total (SOL, split equally)</label><input id="btot" value="1.5" inputmode="decimal">
+    <button id="bulk" style="margin-top:8px;width:100%">Bulk buy</button>
+    <div class="row"><div><label for="tt">TWAP total (SOL)</label><input id="tt" value="0.6"></div><div><label for="tn">Slices</label><input id="tn" value="3"></div><div><label for="ti">Every (s)</label><input id="ti" value="20"></div></div>
+    <button id="twap" style="margin-top:8px;width:100%">Start TWAP (uses the wallet above)</button>
+  </section>
+  <section>
+    <h2>Move the market</h2>
+    <p class="hint" style="margin-top:0">The "Market mover" wallet trades the same curve so you can trigger orders.</p>
+    <div class="row"><input id="mvsol" value="8"><button id="up" class="p">Buy up (SOL)</button><button id="down">Sell all back</button></div>
+    <div class="row" style="margin-top:10px"><button id="pause">Pause new buys</button><button id="resume">Resume buys</button></div>
+  </section>
+</div>
+<div>
+  <section><h2>Wallets</h2><table><thead><tr><th>Wallet</th><th class="num">SOL</th><th class="num">Token</th><th>Address</th></tr></thead><tbody id="wtab"></tbody></table></section>
+  <section><h2>Orders</h2><table><thead><tr><th>Id</th><th>Kind</th><th>Status</th><th class="num">Trigger (SOL)</th><th class="num">Amount</th><th></th></tr></thead><tbody id="otab"></tbody></table><p class="hint" id="oempty"></p></section>
+  <section><h2>Trades</h2><table><thead><tr><th>Key</th><th>State</th><th>Origin</th><th class="num">In</th><th class="num">Received</th><th>Detail</th></tr></thead><tbody id="ttab"></tbody></table></section>
+</div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let S = null, kind = 'limit-buy', last = 0;
+const KINDS = { 'limit-buy': ['Limit buy', 'Spend (SOL)', 'Fires when the price is at or below the trigger. Try -5.'], 'limit-sell': ['Limit sell', 'Sell (tokens)', 'Fires when the price is at or above the trigger. Try +20.'], 'stop-loss': ['Stop loss', 'Sell (tokens)', 'Fires when the price falls to the trigger. Try -10.'], 'take-profit': ['Take profit', 'Sell (tokens)', 'Sells at a profit target. Try +30.'], 'trailing-stop': ['Trailing stop', 'Sell (tokens)', 'Trigger = how far (%) the price may fall from its peak. Try 3.'] };
+const fmt = (raw, dec, p = 4) => { if (raw == null) return '-'; const n = Number(BigInt(raw)) / 10 ** dec; return n.toLocaleString(undefined, { maximumFractionDigits: p }); };
+const sol = x => BigInt(Math.round(Number(x) * 1e9)).toString(), tok = x => BigInt(Math.round(Number(x) * 1e6)).toString();
+const say = (t, bad) => { const m = $('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t; m.style.color = bad ? 'var(--bad)' : 'var(--ink)'; if (t) { clearTimeout(say.t); say.t = setTimeout(() => m.style.display = 'none', 9000); } };
+async function api(method, path, body, key) {
+  const r = await fetch('/api' + path, { method, headers: { 'content-type': 'application/json', ...(key ? { 'idempotency-key': key } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error(j.error?.message || j.error || ('HTTP ' + r.status)); return j;
+}
+const wsel = () => { for (const id of ['mw', 'ow']) { const el = $(id), v = el.value; el.innerHTML = S.wallets.slice(0, 3).map(w => `<option value="${w.id}">${w.label}</option>`).join(''); if (v) el.value = v; } };
+function render() {
+  $('chain').textContent = S.chain; $('price').textContent = S.priceNative ? S.priceNative.toPrecision(6) : '-'; $('mint').textContent = 'token ' + S.mint.slice(0, 6) + '...' + S.mint.slice(-4);
+  if (!$('mw').options.length) { wsel(); $('bw').innerHTML = S.wallets.slice(0, 3).map(w => `<label><input type="checkbox" value="${w.id}" checked> ${w.label}</label>`).join(''); }
+  $('wtab').innerHTML = S.wallets.map(w => `<tr><td>${w.label}</td><td class="num">${fmt(w.native, 9, 3)}</td><td class="num">${fmt(w.token, 6, 2)}</td><td class="mono">${w.id.slice(0, 6)}...${w.id.slice(-4)}</td></tr>`).join('');
+  const px = e => e ? (Number(BigInt(e)) / 1e18 * 1e6 / 1e9).toPrecision(5) : '-';
+  $('otab').innerHTML = S.orders.map(o => `<tr><td class="mono">${o.id.replace('u1.', '')}</td><td>${o.kind}</td><td class="${o.status}">${o.status}${o.peakE18 ? `<div class="hint">peak ${px(o.peakE18)}</div>` : ''}</td><td class="num">${o.trailBps ? (o.trailBps / 100) + '% trail' : px(o.triggerPriceE18)}</td><td class="num">${fmt(o.amount, o.kind === 'limit_buy' ? 9 : 6, 3)}</td><td>${o.status === 'active' ? `<button class="d" data-c="${o.id}">Cancel</button>` : ''}</td></tr>`).join('');
+  $('oempty').textContent = S.orders.length ? '' : 'No orders yet. Place one on the left.';
+  $('ttab').innerHTML = S.trades.map(t => `<tr><td class="mono">${t.key.replace('u1.', '').slice(0, 22)}</td><td class="${t.state}">${t.state}</td><td>${t.origin}</td><td class="num">${t.tokenIn === 'SOL' ? fmt(t.amountIn, 9, 4) + ' SOL' : fmt(t.amountIn, 6, 2) + ' tok'}</td><td class="num">${t.received ? (t.tokenIn === 'SOL' ? fmt(t.received, 6, 2) + ' tok' : fmt(t.received, 9, 4) + ' SOL') : '-'}</td><td class="hint">${t.failure ? t.failure.slice(0, 90) : ''}</td></tr>`).join('');
+  $('pause').disabled = S.entriesPaused; $('resume').disabled = !S.entriesPaused;
+}
+async function poll() { try { S = await (await fetch('/ui/state')).json(); render(); } catch { $('chain').textContent = 'server not reachable'; } }
+const slipBps = () => Math.round(Number($('slip').value) * 100);
+const act = (btn, fn) => btn.addEventListener('click', async () => { btn.disabled = true; try { await fn(); await poll(); } catch (e) { say(e.message, true); } btn.disabled = false; });
+act($('buy'), async () => { const t = await api('POST', '/v1/trades/buy', { walletId: $('mw').value, token: S.mint, amount: sol($('bamt').value), slippageBps: slipBps() }, 'ui-' + Date.now()); say(`Buy ${t.state}${t.fill ? ': received ' + fmt(t.fill.received, 6, 2) + ' tokens' : ''}${t.failure ? ': ' + t.failure : ''}`, t.state === 'failed'); });
+act($('sell'), async () => { const t = await api('POST', '/v1/trades/sell', { walletId: $('mw').value, token: S.mint, pctBps: Math.round(Number($('spct').value) * 100), slippageBps: slipBps() }, 'ui-' + Date.now()); say(`Sell ${t.state}${t.fill ? ': received ' + fmt(t.fill.received, 9, 4) + ' SOL' : ''}${t.failure ? ': ' + t.failure : ''}`, t.state === 'failed'); });
+act($('quote'), async () => { const q = await api('POST', '/v1/quote', { side: 'buy', token: S.mint, amount: sol($('bamt').value), slippageBps: slipBps() }); $('qout').textContent = `You would receive about ${fmt(q.amountOut, 6, 2)} tokens (minimum ${fmt(q.minOut, 6, 2)}), price impact ${(q.priceImpactBps / 100).toFixed(2)}%, venue ${q.venue}.`; });
+$('otabs').innerHTML = Object.entries(KINDS).map(([k, v]) => `<button data-k="${k}" aria-pressed="${k === kind}">${v[0]}</button>`).join('');
+function setKind(k) { kind = k; for (const b of $('otabs').children) b.setAttribute('aria-pressed', b.dataset.k === k); $('oamtl').textContent = KINDS[k][1]; $('ohint').textContent = KINDS[k][2]; $('opxl').textContent = k === 'trailing-stop' ? 'Trail (%)' : 'Trigger (% from current price)'; $('oamt').value = k === 'limit-buy' ? '1' : '50000'; $('opx').value = { 'limit-buy': '-5', 'limit-sell': '20', 'stop-loss': '-10', 'take-profit': '30', 'trailing-stop': '3' }[k]; }
+$('otabs').addEventListener('click', e => { if (e.target.dataset.k) setKind(e.target.dataset.k); }); setKind(kind);
+act($('oplace'), async () => {
+  const w = $('ow').value, isBuy = kind === 'limit-buy', amount = isBuy ? sol($('oamt').value) : tok($('oamt').value), pct = Number($('opx').value);
+  const body = { walletId: w, token: S.mint, amount, slippageBps: 800 };
+  if (kind === 'trailing-stop') body.trailBps = Math.round(pct * 100); else body.priceE18 = (BigInt(S.priceE18) * BigInt(Math.round((100 + pct) * 100)) / 10000n).toString();
+  const o = await api('POST', '/v1/orders/' + kind, body); say(`Order ${o.id.replace('u1.', '')} placed (${o.status}). It fires on its own when the price condition is met.`);
+});
+$('otab').addEventListener('click', async e => { const id = e.target.dataset.c; if (!id) return; try { await api('DELETE', '/v1/orders/' + id.replace('u1.', '')); say('Order cancelled'); await poll(); } catch (x) { say(x.message, true); } });
+act($('bulk'), async () => { const ws = [...document.querySelectorAll('#bw input:checked')].map(x => x.value); const b = await api('POST', '/v1/bulk/buy', { token: S.mint, wallets: ws, total: sol($('btot').value), slippageBps: 800 }); say(`Bulk buy started across ${ws.length} wallets (id ${b.id}). Watch the Trades table.`); });
+act($('twap'), async () => { const t = await api('POST', '/v1/twap', { walletId: $('ow').value, token: S.mint, side: 'buy', total: sol($('tt').value), slices: Number($('tn').value), intervalS: Number($('ti').value), windowS: Number($('ti').value) * 4, slippageBps: 800 }); say(`TWAP ${t.id} started: one slice every ${$('ti').value} s.`); });
+const mv = dir => async () => { const r = await (await fetch('/ui/move', { method: 'POST', body: JSON.stringify({ dir, sol: $('mvsol').value }) })).json(); if (r.error) throw new Error(r.error); say(`Market mover ${dir === 'up' ? 'bought' : 'sold everything'}: ${r.state}`); };
+act($('up'), mv('up')); act($('down'), mv('down'));
+act($('pause'), async () => { await api('POST', '/v1/entries/pause'); say('New buys paused. Sells and stop losses still work.'); });
+act($('resume'), async () => { await api('POST', '/v1/entries/resume'); say('Buys resumed.'); });
+poll(); setInterval(poll, 1500);
+</script>
+</body>
+</html>

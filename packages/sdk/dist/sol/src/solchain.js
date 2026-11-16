@@ -1,0 +1,427 @@
+import { NATIVE, RpcError } from '../../core/src/index.js';
+import { base58, ataAddress, createAtaIdempotent, systemTransfer, syncNative, closeAccount, compileLegacy, unsignedTx, wireTx, raydiumSwapBaseIn, setComputeUnitLimit, setComputeUnitPrice, b58decode } from './tx.js';
+import { RaydiumVenue, loadPoolKeys, decodePoolState, AMM_STATUS_SWAP } from './raydium.js';
+import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMessage, decodeTable, gateInstructions, walletTokenAccountsAtRisk, unsignedV0, wireV0, JupiterVenue, JupiterRefused } from './jupiterswap.js';
+import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.js';
+import { PROGRAMS, pubkeyBytes } from './tx.js';
+import { decodeFeeConfig, PumpVenue, PUMP_PROGRAM, decodeCurve, decodeGlobal, pumpAddresses, untradableReason, buy as pumpBuy, quoteBuy, sell as pumpSell, createAtaIdempotent2 } from './pump.js';
+/** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
+export class SolJsonRpcError extends Error {
+    data;
+    constructor(message, data) {
+        super(message);
+        this.data = data;
+    }
+}
+/** Plain fetch JSON-RPC client (no read-only allowlist: use only against a node you control, e.g. a local test validator). */
+export class SolJsonRpc {
+    url;
+    fetchFn;
+    n = 0;
+    constructor(url, fetchFn = fetch) {
+        this.url = url;
+        this.fetchFn = fetchFn;
+    }
+    async call(method, params = []) {
+        const res = await this.fetchFn(this.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++this.n, method, params }) });
+        if (!res.ok)
+            throw new Error(`HTTP ${res.status} on ${method}`);
+        const j = await res.json();
+        if (j.error)
+            throw new SolJsonRpcError(j.error.message ?? JSON.stringify(j.error), j.error.data);
+        return j.result;
+    }
+}
+const b99 = (h) => b58decode(h);
+const FINAL = 32, TOKEN_ACCOUNT_SIZE = 165;
+export class SolanaChain {
+    rpc;
+    signer;
+    id;
+    family = 'solana';
+    time = 0;
+    block = 0;
+    finalityDepth;
+    state = { venues: new Map() };
+    keys = new Map();
+    rent;
+    cfg;
+    /** Signatures this process sent recently. Solana has no mempool query, so a just-sent tx is not visible for a moment: report it as pending instead of absent (avoids pointless identical resends). */
+    sentAt = new Map();
+    static VISIBILITY_GRACE_MS = 4000;
+    /** Set when the last Jupiter quote refresh failed (the Jupiter venue is then absent, so routing falls back to other venues). */
+    jupiterError;
+    constructor(cfg, rpc, signer) {
+        this.rpc = rpc;
+        this.signer = signer;
+        this.cfg = { ...cfg, pools: [...cfg.pools] };
+        this.id = cfg.id;
+        this.finalityDepth = cfg.finalityDepth ?? FINAL;
+    }
+    venues() { return [...this.state.venues.values()]; }
+    /** Add a pool to track. SnipeRunner passes `{ id, pair }`; the program defaults to the first configured pool's program. */
+    addPool(p) { const program = p.program ?? this.cfg.program ?? this.cfg.pools[0]?.program; if (!program)
+        throw new Error('no Raydium program configured for new pools'); if (!this.cfg.pools.some(x => x.id === p.id))
+        this.cfg.pools.push({ id: p.id, program }); }
+    removePool(id) { this.cfg.pools = this.cfg.pools.filter(x => x.id !== id); this.state.venues.delete(id); this.keys.delete(id); }
+    async rpcCall(method, params = []) { try {
+        return await this.rpc.call(method, params);
+    }
+    catch (e) {
+        if (e instanceof SolJsonRpcError)
+            throw e;
+        throw new RpcError(e.message);
+    } }
+    async refresh(what) {
+        const slot = await this.rpcCall('getSlot', [{ commitment: 'confirmed' }]);
+        this.block = slot;
+        let t = null;
+        try {
+            t = await this.rpcCall('getBlockTime', [slot]);
+        }
+        catch { /* block time unavailable for very fresh slots */ }
+        this.time = t ?? this.time ?? Math.floor(Date.now() / 1000);
+        if (!this.time)
+            this.time = Math.floor(Date.now() / 1000);
+        if (what !== 'venues')
+            return;
+        for (const p of this.cfg.pools) {
+            let k = this.keys.get(p.id);
+            if (!k) {
+                k = (await this.loadKeys(p)).keys;
+                this.keys.set(p.id, k);
+            }
+            const r = await this.rpcCall('getMultipleAccounts', [[p.id, k.baseVault, k.quoteVault], { encoding: 'base64', commitment: 'confirmed' }]);
+            const [pool, bv, qv] = r.value;
+            if (!pool || !bv || !qv)
+                throw new RpcError(`pool ${p.id} or its vaults are missing`);
+            const st = decodePoolState(Buffer.from(pool.data[0], 'base64')), amt = (a) => Buffer.from(a.data[0], 'base64').readBigUInt64LE(64);
+            const v = new RaydiumVenue(p.id, k, st.baseMint, st.quoteMint, amt(bv) - st.baseNeedTakePnl, amt(qv) - st.quoteNeedTakePnl, st.swapFeeNum, st.swapFeeDen, this.cfg.wsol, st.status === AMM_STATUS_SWAP && st.openTime <= BigInt(this.time), slot);
+            this.state.venues.set(p.id, v);
+        }
+        await this.refreshPump(slot);
+        await this.refreshJupiter();
+    }
+    /** Add a pump.fun curve to track (for example from a launch stream). */
+    addCurve(mint) { const m = this.cfg.pump?.mints ?? []; if (!m.includes(mint))
+        this.cfg.pump = { mints: [...m, mint] }; }
+    removeCurve(mint) { this.cfg.pump = { mints: (this.cfg.pump?.mints ?? []).filter(x => x !== mint) }; this.state.venues.delete(`pump:${mint}`); }
+    async refreshPump(slot) {
+        const mints = this.cfg.pump?.mints ?? [];
+        if (!mints.length)
+            return;
+        const g = pumpAddresses(mints[0], mints[0], PROGRAMS.token).global; // the global address does not depend on the mint
+        const gi = await this.rpcCall('getAccountInfo', [g, { encoding: 'base64', commitment: 'confirmed' }]);
+        if (!gi?.value)
+            throw new RpcError('the pump.fun Global account is missing on this chain');
+        if (gi.value.owner !== PUMP_PROGRAM)
+            throw new RpcError(`the pump.fun Global account is owned by ${gi.value.owner}, not the pump program`);
+        const global = decodeGlobal(Buffer.from(gi.value.data[0], 'base64'));
+        let fees, feeErr;
+        try {
+            const fa = pumpAddresses(mints[0], mints[0], PROGRAMS.token).feeConfig;
+            const fi = await this.rpcCall('getAccountInfo', [fa, { encoding: 'base64', commitment: 'confirmed' }]);
+            if (!fi?.value)
+                throw new Error('fee config account missing');
+            fees = decodeFeeConfig(Buffer.from(fi.value.data[0], 'base64'));
+        }
+        catch (e) {
+            feeErr = `pump.fun fee schedule not readable: ${e.message}`;
+        }
+        for (const mint of mints) {
+            const curveAddr = pumpAddresses(mint, mint, PROGRAMS.token).bondingCurve;
+            const r = await this.rpcCall('getMultipleAccounts', [[curveAddr, mint], { encoding: 'base64', commitment: 'confirmed' }]);
+            const [c, m] = r.value;
+            if (!c || !m) {
+                this.state.venues.delete(`pump:${mint}`);
+                continue;
+            }
+            if (c.owner !== PUMP_PROGRAM)
+                throw new RpcError(`curve ${curveAddr} is owned by ${c.owner}, not the pump program`);
+            const curve = decodeCurve(Buffer.from(c.data[0], 'base64'));
+            this.state.venues.set(`pump:${mint}`, new PumpVenue(`pump:${mint}`, mint, m.owner, curve, global, feeErr ?? untradableReason(curve, m.owner), slot, fees));
+        }
+    }
+    pumpInstructions(tx, v, budget) {
+        const w = tx.wallet, ctx = { user: w, mint: v.mint, tokenProgram: v.tokenProgram, curve: v.curve, feeRecipient: v.global.feeRecipient, buybackRecipient: v.global.buybackRecipients[0] };
+        if (tx.tokenIn === NATIVE && tx.tokenOut === v.mint) {
+            const tokens = quoteBuy(tx.amountIn, v.curve, v.totalFeeBps).tokens;
+            if (tokens < tx.minOut || tokens === 0n)
+                throw new Error('pump.fun buy would receive fewer tokens than the minimum');
+            return [...budget, createAtaIdempotent2(w, w, v.mint, v.tokenProgram), pumpBuy(ctx, tokens, tx.amountIn)];
+        }
+        if (tx.tokenIn === v.mint && tx.tokenOut === NATIVE)
+            return [...budget, pumpSell(ctx, tx.amountIn, tx.minOut)];
+        throw new Error(`pump.fun curve ${v.mint} trades only SOL for that token and back`);
+    }
+    async refreshJupiter() {
+        const j = this.cfg.jupiter;
+        if (!j)
+            return;
+        this.jupiterError = undefined;
+        for (const p of j.pairs) {
+            const id = `jup:${p.inMint.slice(0, 6)}>${p.outMint.slice(0, 6)}`;
+            try {
+                const q = await fetchJupiterQuote({ inputMint: p.inMint, outputMint: p.outMint, amount: p.refAmount, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
+                this.state.venues.set(id, new JupiterVenue(id, p.inMint, p.outMint, this.cfg.wsol, p.refAmount, q.outAmount, Math.round(Math.abs(q.priceImpactPct) * 100), q.contextSlot));
+            }
+            catch (e) {
+                this.state.venues.delete(id);
+                this.jupiterError = e.message;
+            }
+        }
+    }
+    loadKeys(p) { return loadPoolKeys(this.rpc, p.id, p.program).catch(e => { throw e instanceof SolJsonRpcError ? e : new RpcError(e.message); }); }
+    async confirmedNonce() { return 0; }
+    async balanceOf(wallet, token) {
+        if (token === NATIVE)
+            return BigInt((await this.rpcCall('getBalance', [wallet, { commitment: 'confirmed' }])).value);
+        const r = await this.rpcCall('getTokenAccountsByOwner', [wallet, { mint: token }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
+        return r.value.reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
+    }
+    async needsApproval() { return undefined; }
+    res(t) { return t === NATIVE ? this.cfg.wsol : t; }
+    /** Instructions for a SimTx. Throws if it cannot be built (unknown venue, platform fee requested). */
+    instructions(tx) {
+        const w = tx.wallet, budget = [setComputeUnitLimit(this.cfg.computeUnitLimit ?? 300_000)];
+        if ((this.cfg.priorityMicroLamports ?? 0n) > 0n)
+            budget.push(setComputeUnitPrice(this.cfg.priorityMicroLamports));
+        if (tx.kind === 'noop')
+            return [systemTransfer(w, w, 0n)];
+        if (tx.kind === 'approve')
+            throw new Error('Solana has no token allowances: an approve transaction should never be requested');
+        if (tx.platformFeeBps > 0)
+            throw new Error('platform fee collection is not implemented on this chain (set the platform fee to 0 for real-node trading)');
+        const pv = this.state.venues.get(tx.venue);
+        if (pv instanceof PumpVenue)
+            return this.pumpInstructions(tx, pv, budget);
+        const v = this.state.venues.get(tx.venue);
+        if (!(v instanceof RaydiumVenue))
+            throw new Error(`venue ${tx.venue} is not loaded (refresh venues first)`);
+        const wsol = this.cfg.wsol, inM = this.res(tx.tokenIn), outM = this.res(tx.tokenOut), wsolAta = ataAddress(w, wsol), inA = ataAddress(w, inM), outA = ataAddress(w, outM);
+        const ixs = [...budget];
+        if (tx.tokenIn === NATIVE)
+            ixs.push(createAtaIdempotent(w, w, wsol), createAtaIdempotent(w, w, outM), systemTransfer(w, wsolAta, tx.amountIn), syncNative(wsolAta));
+        else if (tx.tokenOut === NATIVE)
+            ixs.push(createAtaIdempotent(w, w, wsol));
+        else
+            ixs.push(createAtaIdempotent(w, w, outM));
+        ixs.push(raydiumSwapBaseIn(v.keys, inA, outA, w, tx.amountIn, tx.minOut));
+        if (tx.tokenIn === NATIVE || tx.tokenOut === NATIVE)
+            ixs.push(closeAccount(wsolAta, w, w));
+        return ixs;
+    }
+    jupVenue(tx) { const v = tx.kind === 'noop' || tx.kind === 'approve' ? undefined : this.state.venues.get(tx.venue); return v instanceof JupiterVenue ? v : undefined; }
+    async accountsAt(addrs) {
+        const out = [];
+        for (let i = 0; i < addrs.length; i += 100) {
+            const r = await this.rpcCall('getMultipleAccounts', [addrs.slice(i, i + 100), { encoding: 'base64', commitment: 'confirmed' }]);
+            for (const a of r.value)
+                out.push(a ? { lamports: a.lamports, owner: a.owner, data: Buffer.from(a.data[0], 'base64') } : null);
+        }
+        return out;
+    }
+    /** Ask Jupiter for the route, compile it ourselves, run the safety gate on the exact bytes to be signed, then SIMULATE and check the wallet's balances. Throws JupiterRefused to stop. */
+    async buildJupiter(tx, v) {
+        const j = this.cfg.jupiter, w = tx.wallet, wsol = this.cfg.wsol, inM = this.res(tx.tokenIn), outM = this.res(tx.tokenOut);
+        if (tx.platformFeeBps > 0)
+            throw new JupiterRefused('platform fee collection is not implemented on this chain (set the platform fee to 0)');
+        if (!v.supports(tx.tokenIn, tx.tokenOut))
+            throw new JupiterRefused('this Jupiter venue does not cover that pair');
+        const allowed = await fetchRoutableProgramIds(j);
+        const ask = (slippageBps) => fetchBuild({ ...j, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps });
+        // Slippage is set so Jupiter's OWN minimum output is at least the engine's minOut: tighter than the engine allows is fine, looser never is.
+        let b = await ask(50);
+        if (b.outAmount < tx.minOut)
+            throw new JupiterRefused(`Jupiter now quotes ${b.outAmount} out, below your minimum ${tx.minOut}: the price moved`);
+        if (b.minOut < tx.minOut) {
+            const need = Number((b.outAmount - tx.minOut) * 10000n / b.outAmount);
+            if (need < 1)
+                throw new JupiterRefused('the allowed slippage is under 1 bp: Jupiter cannot honour it');
+            b = await ask(need);
+            if (b.minOut < tx.minOut)
+                throw new JupiterRefused(`Jupiter's minimum output ${b.minOut} is below yours (${tx.minOut}): refusing`);
+        }
+        // Lookup tables come from the chain; what Jupiter claims about them must agree.
+        const ids = b.claimedTables.map(t => t.key), infos = await this.accountsAt(ids), tables = [];
+        ids.forEach((id, i) => {
+            const a = infos[i];
+            if (!a)
+                throw new JupiterRefused(`lookup table ${id} does not exist on chain`);
+            const t = decodeTable(id, a.data);
+            b.claimedTables[i].addresses.forEach((x, k) => { if (t.addresses[k] !== x)
+                throw new JupiterRefused(`lookup table ${id} on chain differs from what Jupiter described`); });
+            tables.push(t);
+        });
+        const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+        const message = compileV0(w, b.ixs, b99(bh.value.blockhash), tables);
+        const final = resolveMessage(parseMessage(message), tables);
+        const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
+        const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM), outAta = ataAddress(w, outM), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
+        const route = final[gate.swapIndex], cand = route.accounts.filter(a => a.isWritable && !a.isSigner).map(a => a.pubkey), cinfo = await this.accountsAt(cand), wb = pubkeyBytes(w);
+        const mine = new Set(cand.filter((a, i) => { const x = cinfo[i]; return !!x && x.owner === PROGRAMS.token && x.data.length === 165 && x.data.subarray(32, 64).equals(Buffer.from(wb)); }));
+        const risk = walletTokenAccountsAtRisk(route, w, okSet, a => mine.has(a));
+        if (risk.length)
+            throw new JupiterRefused(`the route writes our token account(s) ${risk.join(', ')} that this swap is not about`);
+        // Simulate and check the wallet's balances: output at least minOut, input at most the intent.
+        const watch = [w, ...(tx.tokenIn === NATIVE ? [] : [inAta]), ...(tx.tokenOut === NATIVE ? [] : [outAta])];
+        const pre = await this.accountsAt(watch);
+        const sim = await this.rpcCall('simulateTransaction', [Buffer.from(unsignedV0(message)).toString('base64'), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64', accounts: { encoding: 'base64', addresses: watch } }]);
+        if (sim.value.err)
+            throw new JupiterRefused(`simulation failed: ${JSON.stringify(sim.value.err)}${sim.value.logs?.length ? `: ${sim.value.logs[sim.value.logs.length - 1]}` : ''}`);
+        const post = sim.value.accounts.map(a => a ? { lamports: BigInt(a.lamports), data: Buffer.from(a.data[0], 'base64') } : null);
+        const tok = (a) => (a && a.data.length >= 72 ? a.data.readBigUInt64LE(64) : 0n), lam = (a) => BigInt(a?.lamports ?? 0);
+        const feeAll = 5000n + gate.priorityLamports, rent = BigInt(gate.createdNonWsol) * await this.rentExempt();
+        let k = 1;
+        if (tx.tokenIn === NATIVE) {
+            const spent = lam(pre[0]) - lam(post[0]);
+            if (spent > tx.amountIn + feeAll + rent)
+                throw new JupiterRefused(`simulated SOL spend ${spent} exceeds the intent ${tx.amountIn} plus fees ${feeAll} and new token-account rent ${rent}`);
+        }
+        else {
+            const spent = tok(pre[k]) - tok(post[k]);
+            k++;
+            if (spent > tx.amountIn)
+                throw new JupiterRefused(`simulated token spend ${spent} exceeds the intent ${tx.amountIn}`);
+        }
+        let got;
+        if (tx.tokenOut === NATIVE)
+            got = lam(post[0]) - lam(pre[0]) + feeAll + rent;
+        else
+            got = tok(post[k]) - tok(pre[k]);
+        if (tx.tokenIn === NATIVE && tx.tokenOut === NATIVE)
+            throw new JupiterRefused('SOL to SOL is not a swap');
+        if (got < tx.minOut)
+            throw new JupiterRefused(`simulated output ${got} is below the minimum ${tx.minOut}`);
+        return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
+    }
+    async simulate(tx) {
+        const jv = this.jupVenue(tx);
+        if (jv) {
+            const rz = (status, reason) => ({ hash: 'sim', status, reason, block: this.block + 1, deltas: {}, network: 0n, platformFee: 0n, venueFee: 0n });
+            try {
+                const r = await this.buildJupiter(tx, jv);
+                return { block: this.block, receipt: { ...rz('success'), deltas: tx.tokenOut === NATIVE ? {} : { [this.res(tx.tokenOut)]: r.simulatedOut } } };
+            }
+            catch (e) {
+                if (e instanceof JupiterRefused || e instanceof SolJsonRpcError)
+                    return { block: this.block, receipt: rz('reverted', e.message) };
+                throw e;
+            }
+        }
+        const zero = (status, reason) => ({ hash: 'sim', status, reason, block: this.block + 1, deltas: {}, network: 0n, platformFee: 0n, venueFee: 0n });
+        let ixs;
+        try {
+            ixs = this.instructions(tx);
+        }
+        catch (e) {
+            return { block: this.block, receipt: zero('reverted', e.message) };
+        }
+        try {
+            const raw = Buffer.from(unsignedTx(compileLegacy(tx.wallet, ixs))).toString('base64');
+            const r = await this.rpcCall('simulateTransaction', [raw, { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64' }]);
+            if (r.value.err)
+                return { block: this.block, receipt: zero('reverted', `${JSON.stringify(r.value.err)}${r.value.logs?.length ? `: ${r.value.logs[r.value.logs.length - 1]}` : ''}`) };
+            return { block: this.block, receipt: zero('success') };
+        }
+        catch (e) {
+            if (!(e instanceof SolJsonRpcError))
+                throw e;
+            return { block: this.block, receipt: zero('reverted', e.message) };
+        }
+    }
+    async prepare(tx) {
+        const jv = this.jupVenue(tx);
+        if (jv) {
+            const { message } = await this.buildJupiter(tx, jv);
+            const sig = this.signer.sign(tx.wallet, message);
+            return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) };
+        }
+        const ixs = this.instructions(tx);
+        const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+        const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = this.signer.sign(tx.wallet, message);
+        return { raw: Buffer.from(wireTx(message, [sig])).toString('base64'), hash: base58(sig) };
+    }
+    async submit(tx) {
+        if (!tx.raw)
+            throw new Error('transaction was not prepared (no raw bytes)');
+        this.sentAt.set(tx.hash, Date.now());
+        try {
+            const h = await this.rpcCall('sendTransaction', [tx.raw, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 0 }]);
+            if (h !== tx.hash)
+                throw new Error(`node returned signature ${h} but we computed ${tx.hash}: refusing to track a different transaction`);
+            return h;
+        }
+        catch (e) {
+            if (e instanceof RpcError || !(e instanceof SolJsonRpcError))
+                throw e;
+            if (/AlreadyProcessed|already been processed/i.test(e.message))
+                return tx.hash; // identical bytes already landed: idempotent success
+            if (/Blockhash not found|BlockhashNotFound/i.test(e.message))
+                throw new Error(`blockhash expired or unknown: this transaction can never land (${e.message})`);
+            throw new Error(e.message);
+        }
+    }
+    async status(hash) { const r = await this.rpcCall('getSignatureStatuses', [[hash], { searchTransactionHistory: true }]); return r.value[0]; }
+    async lookup(hash) {
+        if (await this.status(hash))
+            return 'included';
+        const t = this.sentAt.get(hash);
+        return t !== undefined && Date.now() - t < SolanaChain.VISIBILITY_GRACE_MS ? 'pending' : 'none';
+    }
+    async confirmations(hash) {
+        const s = await this.status(hash);
+        if (!s)
+            return 0;
+        if (s.confirmationStatus === 'finalized' || s.confirmations === null)
+            return this.finalityDepth;
+        return Math.min(this.finalityDepth - 1, (s.confirmations ?? 0) + 1);
+    }
+    async rentExempt() { return this.rent ??= BigInt(await this.rpcCall('getMinimumBalanceForRentExemption', [TOKEN_ACCOUNT_SIZE])); }
+    /** Receipt -> the wallet's balance deltas. NATIVE = lamports, so it includes the fee and any rent paid; `network` = fee + rent of token accounts the tx created and left open. */
+    async receipt(hash) {
+        const s = await this.status(hash);
+        if (!s)
+            return undefined;
+        const t = await this.rpcCall('getTransaction', [hash, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);
+        if (!t)
+            return undefined;
+        const m = t.meta, keys = t.transaction.message.accountKeys, wallet = keys[0], block = t.slot, fee = BigInt(m.fee);
+        const deltas = { [NATIVE]: BigInt(m.postBalances[0]) - BigInt(m.preBalances[0]) };
+        if (m.err)
+            return { hash, status: 'reverted', reason: `${JSON.stringify(m.err)}${m.logMessages?.length ? `: ${m.logMessages[m.logMessages.length - 1]}` : ''}`, block, deltas, network: fee, platformFee: 0n, venueFee: 0n };
+        const add = (mint, d) => { deltas[mint] = (deltas[mint] ?? 0n) + d; };
+        const pre = new Set(m.preTokenBalances.map(b => b.accountIndex));
+        let created = 0n, createdRent = 0n;
+        for (const b of m.preTokenBalances)
+            if (b.owner === wallet)
+                add(b.mint, -BigInt(b.uiTokenAmount.amount));
+        for (const b of m.postTokenBalances)
+            if (b.owner === wallet) {
+                add(b.mint, BigInt(b.uiTokenAmount.amount));
+                if (!pre.has(b.accountIndex) && b.mint !== this.cfg.wsol) {
+                    created++;
+                    createdRent += BigInt(m.postBalances[b.accountIndex] ?? 0);
+                }
+            }
+        for (const k of Object.keys(deltas))
+            if (k !== NATIVE && deltas[k] === 0n)
+                delete deltas[k];
+        const tokenIdx = new Set([...m.postTokenBalances, ...m.preTokenBalances].map(b => b.accountIndex));
+        let otherRent = 0n;
+        for (let i = 1; i < keys.length; i++)
+            if (!tokenIdx.has(i) && BigInt(m.preBalances[i] ?? 0) === 0n && BigInt(m.postBalances[i] ?? 0) > 0n)
+                otherRent += BigInt(m.postBalances[i]); // program accounts the tx created and left open (pump.fun's per-user volume accumulator, for one)
+        const network = fee + otherRent + (createdRent > 0n ? createdRent : created * await this.rentExempt()); // rent actually paid for the new token accounts (a Token-2022 account is bigger than a classic one)
+        let venueFee = 0n;
+        for (const v of this.state.venues.values())
+            if (v instanceof RaydiumVenue) {
+                const spent = deltas[v.baseMint] < 0n ? -deltas[v.baseMint] : deltas[v.quoteMint] < 0n ? -deltas[v.quoteMint] : (v.baseMint === this.cfg.wsol || v.quoteMint === this.cfg.wsol) && deltas[NATIVE] < 0n ? -deltas[NATIVE] - network : 0n;
+                if (spent > 0n && (deltas[v.baseMint] !== undefined || deltas[v.quoteMint] !== undefined)) {
+                    venueFee = spent * v.feeNum / v.feeDen;
+                    break;
+                }
+            }
+        return { hash, status: 'success', block, deltas, network, platformFee: 0n, venueFee };
+    }
+}

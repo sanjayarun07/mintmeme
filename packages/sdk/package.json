@@ -1,0 +1,22 @@
+{
+  "name": "memedesk-sdk",
+  "version": "0.1.0",
+  "description": "Trading SDK and HTTP client for the MemeDesk execution engine: market, limit, stop, trailing, bulk, TWAP, snipe and copy orders. Practice mode ships in the box; live chain adapters for Ethereum (Uniswap V2) and Solana (Raydium AMM v4) are included.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": { "node": ">=22" },
+  "main": "./dist/sdk/src/index.js",
+  "types": "./dist/sdk/src/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/sdk/src/index.d.ts", "default": "./dist/sdk/src/index.js" },
+    "./client": { "types": "./dist/sdk/src/client.d.ts", "default": "./dist/sdk/src/client.js" },
+    "./core": { "types": "./dist/core/src/index.d.ts", "default": "./dist/core/src/index.js" },
+    "./evm": { "types": "./dist/evm/src/index.d.ts", "default": "./dist/evm/src/index.js" },
+    "./sol": { "types": "./dist/sol/src/index.d.ts", "default": "./dist/sol/src/index.js" }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": { "build": "node scripts/build.mjs" },
+  "peerDependencies": { "@types/node": ">=22" },
+  "peerDependenciesMeta": { "@types/node": { "optional": true } }
+}
