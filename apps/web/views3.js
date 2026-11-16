@@ -6,9 +6,15 @@ const SW={wallets:[],privy:[],wallet:null,account:null,seen:new Set(),busy:false
   try{window.addEventListener('wallet-standard:register-wallet',e=>{try{e.detail(reg)}catch{}})}catch{}})();
 const swOk=w=>w&&w.features&&['standard:connect','solana:signTransaction','solana:signMessage'].every(f=>f in w.features);
 const b64=u=>btoa(String.fromCharCode(...u)),unb64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
-async function swConnect(w){const r=await w.features['standard:connect'].connect(),acc=(r&&r.accounts||w.accounts||[])[0];if(!acc)throw new Error('the wallet returned no account');
+const swTimeout=(p,ms,what)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error(what+' did not answer within '+Math.round(ms/1000)+' seconds. If the wallet showed a window, finish or close it and try again; if it showed nothing, the wallet is not responding to this page.')),ms))]);
+async function swConnect(w,say=()=>{}){
+  say('Step 1 of 3: getting your wallet account…');let acc=(w.accounts||[])[0];   // an already-authorized wallet (Privy after login) needs no extra prompt
+  if(!acc){const r=await swTimeout(w.features['standard:connect'].connect(),60000,'The wallet’s connect step');acc=(r&&r.accounts||w.accounts||[])[0]}
+  if(!acc)throw new Error('the wallet returned no account');
+  say('Step 2 of 3: asking your wallet to sign a login message (watch for a wallet window or Privy dialog)…');
   const n=await api('/api/sol/auth/nonce',{address:acc.address});if(n.ok===false)throw new Error(n.why||'could not start sign-in');
-  const [m]=await w.features['solana:signMessage'].signMessage({account:acc,message:new TextEncoder().encode(n.message)});
+  const [m]=await swTimeout(w.features['solana:signMessage'].signMessage({account:acc,message:new TextEncoder().encode(n.message)}),90000,'The wallet’s message signing');
+  say('Step 3 of 3: verifying the signature…');
   const v=await api('/api/sol/auth/verify',{address:acc.address,signature:b64(m.signature)});if(v.ok===false)throw new Error(v.why||'sign-in failed');SW.wallet=w;SW.account=acc;swStart()}
 /* After a reload the server still has the signed-in wallet (the session cookie lasts a day) but this page has forgotten which wallet object holds it. Ask each wallet for an account WITHOUT prompting
    ("silent"): the one whose address matches the signed-in address is linked again. Nothing is signed. */
@@ -40,7 +46,7 @@ async wallet(){const el=$('#swal');if(!el)return;let w;try{w=await api('/api/sol
   el.innerHTML=`<div class="panel stack" style="max-width:640px"><h2>Wallet and limits</h2>${login}`+
   `<div class="stack"><b>Limits</b><div class="row"><div><label for="lmax">Max per trade (SOL)</label><input id="lmax" inputmode="decimal" value="${esc(Number(L.maxTradeLamports)/1e9)}"></div><div><label for="lcap">Max per day (SOL)</label><input id="lcap" inputmode="decimal" value="${esc(Number(L.dailyCapLamports)/1e9)}"></div><div><label for="lslip">Max slippage (%)</label><input id="lslip" inputmode="decimal" value="${esc(L.maxSlippageBps/100)}"></div></div><div class="row"><button class="btn" id="slim">Save limits</button></div></div></div>`;
   const call=async(p,b,ok)=>{const r=await act(p,b);if(r&&r.ok!==false){toast('success',ok,'');this.wallet()}return r};
-  $$('[data-w]').forEach(b=>b.onclick=async()=>{b.disabled=true;try{await swConnect(found[Number(b.dataset.w)]);toast('success','Wallet connected','')}catch(e){const m=esc((e&&e.message)||String(e)||'The wallet declined.');toast('error','Could not sign in',m);console.error('wallet sign-in failed',e);this.wallet().then(()=>{const x=$('#swerr');if(x)x.innerHTML=notice('error','Sign-in did not finish',m)});return}this.wallet()});
+  $$('[data-w]').forEach(b=>b.onclick=async()=>{b.disabled=true;const ew=$('#swerr'),say=t=>{if(ew)ew.innerHTML=notice('plain','Signing in',esc(t))};say('Starting…');try{await swConnect(found[Number(b.dataset.w)],say);toast('success','Wallet connected','')}catch(e){const m=esc((e&&e.message)||String(e)||'The wallet declined.');toast('error','Could not sign in',m);console.error('wallet sign-in failed',e);this.wallet().then(()=>{const x=$('#swerr');if(x)x.innerHTML=notice('error','Sign-in did not finish',m)});return}this.wallet()});
   if($('#scon'))$('#scon').onclick=async()=>{const k=$('#skey').value;$('#skey').value='';await call('/api/sol/wallet/connect',{key:k},'Wallet connected')};
   if($('#sdis'))$('#sdis').onclick=async()=>{await call('/api/sol/wallet/disconnect',{},'Wallet disconnected');swStop()};
   if($('#skill'))$('#skill').onclick=()=>call('/api/sol/kill',{on:!w.killed},w.killed?'Trading allowed':'Kill switch on');
