@@ -4,11 +4,13 @@
 import React, { useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { PrivyProvider, usePrivy, useLogin } from '@privy-io/react-auth';
-import { useStandardWallets, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
+import { useStandardWallets, useCreateWallet, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 
 function Panel({ onWallets }) {
   const { ready, authenticated, logout, user } = usePrivy();
   const { login } = useLogin();
+  const { createWallet } = useCreateWallet();
+  const [err, setErr] = React.useState('');
   const { ready: wReady, wallets } = useStandardWallets();   // exported under this name in @privy-io/react-auth 3.51.4 (the docs call it useSolanaStandardWallets)
   useEffect(() => { onWallets(authenticated && wReady ? wallets : []); }, [authenticated, wReady, wallets]);
   if (!ready) return <span className="faint">Loading Privy…</span>;
@@ -17,7 +19,14 @@ function Panel({ onWallets }) {
   return (
     <span>
       <span className="faint">Privy: {who}. </span>
-      {wReady && wallets.length === 0 ? <span className="faint">No Solana wallet yet: Privy is creating one… </span> : null}
+      {wReady && wallets.length === 0 ? (
+        <span>
+          <span className="faint">You have no Solana wallet yet. </span>
+          <button className="btn" onClick={async () => { setErr(''); try { await createWallet(); } catch (e) { setErr(String((e && e.message) || e)); } }}>Create Solana wallet</button>{' '}
+        </span>
+      ) : null}
+      {wReady && wallets.length > 0 ? <span className="faint">{wallets.length} Solana wallet{wallets.length > 1 ? 's' : ''} ready: choose it under "Sign in with your wallet" below. </span> : null}
+      {err ? <span className="dn">{err} </span> : null}
       <button className="btn" onClick={() => logout()}>Log out of Privy</button>
     </span>
   );
