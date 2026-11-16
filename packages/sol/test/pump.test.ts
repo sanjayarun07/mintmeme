@@ -61,3 +61,11 @@ test('fee config decodes flat fees and tiers, picks the tier by market cap, and 
   assert.equal(feeBpsAt(c, 10n), 125n); assert.equal(feeBpsAt(c, 1000n), 110n); assert.equal(feeBpsAt(c, 9999n), 60n);
   d.writeUInt32LE(9999, 65); assert.throws(() => decodeFeeConfig(d), /not recognised/);
 });
+
+test('a curve priced in a token other than SOL is refused up front (it would fail with pump error 6063, UnsupportedQuoteMint); SOL curves (zero or wrapped SOL) are not', () => {
+  const withQuote = (q: string | null) => { const b = curveBuf(); if (q) Buffer.from(pubkeyBytes(q)).copy(b, 83); return decodeCurve(b); };
+  assert.equal(withQuote(null).quoteMint, '11111111111111111111111111111111'); assert.equal(untradableReason(withQuote(null), TOKEN_2022), undefined);
+  assert.equal(untradableReason(withQuote('So11111111111111111111111111111111111111112'), TOKEN_2022), undefined);
+  assert.match(untradableReason(withQuote('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'), TOKEN_2022)!, /6063/);
+  assert.equal(decodeCurve(curveBuf({ len: 100 })).quoteMint, undefined, 'a shorter account carries no quote_mint field');
+});

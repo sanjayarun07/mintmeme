@@ -17,13 +17,14 @@ const enc = (s: string) => new TextEncoder().encode(s);
 const pda = (seeds: Uint8Array[], program = PUMP_PROGRAM) => findProgramAddress(seeds, program).address;
 const same = (d: Buffer, o: number, want: readonly number[]) => want.every((b, i) => d[o + i] === b);
 
-export interface CurveState { virtualToken: bigint; virtualSol: bigint; realToken: bigint; realSol: bigint; totalSupply: bigint; complete: boolean; creator: string; mayhem?: boolean; cashback?: boolean; size: number }
+const SYSTEM_ZERO = '11111111111111111111111111111111', WSOL_MINT = 'So11111111111111111111111111111111111111112';
+export interface CurveState { virtualToken: bigint; virtualSol: bigint; realToken: bigint; realSol: bigint; totalSupply: bigint; complete: boolean; creator: string; mayhem?: boolean; cashback?: boolean; /** The token the curve is priced in (bytes 83..115 of newer accounts). All zeros means native SOL; undefined means the account is too short to carry the field. */ quoteMint?: string; size: number }
 /** BondingCurve: 8-byte discriminator, then u64 x5 (virtual token, virtual sol, real token, real sol, total supply), bool complete, pubkey creator, bool mayhem, bool cashback (the last two exist on newer accounts). */
 export function decodeCurve(d: Buffer): CurveState {
   if (d.length < 81) throw new Error(`bonding curve account is ${d.length} bytes, expected at least 81: refusing to decode`);
   if (!same(d, 0, DISC.curve)) throw new Error('account is not a pump.fun bonding curve (discriminator mismatch)');
   return { virtualToken: d.readBigUInt64LE(8), virtualSol: d.readBigUInt64LE(16), realToken: d.readBigUInt64LE(24), realSol: d.readBigUInt64LE(32), totalSupply: d.readBigUInt64LE(40), complete: d[48] === 1,
-    creator: base58(d.subarray(49, 81)), mayhem: d.length > 81 ? d[81] === 1 : undefined, cashback: d.length > 82 ? d[82] === 1 : undefined, size: d.length };
+    creator: base58(d.subarray(49, 81)), mayhem: d.length > 81 ? d[81] === 1 : undefined, cashback: d.length > 82 ? d[82] === 1 : undefined, quoteMint: d.length >= 115 ? base58(d.subarray(83, 115)) : undefined, size: d.length };
 }
 export interface GlobalState { feeBps: bigint; creatorFeeBps: bigint; feeRecipient: string; feeRecipients: string[]; buybackRecipients: string[] }
 /** Global: discriminator, bool initialized, pubkey authority, pubkey fee_recipient, 4 x u64 reserves, u64 fee_basis_points, pubkey withdraw_authority, bool, u64 pool_migration_fee, u64 creator_fee_basis_points, 7 x pubkey fee_recipients. */
@@ -134,6 +135,8 @@ export function untradableReason(curve: CurveState, mintOwner: string): string |
   if (curve.complete) return 'the curve is complete: liquidity has moved to PumpSwap, which this adapter does not trade';
   if (curve.mayhem) return 'mayhem-mode coin: its instructions need accounts this adapter has not verified';
   if (curve.cashback) return 'cashback coin: selling needs extra accounts this adapter has not verified';
+  // A curve priced in another token (not SOL) is bought with different accounts: sending a SOL buy to it fails with pump program error 6063 (UnsupportedQuoteMint). All zeros or wrapped SOL means SOL.
+  if (curve.quoteMint !== undefined && curve.quoteMint !== SYSTEM_ZERO && curve.quoteMint !== WSOL_MINT) return `curve is priced in ${curve.quoteMint}, not SOL: this adapter only trades SOL curves (a SOL buy would fail with pump error 6063, UnsupportedQuoteMint)`;
   if (mintOwner !== PROGRAMS.token && mintOwner !== TOKEN_2022) return `mint is owned by ${mintOwner}, not the SPL Token or Token-2022 program`;
   if (curve.mayhem === undefined || curve.cashback === undefined) return 'older curve layout without the mayhem and cashback flags: not verified';
   return undefined;
