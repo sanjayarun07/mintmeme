@@ -10,6 +10,7 @@ import type { WalletPolicy } from '../../packages/core/src/index.ts';
 import { randomBytes } from 'node:crypto';
 import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestError, verifySignature, b58decode, looksLikeMint, mintFacts } from '../../packages/sol/src/index.ts';
 import type { SolSigner } from '../../packages/sol/src/index.ts';
+import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
 import { Trader } from '../../packages/sdk/src/trader.ts';
 import { urls } from '../../packages/live/src/config.ts';
 import { TradeGuard, GuardError, DEFAULT_LIMITS } from './solguard.ts';
@@ -112,11 +113,20 @@ export class SolMainnet {
   private priceE18(solPerToken: unknown, dec: number, what: string) { return this.units(solPerToken, 27 - dec, what); }   // SOL per token -> lamports per raw unit x 1e18
   private solPerToken(e18: bigint, dec: number) { return Number(e18) / 1e18 * 10 ** dec / 1e9; }
 
+  private usdCache?: { v: number; t: number };
+  /** SOL price in USD from a read-only Jupiter quote of 1 SOL into USDC (cached 30 s). Null when unavailable: the page then shows SOL only. */
+  async solUsd(): Promise<number | null> {
+    if (this.usdCache && Date.now() - this.usdCache.t < 30_000) return this.usdCache.v;
+    try {
+      const q = await fetchJupiterQuote({ inputMint: 'So11111111111111111111111111111111111111112', outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amount: 1_000_000_000n, slippageBps: 50, timeoutMs: 8000 });
+      const v = Number(q.outAmount) / 1e6; if (!(v > 0)) return null; this.usdCache = { v, t: Date.now() }; return v;
+    } catch { return this.usdCache?.v ?? null; }
+  }
   /** Price, decimals and the wallet's balance for the order form. */
   async orderContext(b: any) {
     this.needSession(b); const c = this.need(), mint = String(b?.mint ?? '').trim(); if (!looksLikeMint(mint)) throw bad('that is not a Solana mint address');
     await c.chain.refresh('venues'); await c.chain.addToken(mint); const dec = await this.decimals(mint), px = c.trader.spotE18(mint), bal = await this.tokenBalance(mint);
-    return { mint, decimals: dec, priceSol: px === undefined ? null : this.solPerToken(px, dec), balanceRaw: bal.toString(), balanceTokens: Number(bal) / 10 ** dec };
+    return { mint, decimals: dec, priceSol: px === undefined ? null : this.solPerToken(px, dec), solUsd: await this.solUsd(), balanceRaw: bal.toString(), balanceTokens: Number(bal) / 10 ** dec };
   }
   private orderView(o: any, dec: number) {
     return { id: o.id, kind: o.kind, token: o.token, amount: o.amount.toString(), amountTokens: o.kind === 'limit_buy' ? null : Number(o.amount) / 10 ** dec, budgetSol: o.kind === 'limit_buy' ? Number(o.amount) / 1e9 : null,
@@ -126,7 +136,7 @@ export class SolMainnet {
     this.needSession(b); if (!this.conn) return { orders: [], twaps: [], killed: this.guard.killed, signer: null };
     const c = this.conn, orders = []; for (const o of c.trader.listOrders()) orders.push(this.orderView(o, await this.decimals(o.token).catch(() => 0)));
     const twaps = c.trader.listTwaps().map(t => ({ id: t.id, side: t.side, filled: t.filled, failed: t.failed, skipped: t.skipped, open: t.open, spent: t.spent.toString(), received: t.received.toString(), nextDueAt: t.nextDueAt ?? null, done: t.done, cancelled: t.cancelled, refused: t.refused ?? null }));
-    return { orders, twaps, killed: this.guard.killed, signer: this.remote ? 'wallet' : 'key' };
+    return { orders, twaps, killed: this.guard.killed, signer: this.remote ? 'wallet' : 'key', solUsd: await this.solUsd() };
   }
   /** Place a standing order. It spends nothing now: it trades later, by itself, when its trigger is met, within the same limits as a market trade. */
   async createOrder(b: any) {
