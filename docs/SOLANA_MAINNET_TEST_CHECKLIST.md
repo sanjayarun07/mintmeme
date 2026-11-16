@@ -18,7 +18,7 @@
 
 ## What is not built yet (so a funded trade is not ready)
 
-- A guarded mainnet execution path in the terminal: key loading from `.env`, enforced per-trade and daily caps, an explicit confirm step, and a kill switch. Today the terminal's Solana routes are read-only by construction.
+- (Built since this list was first written: a guarded path with per-trade and daily caps, a slippage cap, a two-step confirm and a kill switch, checked on a local validator only. See "Wallet login" below. No mainnet trade has been made with it.)
 - Jito submission has only been tested against a stand-in block engine, not mainnet.
 
 ## Honest limits to expect
