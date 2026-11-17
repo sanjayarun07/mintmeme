@@ -245,6 +245,17 @@ Setting: `tokenSafety: 'block'` (default), `'warn'` (report only) or `'off'`: `c
 One trade can override a block with `allowRiskyToken: true`. A blocked buy fails with `unsafe_token` (409) and the reasons. The report: `GET /v1/tokens/:mint/safety`, or
 `s.safety(mint)` in the SDK. Sells are never blocked. It is not a certification: a token that passes can still go to zero.
 
+### 4.8 Fee sharing
+
+A trade can carry fees, paid **in SOL** inside the trade's own transaction (only if the trade lands): on a buy from the SOL spent (the swap gets the rest), on a sell from
+the SOL received, computed on the guaranteed minimum output. The trade reports what was paid (`fill.platformFee`, lamports, measured on chain).
+
+- **Operator fee:** `PLATFORM_FEE_WALLET` and `PLATFORM_FEE_BPS` (0 to 100) on the server, on every real trade.
+- **App fee:** an app key sets its own fee on its users' trades: `PUT /v1/app/fees {"wallet": "...", "bps": 40}` (at most `APP_FEE_MAX_BPS`, default 100), `GET`, `DELETE`;
+  client `app.setAppFees(wallet, bps)`. The total is split between the operator and the app in proportion to their bps.
+- **SDK:** `createSolanaTrader({ fees: () => [{ address, bps }] })`, read at every trade.
+- The user's `maxFeeBps` on a trade (default 200, 2%) caps the total: a trade with higher fees fails before anything is signed. Fee wallets must already hold SOL
+  (a transfer to an empty account below the rent minimum would fail the trade).
 
 ---
 
@@ -513,6 +524,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 | `GET /v1/wallet`; `POST /v1/wallet/link/start`, `/v1/wallet/link/finish`; `DELETE /v1/wallet` | Execution server in `MODE=solana-mainnet` only: link the user's Privy wallet (section 4.5 A), see whether it may trade now, unlink. Errors: `bad_signature` 401, `not_delegated` 409, `link_expired` 410, `privy_unavailable` 503; trades on an account whose wallet is not active: `wallet_not_active` 409 |
 | `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false) and `maxTipSol` (default 0.0001, at most 0.001). Any trade or order also takes `mevProtection: true|false` for itself |
 | `GET /v1/tokens/:mint/safety` | `MODE=solana-mainnet`: the token safety report (section 4.7). Buys of a blocked token fail with `unsafe_token` 409 unless `allowRiskyToken: true` or `tokenSafety` is warn/off |
+| `GET`, `PUT`, `DELETE /v1/app/fees` | App keys: the app's own fee on its users' trades, `{ wallet, bps }`, at most APP_FEE_MAX_BPS (section 4.8) |
 | `GET`, `PUT`, `DELETE /v1/app/webhook`; `POST /v1/app/webhook/test`; `GET /v1/app/users` | App keys only (section 4.6): the app's signed webhook and its end users. With an app key every other route needs `X-User-Id` (`missing_user` 400 without it; `app_user_limit` 403 past MAX_USERS_PER_APP; `not_an_app_key` 403 for /v1/app with a user key) |
 
 ---

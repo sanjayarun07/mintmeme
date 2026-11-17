@@ -28,7 +28,8 @@ async function main() {
     if (b.method === 'getTipAccounts') return ok([tipAcct]);
     if (b.method === 'sendTransaction') return ok(await rpc.call('sendTransaction', [b.params[0], { encoding: 'base64', skipPreflight: true, maxRetries: 0 }]));
     return new Response('{}', { status: 400 }); }) as typeof fetch;
-  const acc = solanaAccounts({ rpcUrl: env.url, privy: { ...fp.cfg, fetchFn: fp.fetchFn }, venues: ['pump'], jito: { url: 'http://jito.test', tipFloorUrl: 'http://jito.test/tip_floor', fetchFn: jitoFetch, minIntervalMs: 0 }, solUsd: async () => ({ price: 150, at: Date.now() }) });
+  const feeWallet = new DevSolSigner().add(randomBytes(32)); let feeOn = false;   // fee sharing: on only for the S14 checks
+  const acc = solanaAccounts({ rpcUrl: env.url, privy: { ...fp.cfg, fetchFn: fp.fetchFn }, venues: ['pump'], fees: () => (feeOn ? [{ address: feeWallet, bps: 50 }] : []), jito: { url: 'http://jito.test', tipFloorUrl: 'http://jito.test/tip_floor', fetchFn: jitoFetch, minIntervalMs: 0 }, solUsd: async () => ({ price: 150, at: Date.now() }) });
   const nodes: { nd: Awaited<ReturnType<typeof createNode>>; url: string }[] = [];
   const mk = async () => { const port = await freePort(), url = `http://127.0.0.1:${port}`;
     const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: ns, publicUrl: url, keys, makeAccount: acc.make, extraRoutes: h => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }), leaseTtlMs: 3000, sweepMs: 1000, requireAof: false, log: () => {} });
@@ -85,6 +86,15 @@ async function main() {
       const afterPrivate = jitoSeen.filter(x => x.method === 'sendTransaction').length;
       const xbF = await settle('fork-mev-2', xb);
       check('S12 per trade: with the setting off a buy goes publicly, and one with mevProtection: true goes privately', afterPublic === before && afterPrivate === before + 1 && pbF.state === 'finalized' && xbF.state === 'finalized', JSON.stringify({ before, afterPublic, afterPrivate, pub: pbF.state, priv: xbF.state, f2: xbF.failure, h2: (xbF.history ?? []).map((h: any) => h.state + (h.note ? ":" + String(h.note).slice(0, 120) : "")) })); }
+    // fee sharing: a 0.5% fee to a fee wallet, paid in SOL inside the trade: on a buy from the SOL spent, on a sell from the guaranteed SOL out
+    { const fa = await rpc.call<string>('requestAirdrop', [feeWallet, 1_000_000_000]); for (let i = 0; i < 80; i++) { const s: any = await rpc.call('getSignatureStatuses', [[fa]]); if (s.value[0]?.confirmationStatus) break; await sleep(250); }
+      const bal = async () => BigInt(await rpc.call<any>('getBalance', [feeWallet, { commitment: 'confirmed' }]).then(r => r.value));
+      const settle = async (k: string, v: any) => { for (let i = 0; i < 40 && !['finalized', 'failed', 'expired'].includes(v.state); i++) { await sleep(1000); v = (await call(other.url, 'POST', `/v1/trades/alice.${k}/advance`)).j; } return v; };
+      for (let i = 0; i < 40 && (await bal()) === 0n; i++) await sleep(250);   // the fee wallet's funding must be visible first
+      feeOn = true; const f0 = await bal(), fb = await settle('fork-fee-buy', await cl(other.url).swap({ side: 'buy', mint, sol: '0.01', slippagePct: 5, key: 'fork-fee-buy' })), f1 = await bal();
+      check('S14 a buy with a 0.5% fee pays exactly 0.00005 SOL (0.5% of 0.01 SOL) to the fee wallet inside the trade, and the trade reports it', fb.state === 'finalized' && f1 - f0 === 50_000n && String(fb.fill?.platformFee) === '50000', JSON.stringify({ state: fb.state, paid: String(f1 - f0), reported: fb.fill?.platformFee, failure: fb.failure }));
+      const fs = await settle('fork-fee-sell', await cl(other.url).swap({ side: 'sell', mint, pct: 10, slippagePct: 10, key: 'fork-fee-sell' })), f2 = await bal(); feeOn = false;
+      check('S15 a sell with a 0.5% fee pays the fee wallet from the SOL received, and the trade reports what was paid', fs.state === 'finalized' && f2 > f1 && String(fs.fill?.platformFee) === String(f2 - f1), JSON.stringify({ state: fs.state, paid: String(f2 - f1), reported: fs.fill?.platformFee, failure: fs.failure })); }
     // revoked in Privy: nothing is signed, nothing is sent
     fp.state.delegated = false; const t2 = await tokens(), sb = fp.state.signed;
     const rb = await call(other.url, 'POST', '/v1/trades/buy', { walletId: addr, token: mint, amount: '10000000', slippageBps: 500, key: 'fork-buy-revoked' });

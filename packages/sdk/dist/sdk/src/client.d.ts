@@ -20,6 +20,10 @@ export declare class MemeClient {
     deleteAppWebhook(): Promise<any>;
     testAppWebhook(): Promise<any>;
     appUsers(): Promise<any>;
+    /** The app's own fee on its users' trades (MODE=solana-mainnet): bps of each trade, paid in SOL to `wallet` inside the trade, capped by the operator. */
+    appFees(): Promise<any>;
+    setAppFees(wallet: string, bps: number): Promise<any>;
+    deleteAppFees(): Promise<any>;
     overview(): Promise<any>;
     /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
     swap(p: {

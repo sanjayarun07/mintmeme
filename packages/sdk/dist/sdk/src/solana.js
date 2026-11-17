@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.js';
-import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, looksLikeMint } from '../../sol/src/index.js';
+import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, TokenSafety, pumpAddresses, PROGRAMS, looksLikeMint } from '../../sol/src/index.js';
 import { fetchJupiterQuote } from '../../sol/src/jupiter.js';
 import { Trader } from './trader.js';
 import { SdkError } from './wire.js';
@@ -145,13 +145,16 @@ export async function createSolanaTrader(o) {
         else
             why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why;
     }
-    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
     const policies = new Map(), owners = new Map();
     if (o.address) {
         owners.set(o.address, 'x');
         policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') });
     }
     const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });
+    /** The engine charges the total of the recipients' bps (the chain splits it among them); refreshed before every trade and order pass. */
+    const syncFees = () => { engine.d.platformFeeBps = (o.fees?.() ?? []).reduce((s, r) => s + Math.max(0, r.bps), 0); };
+    syncFees();
     const decs = new Map(), added = new Set();
     const decimals = async (mint) => { let d = decs.get(mint); if (d === undefined) {
         const r = await rpc.call('getAccountInfo', [mint, { encoding: 'jsonParsed' }]);
@@ -179,13 +182,28 @@ export async function createSolanaTrader(o) {
     const usd = o.solUsd ?? jupiterSolUsd();
     const trader = new Trader({ engine, chain, userId: o.userId, venues, state, usd: { quoteUsd: usd, quoteDecimals: 9, tokenDecimals: decimals, maxAgeMs: 120_000 },
         // every tick: fresh pool state for the triggers, and venues for tokens of orders restored from storage (nobody has asked for them since the restart)
-        advanceChain: async () => { await chain.refresh('venues'); for (const x of trader.listOrders({ status: 'active' }))
+        advanceChain: async () => { syncFees(); await chain.refresh('venues'); for (const x of trader.listOrders({ status: 'active' }))
             if (!added.has(x.token))
                 await prepare(x.token).catch(e => log(`${o.userId}: ${x.token}: ${e.message}`)); } });
     const active = signable.size > 0;
     const balance = async (mint) => { const r = await rpc.call('getTokenAccountsByOwner', [o.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]); return r.value.reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); };
     const simple = (path, body) => simpleBody(path, body, { address: o.address, decimals, balance });
-    return { trader, chain, active, why, prepare, simple, sync: () => chain.refresh('venues'), refuseIfInactive: () => { if (!active)
+    // token safety before buys: the pump.fun bonding curve is liquidity, not a holder; a sell route and 1-SOL impact come from this chain's venues
+    const best = (mint) => chain.venues().filter(v => venues.some(f => v.family === f || v.id === f));
+    const safetyCheck = new TokenSafety(rpc, { cacheMs: 60_000,
+        liquidityAccounts: m => [PROGRAMS.token, 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'].map(tp => pumpAddresses(m, m, tp).associatedBondingCurve),
+        sellRoute: async (m) => { await prepare(m); return best(m).some(v => v.supports(m, NATIVE)); },
+        buyImpactPct: async (m) => { await prepare(m); const q = best(m).filter(v => v.supports(NATIVE, m)).map(v => v.quote(NATIVE, m, 1000000000n)); return q.length ? Math.min(...q.map(x => x.priceImpactBps)) / 100 : undefined; } });
+    const mode = o.tokenSafety ?? 'block';
+    const checkBuy = async (mint, allowRisky = false) => {
+        if (mode === 'off' || mint === NATIVE || mint === WSOL_MINT)
+            return undefined;
+        const r = await safetyCheck.check(mint);
+        if (r.verdict === 'block' && mode === 'block' && !allowRisky)
+            throw new SdkError('unsafe_token', `this token was blocked by the safety check: ${r.risks.filter(x => x.level === 'block').map(x => x.message).join(' ')}`, 'Check the token. To buy it anyway, send allowRiskyToken: true with this trade, or set tokenSafety to warn.', 409);
+        return r;
+    };
+    return { trader, chain, active, why, prepare, simple, sync: async () => { syncFees(); await chain.refresh('venues'); }, safety: (mint) => safetyCheck.check(mint), checkBuy, refuseIfInactive: () => { if (!active)
             throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
 }
 export const mevOn = (m) => m === true || (typeof m === 'object' && m.enabled !== false);

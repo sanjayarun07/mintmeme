@@ -45,6 +45,8 @@ export interface NodeOptions {
   webhooks?: WebhookOptions;
   /** The most end users one app key may create. Default 10,000. */
   maxUsersPerApp?: number;
+  /** The highest fee an app may set on its users' trades (PUT /v1/app/fees). Default 100 bps (1%). */
+  maxAppFeeBps?: number;
 }
 /** The files and calls of the /solana page (apps/web/solana.html and the scripts it loads). */
 const SOLANA_SAMPLE = new Set(['/solana', '/solana.html', '/solana.css', '/styles.css', '/solcore.js', '/views3.js', '/views4.js', '/solpro.js', '/solboot.js', '/privy.bundle.js']);
@@ -89,7 +91,7 @@ export async function createNode(o: NodeOptions) {
   /** Every event of an app's end user goes to the app's webhook (if it set one). Internal error events are not sent. */
   const wire = (user: string, t: Trader) => t.on(e => { if (e.type !== 'error') void hooks.emit(user, e.type, e); });
   const extra = o.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? (n: string) => x.lease.backend(n) : undefined; }, reload });
-  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: extra, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path), appRoutes: appRoutes(hooks, r, o.namespace) });
+  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: extra, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path), appRoutes: appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100) });
 
   /** Take the user's lease and start its Trader from the state in Redis. Concurrent claims for one user share one attempt. */
   const claim = (user: string): Promise<boolean> => {

@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.ts';
 import type { Backend, SpentLedger, WalletPolicy } from '../../core/src/index.ts';
 import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, TokenSafety, pumpAddresses, PROGRAMS, looksLikeMint } from '../../sol/src/index.ts';
-import type { PrivyConfig, PriorityConfig, JitoOptions, SafetyReport } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig, JitoOptions, SafetyReport, FeeRecipient } from '../../sol/src/index.ts';
 import { fetchJupiterQuote } from '../../sol/src/jupiter.ts';
 import { Trader } from './trader.ts';
 import { SdkError } from './wire.ts';
@@ -37,6 +37,9 @@ export interface SolanaTraderOptions {
   priority?: PriorityConfig | false;
   /** Token safety before buys (packages/sol/src/tokensafety.ts): 'block' (default) refuses tokens you might not be able to sell, 'warn' only reports, 'off' skips. */
   tokenSafety?: 'block' | 'warn' | 'off';
+  /** Fee sharing: who receives a fee on each trade and how much (bps of the trade, paid in SOL inside the trade's own transaction). Read at every trade. The user's
+   *  `maxFeeBps` on a trade (default 2%) still caps the total: a trade whose fees are above it fails before anything is signed. */
+  fees?: () => FeeRecipient[];
   /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
    *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
   mevProtection?: boolean | MevOptions;
@@ -106,10 +109,12 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   if (!o.address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(o.address);   // throws when Privy is unreachable: nothing can be signed, so the caller should retry rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[o.address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
-  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (o.address) { owners.set(o.address, 'x'); policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });
+  /** The engine charges the total of the recipients' bps (the chain splits it among them); refreshed before every trade and order pass. */
+  const syncFees = () => { engine.d.platformFeeBps = (o.fees?.() ?? []).reduce((s, r) => s + Math.max(0, r.bps), 0); }; syncFees();
   const decs = new Map<string, number>(), added = new Set<string>();
   const decimals = async (mint: string) => { let d = decs.get(mint); if (d === undefined) { const r: any = await rpc.call('getAccountInfo', [mint, { encoding: 'jsonParsed' }]); d = Number(r?.value?.data?.parsed?.info?.decimals ?? 0); decs.set(mint, d); } return d; };
   // Selling a token the wallet holds spends that token and returns SOL to the same wallet, so it is not capped in SOL; buys are (see SOLANA_DEFAULT_CAPS).
@@ -119,7 +124,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   const usd = o.solUsd ?? jupiterSolUsd();
   const trader: Trader = new Trader({ engine, chain, userId: o.userId, venues, state, usd: { quoteUsd: usd, quoteDecimals: 9, tokenDecimals: decimals, maxAgeMs: 120_000 },
     // every tick: fresh pool state for the triggers, and venues for tokens of orders restored from storage (nobody has asked for them since the restart)
-    advanceChain: async () => { await chain.refresh('venues'); for (const x of trader.listOrders({ status: 'active' })) if (!added.has(x.token)) await prepare(x.token).catch(e => log(`${o.userId}: ${x.token}: ${(e as Error).message}`)); } });
+    advanceChain: async () => { syncFees(); await chain.refresh('venues'); for (const x of trader.listOrders({ status: 'active' })) if (!added.has(x.token)) await prepare(x.token).catch(e => log(`${o.userId}: ${x.token}: ${(e as Error).message}`)); } });
   const active = signable.size > 0;
   const balance = async (mint: string) => { const r: any = await rpc.call('getTokenAccountsByOwner', [o.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]); return (r.value as any[]).reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); };
   const simple = (path: string, body: any) => simpleBody(path, body, { address: o.address, decimals, balance });
@@ -136,7 +141,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
     if (r.verdict === 'block' && mode === 'block' && !allowRisky) throw new SdkError('unsafe_token', `this token was blocked by the safety check: ${r.risks.filter(x => x.level === 'block').map(x => x.message).join(' ')}`, 'Check the token. To buy it anyway, send allowRiskyToken: true with this trade, or set tokenSafety to warn.', 409);
     return r;
   };
-  return { trader, chain, active, why, prepare, simple, sync: () => chain.refresh('venues'), safety: (mint: string) => safetyCheck.check(mint), checkBuy, refuseIfInactive: () => { if (!active) throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
+  return { trader, chain, active, why, prepare, simple, sync: async () => { syncFees(); await chain.refresh('venues'); }, safety: (mint: string) => safetyCheck.check(mint), checkBuy, refuseIfInactive: () => { if (!active) throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
 }
 
 /** MEV protection options. `enabled` (default true when you pass an object) is the account default; a trade's own `mevProtection` wins either way. The block-engine

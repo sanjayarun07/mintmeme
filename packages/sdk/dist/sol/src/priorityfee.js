@@ -41,3 +41,16 @@ export function clampPrice(microLamports, computeUnitLimit, capLamports) {
     const max = capLamports * 1000000n / BigInt(Math.max(1, computeUnitLimit));
     return microLamports > max ? max : microLamports;
 }
+export function feeTransfers(side, amountIn, minOut, bps, recipients) {
+    if (bps <= 0)
+        return { net: amountIn, total: 0n, each: [] };
+    const rs = recipients.filter(r => r.bps > 0);
+    if (!rs.length)
+        throw new Error('a platform fee is set but no fee wallet is configured');
+    const total = (side === 'buy' ? amountIn : minOut) * BigInt(bps) / 10000n, weight = rs.reduce((s, r) => s + r.bps, 0);
+    const each = [];
+    let given = 0n;
+    rs.forEach((r, i) => { const l = i === rs.length - 1 ? total - given : total * BigInt(r.bps) / BigInt(weight); given += l; if (l > 0n)
+        each.push({ to: r.address, lamports: l }); });
+    return { net: side === 'buy' ? amountIn - total : amountIn, total, each };
+}

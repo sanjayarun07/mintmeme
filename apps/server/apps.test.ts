@@ -65,6 +65,11 @@ test('app keys: one key acts for many end users, each a separate account; app ro
     assert.ok(got.filter(g => g.id === got[0].id).length >= 2, 'the first delivery got a 500 and was retried later with the same event id: ' + JSON.stringify(got.map(g => [g.id.slice(0, 6), JSON.parse(g.body).type, JSON.parse(g.body).userId, JSON.parse(g.body).data?.state])));
     // a plain user key is unchanged and sends no webhooks
     const before = got.length; await new MemeClient({ baseUrl: a.url, apiKey: USER }).buy({ walletId: 'w1', token: T, amount: 1_000n }); await sleep(200); assert.equal(got.length, before);
+    // the app's own fee: validated, capped by the operator, per app
+    assert.deepEqual(await app.appFees(), { wallet: null, bps: 0 });
+    assert.deepEqual(await app.setAppFees('7ofY2LB4SBD31BMChq6ieCp5ptmaVs4FGBnss97ADZMS', 40), { wallet: '7ofY2LB4SBD31BMChq6ieCp5ptmaVs4FGBnss97ADZMS', bps: 40 });
+    await assert.rejects(app.setAppFees('not-an-address', 40), (e: any) => e.code === 'bad_address'); await assert.rejects(app.setAppFees('7ofY2LB4SBD31BMChq6ieCp5ptmaVs4FGBnss97ADZMS', 101), (e: any) => e.code === 'bad_number', 'above the operator cap');
+    assert.equal((await app.appFees()).bps, 40); await app.deleteAppFees(); assert.equal((await app.appFees()).bps, 0);
     const tst = await app.testAppWebhook(); assert.equal(tst.delivered, true);
     await app.deleteAppWebhook(); assert.equal((await app.appWebhook()).configured, false);
   } finally { await a.nd.drain().catch(() => {}); await b.nd.drain().catch(() => {}); recv.close(); wipe(n); }

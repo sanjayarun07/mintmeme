@@ -46,3 +46,16 @@ export class PriorityFees {
 export function clampPrice(microLamports: bigint, computeUnitLimit: number, capLamports: bigint): bigint {
   const max = capLamports * 1_000_000n / BigInt(Math.max(1, computeUnitLimit)); return microLamports > max ? max : microLamports;
 }
+
+/** FEE SHARING. Who gets a trade's platform fee, and how much each gets, in lamports. Fees on Solana are always paid in SOL, as plain transfers inside the swap's own
+ *  transaction (paid only if the trade lands): on a buy from the SOL being spent (the swap gets the rest), on a sell from the SOL received, computed on the guaranteed
+ *  minimum output. `bps` is the total fee of the trade; it is split between the recipients in proportion to their own bps (the last one gets any rounding remainder). */
+export interface FeeRecipient { address: string; bps: number }
+export function feeTransfers(side: 'buy' | 'sell', amountIn: bigint, minOut: bigint, bps: number, recipients: FeeRecipient[]): { net: bigint; total: bigint; each: { to: string; lamports: bigint }[] } {
+  if (bps <= 0) return { net: amountIn, total: 0n, each: [] };
+  const rs = recipients.filter(r => r.bps > 0); if (!rs.length) throw new Error('a platform fee is set but no fee wallet is configured');
+  const total = (side === 'buy' ? amountIn : minOut) * BigInt(bps) / 10_000n, weight = rs.reduce((s, r) => s + r.bps, 0);
+  const each: { to: string; lamports: bigint }[] = []; let given = 0n;
+  rs.forEach((r, i) => { const l = i === rs.length - 1 ? total - given : total * BigInt(r.bps) / BigInt(weight); given += l; if (l > 0n) each.push({ to: r.address, lamports: l }); });
+  return { net: side === 'buy' ? amountIn - total : amountIn, total, each };
+}

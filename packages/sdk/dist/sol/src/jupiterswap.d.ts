@@ -106,7 +106,11 @@ export interface GateCtx {
     tip?: {
         to: string;
         maxLamports: bigint;
-    };
+    }; /** Fee transfers we added ourselves (fee sharing): exactly these destinations and amounts. */
+    fees?: {
+        to: string;
+        lamports: bigint;
+    }[];
 }
 export interface GateResult {
     createdTokenAccounts: string[];

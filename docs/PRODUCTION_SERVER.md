@@ -21,7 +21,7 @@ plan) and `SOLANA_RPC_URL` (or `ALCHEMY_API_KEY`). A node refuses to start witho
   If Privy is unreachable, the claim fails and the next sweep retries it.
 - **Before each trade** the node learns the token (its venues) and reads the chain's clock and pools; each tick refreshes pools and learns the tokens of restored orders.
 
-Verified (`npm run verify:server-sol`, report in `docs/live-verification/`, 13 of 13): linking through one node; a market buy in plain units sent to the non-owner node, forwarded,
+Verified (`npm run verify:server-sol`, report in `docs/live-verification/`, 15 of 15): linking through one node; a market buy in plain units sent to the non-owner node, forwarded,
 signed by the Privy stand-in and landed; the same idempotency key not trading twice; the per-trade cap; a limit order surviving a crash of the owner node, the other node
 asking Privy again, the order edited there and firing by itself; a sell of half the holding in plain units; a compute-unit limit from simulation and a capped priority fee on the landed buy; MEV protection (a stand-in Jito block engine forwarding to the validator): with the setting on, a buy sent with `bundleOnly=true`, a 10,000-lamport tip from the tip floor and the jitodontfront flag, landed; with it off, a plain buy sent publicly and one with `mevProtection: true` sent privately; and a revoked signer failing with nothing sent. `apps/server/realmode.test.ts` covers linking, refusals
 and failover without a chain.
@@ -112,6 +112,8 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
 | `SOLANA_SAMPLE_URL` | none | Serve the `/solana` test page from a running terminal (`apps/web`), to this machine only. |
 | `MAX_USERS_PER_APP` | 10000 | End users one app key may create (each is a separate account; section 4.6 of SDK_AND_API.md). |
+| `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS` | none, 0 | The operator's fee on every real trade, paid in SOL inside the trade (0 to 100 bps; SDK_AND_API.md 4.8). |
+| `APP_FEE_MAX_BPS` | 100 | The most an app may charge its users with `PUT /v1/app/fees`. |
 | `WEBHOOKS_ALLOW_HTTP` | false | Local testing only: allow http and private hosts as webhook targets. |
 | `MODE` | practice | `practice` (fake funds) or `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`). |
 

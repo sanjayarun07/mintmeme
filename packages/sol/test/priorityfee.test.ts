@@ -19,3 +19,15 @@ test('the estimate reads recent fees for the trade\'s accounts, takes the percen
   now = 2000; assert.equal(await f.price(['A', 'B'], 150_000), 666_666n, 'a spike is capped: 0.0001 SOL over 150,000 units');
   rows = []; now = 4000; assert.equal(await f.price(['C'], 150_000), 10_000n, 'quiet: the floor');
 });
+
+test('fee sharing: a buy pays from the SOL it spends, a sell from its guaranteed SOL out, split by each recipient\'s bps with the remainder to the last', async () => {
+  const { feeTransfers } = await import('../src/priorityfee.ts');
+  assert.deepEqual(feeTransfers('buy', 10_000_000n, 123n, 0, []), { net: 10_000_000n, total: 0n, each: [] }, 'no fee: nothing changes');
+  const b = feeTransfers('buy', 10_000_000n, 0n, 100, [{ address: 'APP', bps: 70 }, { address: 'US', bps: 30 }]);
+  assert.deepEqual(b, { net: 9_900_000n, total: 100_000n, each: [{ to: 'APP', lamports: 70_000n }, { to: 'US', lamports: 30_000n }] }, '1% of 0.01 SOL, 70/30');
+  const s = feeTransfers('sell', 5_000n, 2_000_001n, 50, [{ address: 'US', bps: 50 }]);
+  assert.deepEqual(s, { net: 5_000n, total: 10_000n, each: [{ to: 'US', lamports: 10_000n }] }, 'a sell sells everything; the fee is 0.5% of the minimum SOL out');
+  const r = feeTransfers('buy', 1_000n, 0n, 100, [{ address: 'A', bps: 1 }, { address: 'B', bps: 1 }, { address: 'C', bps: 1 }]);
+  assert.equal(r.each.reduce((x, e) => x + e.lamports, 0n), r.total, 'shares always add up to the total');
+  assert.throws(() => feeTransfers('buy', 1_000n, 0n, 100, []), /no fee wallet/);
+});

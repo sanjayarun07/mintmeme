@@ -35,6 +35,10 @@ export class MemeClient {
     deleteAppWebhook() { return this.req('DELETE', '/v1/app/webhook'); }
     testAppWebhook() { return this.req('POST', '/v1/app/webhook/test', {}); }
     appUsers() { return this.req('GET', '/v1/app/users'); }
+    /** The app's own fee on its users' trades (MODE=solana-mainnet): bps of each trade, paid in SOL to `wallet` inside the trade, capped by the operator. */
+    appFees() { return this.req('GET', '/v1/app/fees'); }
+    setAppFees(wallet, bps) { return this.req('PUT', '/v1/app/fees', { wallet, bps }); }
+    deleteAppFees() { return this.req('DELETE', '/v1/app/fees'); }
     overview() { return this.req('GET', '/v1/overview'); }
     // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
     /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */

@@ -3,7 +3,7 @@ import { base58, ataAddress, createAtaIdempotent, systemTransfer, syncNative, cl
 import { RaydiumVenue, loadPoolKeys, decodePoolState, AMM_STATUS_SWAP } from './raydium.js';
 import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMessage, decodeTable, gateInstructions, walletTokenAccountsAtRisk, unsignedV0, wireV0, JupiterVenue, JupiterRefused } from './jupiterswap.js';
 import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.js';
-import { PriorityFees, limitFromSimulation, clampPrice, PRIORITY_DEFAULTS } from './priorityfee.js';
+import { PriorityFees, limitFromSimulation, clampPrice, PRIORITY_DEFAULTS, feeTransfers } from './priorityfee.js';
 import { PROGRAMS, pubkeyBytes, COMPUTE_BUDGET } from './tx.js';
 import { decodeFeeConfig, PumpVenue, PUMP_PROGRAM, decodeCurve, decodeGlobal, pumpAddresses, untradableReason, buy as pumpBuy, quoteBuy, sell as pumpSell, createAtaIdempotent2 } from './pump.js';
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
@@ -240,8 +240,13 @@ export class SolanaChain {
             return [systemTransfer(w, w, 0n)];
         if (tx.kind === 'approve')
             throw new Error('Solana has no token allowances: an approve transaction should never be requested');
-        if (tx.platformFeeBps > 0)
-            throw new Error('platform fee collection is not implemented on this chain (set the platform fee to 0 for real-node trading)');
+        // fees in SOL (feeTransfers): before the swap on a buy (the swap spends the rest), after it on a sell
+        const f = this.feeSplit(tx);
+        if (f.each.length) {
+            const inner = this.instructions({ ...tx, amountIn: f.net, platformFeeBps: 0 }), xfers = f.each.map(e => systemTransfer(w, e.to, e.lamports));
+            const k = inner.findIndex(i => i.program !== COMPUTE_BUDGET);
+            return tx.tokenIn === NATIVE ? [...inner.slice(0, k), ...xfers, ...inner.slice(k)] : [...inner, ...xfers];
+        }
         const pv = this.state.venues.get(tx.venue);
         if (pv instanceof PumpVenue)
             return this.pumpInstructions(tx, pv, budget);
@@ -261,6 +266,14 @@ export class SolanaChain {
             ixs.push(closeAccount(wsolAta, w, w));
         return ixs;
     }
+    /** The fee transfers for this trade (none without a platform fee). A sell pays from the SOL it receives, so only SOL-in or SOL-out trades can carry one. */
+    feeSplit(tx) {
+        if (!tx.platformFeeBps || tx.kind === 'noop' || tx.kind === 'approve')
+            return { net: tx.amountIn, total: 0n, each: [] };
+        if (tx.tokenIn !== NATIVE && tx.tokenOut !== NATIVE)
+            throw new Error('a platform fee needs SOL on one side of the trade');
+        return feeTransfers(tx.tokenIn === NATIVE ? 'buy' : 'sell', tx.amountIn, tx.minOut, tx.platformFeeBps, this.cfg.fees?.() ?? []);
+    }
     jupVenue(tx) { const v = tx.kind === 'noop' || tx.kind === 'approve' ? undefined : this.state.venues.get(tx.venue); return v instanceof JupiterVenue ? v : undefined; }
     async accountsAt(addrs) {
         const out = [];
@@ -279,8 +292,17 @@ export class SolanaChain {
         if (extra && !tip)
             throw new JupiterRefused('the extra instruction from the submitter is not a plain SOL tip');
         const j = this.cfg.jupiter, w = tx.wallet, wsol = this.cfg.wsol, inM = this.res(tx.tokenIn), outM = this.res(tx.tokenOut);
-        if (tx.platformFeeBps > 0)
-            throw new JupiterRefused('platform fee collection is not implemented on this chain (set the platform fee to 0)');
+        // fee sharing (feeTransfers): the swap is built for the net amount; the fee transfers go before it on a buy, after it on a sell; the gate allows exactly these
+        let fee;
+        try {
+            fee = this.feeSplit(tx);
+        }
+        catch (e) {
+            throw new JupiterRefused(e.message);
+        }
+        const buying = tx.tokenIn === NATIVE;
+        tx = { ...tx, amountIn: fee.net };
+        const feeIxs = fee.each.map(e => { const x = systemTransfer(w, e.to, e.lamports); return { programId: x.program, accounts: x.keys.map(k => ({ pubkey: k.pubkey, isSigner: !!k.signer, isWritable: !!k.writable })), data: x.data }; });
         if (!v.supports(tx.tokenIn, tx.tokenOut))
             throw new JupiterRefused('this Jupiter venue does not cover that pair');
         const allowed = await fetchRoutableProgramIds(j);
@@ -309,12 +331,12 @@ export class SolanaChain {
             tables.push(t);
         });
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-        const body = tipIx ? [...b.ixs, tipIx] : b.ixs;
+        const body = [...(buying ? feeIxs : []), ...b.ixs, ...(buying ? [] : feeIxs), ...(tipIx ? [tipIx] : [])];
         let message = compileV0(w, body, b99(bh.value.blockhash), tables);
         if (tip && !parseMessage(message).staticKeys.includes(tip.to))
             throw new JupiterRefused('the tip account ended up in a lookup table, where Jito ignores tips');
         const final = resolveMessage(parseMessage(message), tables);
-        const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip });
+        const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each });
         const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM), outAta = ataAddress(w, outM), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
         const route = final[gate.swapIndex], cand = route.accounts.filter(a => a.isWritable && !a.isSigner).map(a => a.pubkey), cinfo = await this.accountsAt(cand), wb = pubkeyBytes(w);
         const mine = new Set(cand.filter((a, i) => { const x = cinfo[i]; return !!x && x.owner === PROGRAMS.token && x.data.length === 165 && x.data.subarray(32, 64).equals(Buffer.from(wb)); }));
@@ -333,8 +355,8 @@ export class SolanaChain {
         let k = 1;
         if (tx.tokenIn === NATIVE) {
             const spent = lam(pre[0]) - lam(post[0]);
-            if (spent > tx.amountIn + feeAll + rent)
-                throw new JupiterRefused(`simulated SOL spend ${spent} exceeds the intent ${tx.amountIn} plus fees ${feeAll} and new token-account rent ${rent}`);
+            if (spent > tx.amountIn + fee.total + feeAll + rent)
+                throw new JupiterRefused(`simulated SOL spend ${spent} exceeds the intent ${tx.amountIn} plus the platform fee ${fee.total} plus fees ${feeAll} and new token-account rent ${rent}`);
         }
         else {
             const spent = tok(pre[k]) - tok(post[k]);
@@ -344,7 +366,7 @@ export class SolanaChain {
         }
         let got;
         if (tx.tokenOut === NATIVE)
-            got = lam(post[0]) - lam(pre[0]) + feeAll + rent;
+            got = lam(post[0]) - lam(pre[0]) + feeAll + rent + fee.total;
         else
             got = tok(post[k]) - tok(pre[k]);
         if (tx.tokenIn === NATIVE && tx.tokenOut === NATIVE)
@@ -359,7 +381,7 @@ export class SolanaChain {
             const price = this.fees ? await this.fees.price(cand, limit).catch(() => clampPrice(jupPrice, limit, cap)) : clampPrice(jupPrice, limit, j.maxPriorityLamports ?? 2000000n);
             const cb = (data) => ({ programId: COMPUTE_BUDGET, accounts: [], data });
             message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...body.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
-            gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip });
+            gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each });
         }
         return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
     }
@@ -524,6 +546,11 @@ export class SolanaChain {
                     break;
                 }
             }
-        return { hash, status: 'success', block, deltas, network, platformFee: 0n, venueFee };
+        // the platform fee actually paid: what the fee wallets received in this transaction (fee sharing)
+        const feeTo = new Set((this.cfg.fees?.() ?? []).map(r => r.address));
+        let platformFee = 0n;
+        keys.forEach((k, i) => { if (i > 0 && feeTo.has(k))
+            platformFee += BigInt(m.postBalances[i] ?? 0) - BigInt(m.preBalances[i] ?? 0); });
+        return { hash, status: 'success', block, deltas, network, platformFee, venueFee };
     }
 }

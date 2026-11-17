@@ -13,7 +13,7 @@ import type { Backend } from '../../packages/core/src/index.ts';
 import { PrivyApi, verifySignature, looksLikeMint } from '../../packages/sol/src/index.ts';
 import type { PrivyConfig } from '../../packages/sol/src/index.ts';
 import { createSolanaTrader, jupiterSolUsd, toUnits } from '../../packages/sdk/src/solana.ts';
-import type { JitoOptions } from '../../packages/sol/src/index.ts';
+import type { JitoOptions, FeeRecipient } from '../../packages/sol/src/index.ts';
 import { SdkError } from '../../packages/sdk/src/wire.ts';
 import type { Account } from './node.ts';
 import type { Route } from '../api/server.ts';
@@ -32,12 +32,12 @@ export const readSettings = (b: Backend): UserSettings => { try { return { ...DE
 const TRADE_PATHS = /^\/v1\/(trades\/(buy|sell)$|orders\/[a-z-]+$|twap$|bulk\/(buy|sell)$)/;
 
 /** The account factory. A user with no linked (or no longer delegated) wallet still gets an account: reads work, every call that names a wallet is refused with the reason. */
-export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?: string[]; /** Block-engine options for users who turn MEV protection on (region URL, uuid; tests pass a stand-in). */ jito?: JitoOptions; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void }) {
+export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?: string[]; /** Who gets fees on this user's trades (fee sharing). */ fees?: (userId: string) => FeeRecipient[]; /** Block-engine options for users who turn MEV protection on (region URL, uuid; tests pass a stand-in). */ jito?: JitoOptions; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void }) {
   const privy = new PrivyApi(c.privy), solUsd = c.solUsd ?? jupiterSolUsd(), status = new Map<string, Status>(); const live = new Map<string, Awaited<ReturnType<typeof createSolanaTrader>>>();
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
     const link = readLink(state('solwallet'));
     const set = readSettings(state('settings')), mev = { enabled: set.mevProtection, maxTipLamports: toUnits(set.maxTipSol, 9, 'maxTipSol'), jito: c.jito };
-    const s = await createSolanaTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, tokenSafety: set.tokenSafety, caps: c.caps, venues: c.venues, solUsd, log: c.log });
+    const s = await createSolanaTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, tokenSafety: set.tokenSafety, fees: c.fees ? () => c.fees!(userId) : undefined, caps: c.caps, venues: c.venues, solUsd, log: c.log });
     live.set(userId, s);
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     return { trader: s.trader, prepare: async (raw: any, path: string) => {

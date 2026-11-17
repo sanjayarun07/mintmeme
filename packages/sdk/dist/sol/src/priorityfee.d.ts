@@ -39,3 +39,18 @@ export declare class PriorityFees {
 }
 /** Lower `microLamports` so that microLamports x limit / 1e6 <= capLamports. */
 export declare function clampPrice(microLamports: bigint, computeUnitLimit: number, capLamports: bigint): bigint;
+/** FEE SHARING. Who gets a trade's platform fee, and how much each gets, in lamports. Fees on Solana are always paid in SOL, as plain transfers inside the swap's own
+ *  transaction (paid only if the trade lands): on a buy from the SOL being spent (the swap gets the rest), on a sell from the SOL received, computed on the guaranteed
+ *  minimum output. `bps` is the total fee of the trade; it is split between the recipients in proportion to their own bps (the last one gets any rounding remainder). */
+export interface FeeRecipient {
+    address: string;
+    bps: number;
+}
+export declare function feeTransfers(side: 'buy' | 'sell', amountIn: bigint, minOut: bigint, bps: number, recipients: FeeRecipient[]): {
+    net: bigint;
+    total: bigint;
+    each: {
+        to: string;
+        lamports: bigint;
+    }[];
+};

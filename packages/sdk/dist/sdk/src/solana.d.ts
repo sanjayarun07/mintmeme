@@ -1,6 +1,6 @@
 import type { Backend } from '../../core/src/index.ts';
 import { SolanaChain, PrivyApi, JitoSubmitter } from '../../sol/src/index.ts';
-import type { PrivyConfig, PriorityConfig, JitoOptions } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig, JitoOptions, SafetyReport, FeeRecipient } from '../../sol/src/index.ts';
 import { Trader } from './trader.ts';
 export declare const WSOL_MINT = "So11111111111111111111111111111111111111112";
 /** Defaults: at most 0.05 SOL per buy and 0.25 SOL of buys per day. Lower them per user if you like; the Privy policy caps SOL transfers separately. */
@@ -30,6 +30,11 @@ export interface SolanaTraderOptions {
     walletId?: string;
     /** Priority fees (packages/sol/src/priorityfee.ts). Default on: 75th percentile of recent fees on the trade's accounts, at most 0.0001 SOL per transaction. false: off. */
     priority?: PriorityConfig | false;
+    /** Token safety before buys (packages/sol/src/tokensafety.ts): 'block' (default) refuses tokens you might not be able to sell, 'warn' only reports, 'off' skips. */
+    tokenSafety?: 'block' | 'warn' | 'off';
+    /** Fee sharing: who receives a fee on each trade and how much (bps of the trade, paid in SOL inside the trade's own transaction). Read at every trade. The user's
+     *  `maxFeeBps` on a trade (default 2%) still caps the total: a trade whose fees are above it fails before anything is signed. */
+    fees?: () => FeeRecipient[];
     /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
      *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
     mevProtection?: boolean | MevOptions;
@@ -43,6 +48,8 @@ export interface SolanaTrader {
     prepare: (token: string) => Promise<void>;
     sync: () => Promise<void>;
     refuseIfInactive: () => void;
+    /** Token safety report (cached 60 s). */ safety: (mint: string) => Promise<SafetyReport>;
+    /** Run before a buy: throws `unsafe_token` (409) for a blocked token unless `allowRisky` or tokenSafety is warn/off; returns the report. */ checkBuy: (mint: string, allowRisky?: boolean) => Promise<SafetyReport | undefined>;
     /** Plain units for one API call (see `simpleBody`): returns the body the Trader understands. */
     simple: (path: string, body: any) => Promise<any>;
 }

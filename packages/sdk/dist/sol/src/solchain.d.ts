@@ -8,7 +8,7 @@
  *     received directly. Associated token accounts for the output token are created inside the same transaction (their rent is reported as network cost).
  *   - Finality is Solana's own: `confirmations` reports the finalityDepth when the signature is `finalized`, else the node's confirmation count (capped below it).
  *   - Fills come from the transaction's pre/post balances for the wallet (lamports and token balances), never from the quote.
- *   - Platform fee collection is NOT implemented (a tx with platformFeeBps > 0 is refused). Pending-tx cancellation is not offered (no `evict`).
+ *   - Platform fees are paid in SOL to the configured fee wallets inside the swap's own transaction (cfg.fees, priorityfee.ts feeTransfers). Pending-tx cancellation is not offered (no `evict`).
  *   - Signing is injected (`SolSigner`); the repo ships a dev-only ed25519 signer for throwaway keys. Custody is out of scope.
  *   - Only Raydium AMM v4 pools (constant-product) are supported; no CLMM/CPMM/Orca/Meteora, pump.fun bonding curves only through the `pump` option (SOL <-> token, curve not complete, no mayhem or cashback coins), no routing across pools, no Token-2022 transfer-fee accounting. */
 import type { ChainPort, SimTx, Receipt, Venue } from '../../core/src/index.ts';
@@ -16,7 +16,7 @@ import type { SolRpc } from './raydium.ts';
 import type { SolSigner } from './signer.ts';
 import type { JupCfg } from './jupiterswap.ts';
 import type { TxSubmitter } from './submitter.ts';
-import type { PriorityConfig } from './priorityfee.ts';
+import type { PriorityConfig, FeeRecipient } from './priorityfee.ts';
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
 export declare class SolJsonRpcError extends Error {
     data?: any;
@@ -45,6 +45,8 @@ export interface SolChainConfig {
     priority?: PriorityConfig;
     /** With a tipping submitter (Jito): send privately unless a trade says otherwise. Default true. */
     mevDefault?: boolean;
+    /** Fee sharing: who receives the platform fee (priorityfee.ts feeTransfers). Read at every trade. Fee wallets must already exist on chain (hold SOL). */
+    fees?: () => FeeRecipient[];
     /** Jupiter routes the engine may use. `pairs` are directions (a pair needs one entry per direction); `refAmount` is the size of the quote snapshot used for estimates. */
     /** pump.fun bonding curves to track, by mint. Only curves we can trade (not complete, not mayhem or cashback) become tradable venues; the rest are loaded with the reason they are not. */
     pump?: {
@@ -115,6 +117,8 @@ export declare class SolanaChain implements ChainPort {
     private res;
     /** Instructions for a SimTx. Throws if it cannot be built (unknown venue, platform fee requested). */
     private instructions;
+    /** The fee transfers for this trade (none without a platform fee). A sell pays from the SOL it receives, so only SOL-in or SOL-out trades can carry one. */
+    private feeSplit;
     private jupVenue;
     private accountsAt;
     /** Ask Jupiter for the route, compile it ourselves, run the safety gate on the exact bytes to be signed, then SIMULATE and check the wallet's balances. Throws JupiterRefused to stop. */

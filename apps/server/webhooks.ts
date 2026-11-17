@@ -15,6 +15,10 @@ export interface WebhookConfig { url: string; secret: string }
 export interface WebhookOptions { fetchFn?: typeof fetch; allowHttp?: boolean; retryMs?: number[]; timeoutMs?: number; log?: (m: string) => void; cacheMs?: number }
 const hookKey = (ns: string, app: string) => `${ns}:app:${app}:webhook`;
 export const appUsersKey = (ns: string, app: string) => `${ns}:app:${app}:users`;
+/** An app's own fee on its users' trades: a Solana wallet and bps, set by the app (PUT /v1/app/fees), capped by the operator. */
+export const appFeeKey = (ns: string, app: string) => `${ns}:app:${app}:fees`;
+export interface AppFee { wallet: string; bps: number }
+export function readAppFee(r: SyncRedis, ns: string, app: string): AppFee | null { try { const s = r.cmd('GET', appFeeKey(ns, app)); return typeof s === 'string' ? JSON.parse(s) : null; } catch { return null; } }
 
 /** Refuse URLs that would make the server call itself or a private network (literal IPs and localhost; DNS names that resolve privately are not checked). */
 export function checkWebhookUrl(raw: unknown, allowHttp = false): string {
@@ -68,8 +72,15 @@ export class Webhooks {
 }
 
 /** /v1/app/* routes (app keys only): the webhook, a test delivery, and the app's end users. */
-export function appRoutes(h: Webhooks, r: SyncRedis, ns: string): Route[] {
+export function appRoutes(h: Webhooks, r: SyncRedis, ns: string, maxAppFeeBps = 100): Route[] {
   return [
+    { method: 'GET', path: '/v1/app/fees', scope: 'read', summary: 'The fee the app charges on its users\' trades (Solana wallet and bps)', run: c => readAppFee(r, ns, c.userId) ?? { wallet: null, bps: 0 } },
+    { method: 'PUT', path: '/v1/app/fees', scope: 'trade', summary: `Set the app's fee: bps of each trade, paid in SOL to this wallet inside the trade. At most ${maxAppFeeBps} bps. The wallet must already hold SOL.`, body: 'wallet (Solana address), bps (integer)',
+      run: c => { const w = String(c.body?.wallet ?? ''), bps = Number(c.body?.bps);
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(w)) throw new SdkError('bad_address', 'wallet must be a Solana address');
+        if (!Number.isInteger(bps) || bps < 0 || bps > maxAppFeeBps) throw new SdkError('bad_number', `bps must be a whole number from 0 to ${maxAppFeeBps}`);
+        const v: AppFee = { wallet: w, bps }; r.cmd('SET', appFeeKey(ns, c.userId), JSON.stringify(v)); return v; } },
+    { method: 'DELETE', path: '/v1/app/fees', scope: 'trade', summary: 'Stop charging an app fee', run: c => { r.cmd('DEL', appFeeKey(ns, c.userId)); return { wallet: null, bps: 0 }; } },
     { method: 'GET', path: '/v1/app/webhook', scope: 'read', summary: 'The app\'s webhook URL (the secret is never shown again)', run: c => { const v = h.get(c.userId); return { url: v?.url ?? null, configured: !!v }; } },
     { method: 'PUT', path: '/v1/app/webhook', scope: 'trade', summary: 'Set the webhook. Returns the signing secret ONCE (generated unless you pass one)', body: 'url (https), secret? (16 to 200 characters)', run: c => h.set(c.userId, c.body?.url, c.body?.secret) },
     { method: 'DELETE', path: '/v1/app/webhook', scope: 'trade', summary: 'Stop sending webhooks', run: c => { h.delete(c.userId); return { configured: false }; } },
