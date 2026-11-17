@@ -35,7 +35,7 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
    bytes before signing) and pump.fun bonding curves. pump.fun curve trading and non-Raydium Jupiter routes have been run on the local validator only.
 9. Copy trading sees a leader's swap on any DEX (from its balance changes) but can only mirror it on the venues above. A leader reorg flags the position; it never sells
    automatically.
-10. `MintInspector` checks mint authority, freeze authority and Token-2022 only: no sell simulation, holder concentration or LP lock checks.
+10. Buys are checked by `TokenSafety` (freeze/mint authority, Token-2022 extensions, largest holders, a sell route, 1-SOL impact; SDK_AND_API.md 4.7). It does not simulate a sell, check LP locks, or know which large holders are pools other than pump.fun curves; it is not a certification. Sniping still uses the older `MintInspector`.
 
 ## Persistence and concurrency
 11. With `persistDir` or a `state` backend, orders (including chase and USD-trigger settings), OCO claims, trailing peaks, reservations, TWAP and bulk state and the engine

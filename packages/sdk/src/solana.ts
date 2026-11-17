@@ -10,8 +10,8 @@ import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.ts';
 import type { Backend, SpentLedger, WalletPolicy } from '../../core/src/index.ts';
-import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, looksLikeMint } from '../../sol/src/index.ts';
-import type { PrivyConfig, PriorityConfig, JitoOptions } from '../../sol/src/index.ts';
+import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, TokenSafety, pumpAddresses, PROGRAMS, looksLikeMint } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig, JitoOptions, SafetyReport } from '../../sol/src/index.ts';
 import { fetchJupiterQuote } from '../../sol/src/jupiter.ts';
 import { Trader } from './trader.ts';
 import { SdkError } from './wire.ts';
@@ -35,12 +35,16 @@ export interface SolanaTraderOptions {
   walletId?: string;
   /** Priority fees (packages/sol/src/priorityfee.ts). Default on: 75th percentile of recent fees on the trade's accounts, at most 0.0001 SOL per transaction. false: off. */
   priority?: PriorityConfig | false;
+  /** Token safety before buys (packages/sol/src/tokensafety.ts): 'block' (default) refuses tokens you might not be able to sell, 'warn' only reports, 'off' skips. */
+  tokenSafety?: 'block' | 'warn' | 'off';
   /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
    *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
   mevProtection?: boolean | MevOptions;
   log?: (m: string) => void;
 }
 export interface SolanaTrader { trader: Trader; chain: SolanaChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
+  /** Token safety report (cached 60 s). */ safety: (mint: string) => Promise<SafetyReport>;
+  /** Run before a buy: throws `unsafe_token` (409) for a blocked token unless `allowRisky` or tokenSafety is warn/off; returns the report. */ checkBuy: (mint: string, allowRisky?: boolean) => Promise<SafetyReport | undefined>;
   /** Plain units for one API call (see `simpleBody`): returns the body the Trader understands. */
   simple: (path: string, body: any) => Promise<any> }
 
@@ -119,7 +123,20 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   const active = signable.size > 0;
   const balance = async (mint: string) => { const r: any = await rpc.call('getTokenAccountsByOwner', [o.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]); return (r.value as any[]).reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); };
   const simple = (path: string, body: any) => simpleBody(path, body, { address: o.address, decimals, balance });
-  return { trader, chain, active, why, prepare, simple, sync: () => chain.refresh('venues'), refuseIfInactive: () => { if (!active) throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
+  // token safety before buys: the pump.fun bonding curve is liquidity, not a holder; a sell route and 1-SOL impact come from this chain's venues
+  const best = (mint: string) => chain.venues().filter(v => venues.some(f => v.family === f || v.id === f));
+  const safetyCheck = new TokenSafety(rpc, { cacheMs: 60_000,
+    liquidityAccounts: m => [PROGRAMS.token, 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'].map(tp => pumpAddresses(m, m, tp).associatedBondingCurve),
+    sellRoute: async m => { await prepare(m); return best(m).some(v => v.supports(m, NATIVE)); },
+    buyImpactPct: async m => { await prepare(m); const q = best(m).filter(v => v.supports(NATIVE, m)).map(v => v.quote(NATIVE, m, 1_000_000_000n)); return q.length ? Math.min(...q.map(x => x.priceImpactBps)) / 100 : undefined; } });
+  const mode = o.tokenSafety ?? 'block';
+  const checkBuy = async (mint: string, allowRisky = false) => {
+    if (mode === 'off' || mint === NATIVE || mint === WSOL_MINT) return undefined;
+    const r = await safetyCheck.check(mint);
+    if (r.verdict === 'block' && mode === 'block' && !allowRisky) throw new SdkError('unsafe_token', `this token was blocked by the safety check: ${r.risks.filter(x => x.level === 'block').map(x => x.message).join(' ')}`, 'Check the token. To buy it anyway, send allowRiskyToken: true with this trade, or set tokenSafety to warn.', 409);
+    return r;
+  };
+  return { trader, chain, active, why, prepare, simple, sync: () => chain.refresh('venues'), safety: (mint: string) => safetyCheck.check(mint), checkBuy, refuseIfInactive: () => { if (!active) throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
 }
 
 /** MEV protection options. `enabled` (default true when you pass an object) is the account default; a trade's own `mevProtection` wins either way. The block-engine

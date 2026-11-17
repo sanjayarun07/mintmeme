@@ -14,3 +14,4 @@ export * from './stream.js';
 export * from './remotesigner.js';
 export * from './privysigner.js';
 export * from './priorityfee.js';
+export * from './tokensafety.js';

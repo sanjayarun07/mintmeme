@@ -190,26 +190,6 @@ await s.prepare(mint); await s.trader.limitBuy({ walletId: userWallet, token: mi
 s.trader.on(e => console.log(e));
 ```
 
-### 4.6 Apps: one key for many users, and webhooks
-
-An app with many users holds **one app key** (`npm run server:key -- <appId> app`, key file line `hash:<appId>:app`) and names the end user on every call in the
-`X-User-Id` header (1 to 64 letters, digits, dot, dash, underscore). Each end user is a separate account, `<appId>:<userId>`, with its own orders, trades, wallet link,
-settings, rate limit (per end user) and failover; one end user can never see another's. End users are created on their first call, up to `MAX_USERS_PER_APP`
-(default 10,000).
-
-```ts
-const app = new MemeClient({ baseUrl, apiKey: APP_KEY });
-const alice = app.forUser('alice');                        // or new MemeClient({ baseUrl, apiKey: APP_KEY, userId: 'alice' })
-await alice.swap({ side: 'buy', mint, sol: '0.01' });
-const { secret } = await app.setAppWebhook('https://api.yourapp.com/hooks/memedesk');   // the secret is shown once
-```
-
-**Webhooks:** every event of every end user (trade, order, bulk, TWAP, alert) is POSTed to the app's URL as
-`{ id, type, appId, userId, at, data }`, signed `x-memedesk-signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`, with `x-memedesk-event-id`
-(the same on retries: deduplicate on it). Verify with `verifyWebhook(secret, rawBody, header)` from the SDK (it also refuses deliveries older than 5 minutes).
-A non-2xx answer or timeout is retried after 2 s, 10 s and 60 s. Delivery is best effort while the node runs: retries still waiting when a node stops are lost, so
-treat webhooks as notifications and read state through the API. Only https URLs to public hosts are accepted. `POST /v1/app/webhook/test` sends a signed `ping`.
-
 **Priority fees** are on by default (`priority` option; `false` turns them off). Each transaction gets a compute-unit limit from a simulation (units used × 1.2, as
 Jupiter's compute-unit guide recommends; Jupiter's `/build` sets no limit, so the fee would otherwise be charged on up to 1.4M units) and a price from Solana's
 `getRecentPrioritizationFees` for the accounts the trade writes: the 75th percentile, at least 10,000 micro-lamports per unit, and never more than 0.0001 SOL in total per
@@ -231,6 +211,40 @@ sandwich attacks but is not guaranteed". It works on Jupiter and pump.fun trades
 
 Defaults: Jupiter and pump.fun only, at most 0.05 SOL per buy and 0.25 SOL of buys per day (`caps` lowers or changes them), sells of held tokens not capped in SOL, SOL/USD
 from a Jupiter quote (`solUsd` replaces it). For many users in one process, share one `PrivyApi` and one `jupiterSolUsd()` across them.
+
+### 4.6 Apps: one key for many users, and webhooks
+
+An app with many users holds **one app key** (`npm run server:key -- <appId> app`, key file line `hash:<appId>:app`) and names the end user on every call in the
+`X-User-Id` header (1 to 64 letters, digits, dot, dash, underscore). Each end user is a separate account, `<appId>:<userId>`, with its own orders, trades, wallet link,
+settings, rate limit (per end user) and failover; one end user can never see another's. End users are created on their first call, up to `MAX_USERS_PER_APP`
+(default 10,000).
+
+```ts
+const app = new MemeClient({ baseUrl, apiKey: APP_KEY });
+const alice = app.forUser('alice');                        // or new MemeClient({ baseUrl, apiKey: APP_KEY, userId: 'alice' })
+await alice.swap({ side: 'buy', mint, sol: '0.01' });
+const { secret } = await app.setAppWebhook('https://api.yourapp.com/hooks/memedesk');   // the secret is shown once
+```
+
+**Webhooks:** every event of every end user (trade, order, bulk, TWAP, alert) is POSTed to the app's URL as
+`{ id, type, appId, userId, at, data }`, signed `x-memedesk-signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`, with `x-memedesk-event-id`
+(the same on retries: deduplicate on it). Verify with `verifyWebhook(secret, rawBody, header)` from the SDK (it also refuses deliveries older than 5 minutes).
+A non-2xx answer or timeout is retried after 2 s, 10 s and 60 s. Delivery is best effort while the node runs: retries still waiting when a node stops are lost, so
+treat webhooks as notifications and read state through the API. Only https URLs to public hosts are accepted. `POST /v1/app/webhook/test` sends a signed `ping`.
+
+### 4.7 Token safety before buys
+
+Every buy (market, limit buy, TWAP buy, bulk buy) is checked before anything is signed (`packages/sol/src/tokensafety.ts`), from the mint (decoded by the RPC,
+Token-2022 extensions by name), its largest holders and the current routes:
+
+| Blocks the buy | Warns |
+|---|---|
+| freeze authority set; permanent delegate; transfer hook with a program; non-transferable; accounts frozen by default; pausable; transfer fee of 10% or more; no route can sell it | mint authority set; a smaller or settable transfer fee; an unknown Token-2022 extension; one holder above 20% or the top 10 above 50% of supply (bonding curves left out); buying 1 SOL moves the price over 10% |
+
+Setting: `tokenSafety: 'block'` (default), `'warn'` (report only) or `'off'`: `createSolanaTrader({ tokenSafety })`, or `PATCH /v1/settings {"tokenSafety": "warn"}`.
+One trade can override a block with `allowRiskyToken: true`. A blocked buy fails with `unsafe_token` (409) and the reasons. The report: `GET /v1/tokens/:mint/safety`, or
+`s.safety(mint)` in the SDK. Sells are never blocked. It is not a certification: a token that passes can still go to zero.
+
 
 ---
 
@@ -498,6 +512,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 | `GET /v1/events` | Live events |
 | `GET /v1/wallet`; `POST /v1/wallet/link/start`, `/v1/wallet/link/finish`; `DELETE /v1/wallet` | Execution server in `MODE=solana-mainnet` only: link the user's Privy wallet (section 4.5 A), see whether it may trade now, unlink. Errors: `bad_signature` 401, `not_delegated` 409, `link_expired` 410, `privy_unavailable` 503; trades on an account whose wallet is not active: `wallet_not_active` 409 |
 | `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false) and `maxTipSol` (default 0.0001, at most 0.001). Any trade or order also takes `mevProtection: true|false` for itself |
+| `GET /v1/tokens/:mint/safety` | `MODE=solana-mainnet`: the token safety report (section 4.7). Buys of a blocked token fail with `unsafe_token` 409 unless `allowRiskyToken: true` or `tokenSafety` is warn/off |
 | `GET`, `PUT`, `DELETE /v1/app/webhook`; `POST /v1/app/webhook/test`; `GET /v1/app/users` | App keys only (section 4.6): the app's signed webhook and its end users. With an app key every other route needs `X-User-Id` (`missing_user` 400 without it; `app_user_limit` 403 past MAX_USERS_PER_APP; `not_an_app_key` 403 for /v1/app with a user key) |
 
 ---

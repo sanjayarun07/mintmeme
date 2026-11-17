@@ -22,7 +22,7 @@ test('real Solana accounts: linking proves the wallet and its Privy permission, 
   const n = `memedesk-realmode-test:${Date.now()}`, seed = randomBytes(32), wallet = new DevSolSigner(), addr = wallet.add(seed), fp = fakePrivy({ seed, delegated: false });
   const acc = solanaAccounts({ rpcUrl: 'http://127.0.0.1:9', privy: { ...fp.cfg, fetchFn: fp.fetchFn }, solUsd: async () => ({ price: 100, at: Date.now() }) });
   const mk = async () => { const port = await freePort(), url = `http://127.0.0.1:${port}`;
-    const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: n, publicUrl: url, keys, makeAccount: acc.make, extraRoutes: h => linkRoutes({ privy: acc.privy, status: acc.status, ...h }), leaseTtlMs: 3000, sweepMs: 60_000, requireAof: false, log: () => {} });
+    const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: n, publicUrl: url, keys, makeAccount: acc.make, extraRoutes: h => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }), leaseTtlMs: 3000, sweepMs: 60_000, requireAof: false, log: () => {} });
     await nd.listen(port); return { nd, url }; };
   const a = await mk(), b = await mk(), live = [a, b];
   const call = async (base: string, key: string, method: string, path: string, body?: unknown) => { const r = await fetch(base + path, { method, headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }); return { status: r.status, j: await r.json() as any, node: r.headers.get('x-memedesk-node') }; };
@@ -51,8 +51,9 @@ test('real Solana accounts: linking proves the wallet and its Privy permission, 
     w = await call(other.url, KA, 'GET', '/v1/wallet'); assert.equal(w.node, other.url); assert.equal(w.j.linked, true); assert.equal(w.j.active, false); assert.match(w.j.why, /not allowed automatic trading/);
     assert.equal((await call(other.url, KA, 'POST', '/v1/trades/buy', { walletId: addr, token: 'So11111111111111111111111111111111111111112', amount: '1000' })).j.error.code, 'wallet_not_active');
     // settings: MEV protection off by default; turning it on is stored and validated
-    const s0 = await call(other.url, KA, 'GET', '/v1/settings'); assert.deepEqual(s0.j, { mevProtection: false, maxTipSol: '0.0001' });
-    const s1 = await call(other.url, KA, 'PATCH', '/v1/settings', { mevProtection: true, maxTipSol: '0.0002' }); assert.deepEqual(s1.j, { mevProtection: true, maxTipSol: '0.0002' });
+    const s0 = await call(other.url, KA, 'GET', '/v1/settings'); assert.deepEqual(s0.j, { mevProtection: false, maxTipSol: '0.0001', tokenSafety: 'block' });
+    const s1 = await call(other.url, KA, 'PATCH', '/v1/settings', { mevProtection: true, maxTipSol: '0.0002' }); assert.deepEqual(s1.j, { mevProtection: true, maxTipSol: '0.0002', tokenSafety: 'block' });
+    assert.equal((await call(other.url, KA, 'PATCH', '/v1/settings', { tokenSafety: 'warn' })).j.tokenSafety, 'warn'); assert.equal((await call(other.url, KA, 'PATCH', '/v1/settings', { tokenSafety: 'maybe' })).status, 400);
     assert.equal((await call(other.url, KA, 'PATCH', '/v1/settings', { maxTipSol: '0.5' })).j.error.code, 'bad_amount', 'a tip above 0.001 SOL is refused');
     assert.equal((await call(other.url, KA, 'PATCH', '/v1/settings', { mevProtection: 'yes' })).status, 400);
     assert.equal((await call(other.url, KB, 'GET', '/v1/settings')).j.mevProtection, false, 'per user');

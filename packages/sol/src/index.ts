@@ -14,3 +14,4 @@ export * from './stream.ts';
 export * from './remotesigner.ts';
 export * from './privysigner.ts';
 export * from './priorityfee.ts';
+export * from './tokensafety.ts';

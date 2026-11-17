@@ -38,7 +38,7 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
   const privy = privyConfig(e), missing = [!rpcUrl && 'SOLANA_RPC_URL (or ALCHEMY_API_KEY)', !privy && 'PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID, PRIVY_AUTH_PRIVATE_KEY, PRIVY_SOLANA_POLICY_ID'].filter(Boolean);
   if (missing.length) throw new Error(`MODE=solana-mainnet needs ${missing.join(' and ')} (README → Custody plan).`);
   const acc = solanaAccounts({ rpcUrl, privy: privy! });
-  return { makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, ...h }) };
+  return { makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }) };
 }
 
 if (import.meta.main) {

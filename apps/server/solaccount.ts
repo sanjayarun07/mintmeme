@@ -22,8 +22,10 @@ export interface SolLink { address: string; walletId: string; linkedAt: number }
 export const readLink = (b: Backend): SolLink | undefined => { try { const j = JSON.parse(b.read() ?? ''); return j && looksLikeMint(j.address) && typeof j.walletId === 'string' ? j : undefined; } catch { return undefined; } };
 type Status = { address?: string; active: boolean; why?: string };
 /** Per-user trading settings, in the user's Redis state. MEV protection is off by default: each protected trade pays a Jito tip. */
-export interface UserSettings { mevProtection: boolean; maxTipSol: string }
-export const DEFAULT_SETTINGS: UserSettings = { mevProtection: false, maxTipSol: '0.0001' };
+export interface UserSettings { mevProtection: boolean; maxTipSol: string; tokenSafety: 'block' | 'warn' | 'off' }
+export const DEFAULT_SETTINGS: UserSettings = { mevProtection: false, maxTipSol: '0.0001', tokenSafety: 'block' };
+/** Routes that BUY a token (checked by token safety before anything is signed). */
+const isBuy = (path: string, b: any) => path === '/v1/trades/buy' || path === '/v1/orders/limit-buy' || path === '/v1/bulk/buy' || (path === '/v1/twap' && b?.side === 'buy');
 const MAX_TIP_SOL_CEILING = 1_000_000n;   // 0.001 SOL: a tip above this is refused, whatever the user asks
 export const readSettings = (b: Backend): UserSettings => { try { return { ...DEFAULT_SETTINGS, ...JSON.parse(b.read() ?? '{}') }; } catch { return { ...DEFAULT_SETTINGS }; } };
 /** Routes that spend or sell from the wallet (refused while the wallet is not active). */
@@ -31,25 +33,27 @@ const TRADE_PATHS = /^\/v1\/(trades\/(buy|sell)$|orders\/[a-z-]+$|twap$|bulk\/(b
 
 /** The account factory. A user with no linked (or no longer delegated) wallet still gets an account: reads work, every call that names a wallet is refused with the reason. */
 export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?: string[]; /** Block-engine options for users who turn MEV protection on (region URL, uuid; tests pass a stand-in). */ jito?: JitoOptions; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void }) {
-  const privy = new PrivyApi(c.privy), solUsd = c.solUsd ?? jupiterSolUsd(), status = new Map<string, Status>();
+  const privy = new PrivyApi(c.privy), solUsd = c.solUsd ?? jupiterSolUsd(), status = new Map<string, Status>(); const live = new Map<string, Awaited<ReturnType<typeof createSolanaTrader>>>();
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
     const link = readLink(state('solwallet'));
     const set = readSettings(state('settings')), mev = { enabled: set.mevProtection, maxTipLamports: toUnits(set.maxTipSol, 9, 'maxTipSol'), jito: c.jito };
-    const s = await createSolanaTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, caps: c.caps, venues: c.venues, solUsd, log: c.log });
+    const s = await createSolanaTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, tokenSafety: set.tokenSafety, caps: c.caps, venues: c.venues, solUsd, log: c.log });
+    live.set(userId, s);
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     return { trader: s.trader, prepare: async (raw: any, path: string) => {
       const trades = TRADE_PATHS.test(path); if (trades) s.refuseIfInactive();
       const tok = raw?.token ?? raw?.mint; if (typeof tok === 'string') await s.prepare(tok);   // learn the token first: plain units need its decimals
       const body = await s.simple(path, raw);
       if (trades || typeof tok === 'string') await s.sync();   // the chain's clock (deadlines) and pool state (quotes) as of now, not as of the last tick
+      if (isBuy(path, body) && typeof body?.token === 'string') await s.checkBuy(body.token, raw?.allowRiskyToken === true);   // before anything is signed
       return body;
     } };
   };
-  return { make, status: (u: string) => status.get(u), privy };
+  return { make, status: (u: string) => status.get(u), privy, safety: async (u: string, mint: string) => { const s = live.get(u); if (!s) throw new SdkError('not_owner', 'this node does not run your account right now', 'Retry in a few seconds.', 503); await s.prepare(mint); return s.safety(mint); } };
 }
 
 /** The wallet-linking routes. `state(user)` gives the owner node's durable state for that user (writes go through the user's lease); `reload(user)` rebuilds its account. */
-export function linkRoutes(o: { privy: PrivyApi; state: (userId: string) => ((name: string) => Backend) | undefined; reload: (userId: string) => Promise<void>; status: (userId: string) => Status | undefined; now?: () => number }): Route[] {
+export function linkRoutes(o: { privy: PrivyApi; safety?: (userId: string, mint: string) => Promise<unknown>; state: (userId: string) => ((name: string) => Backend) | undefined; reload: (userId: string) => Promise<void>; status: (userId: string) => Status | undefined; now?: () => number }): Route[] {
   const now = o.now ?? Date.now, pending = new Map<string, { address: string; message: string; exp: number }>();
   const st = (u: string) => { const s = o.state(u); if (!s) throw new SdkError('not_owner', 'this node does not run your account right now', 'Retry in a few seconds.', 503); return s; };
   const view = (u: string) => { const l = readLink(st(u)('solwallet')), s = o.status(u); return { linked: !!l, address: l?.address ?? null, active: !!s?.active, why: s?.active ? null : s?.why ?? null }; };
@@ -70,11 +74,14 @@ export function linkRoutes(o: { privy: PrivyApi; state: (userId: string) => ((na
         st(c.userId)('solwallet').write(JSON.stringify({ address, walletId: d.walletId, linkedAt: now() } satisfies SolLink));
         await o.reload(c.userId); return view(c.userId);
       } },
+    { method: 'GET', path: '/v1/tokens/:mint/safety', scope: 'read', summary: 'Token safety report: freeze or mint authority, Token-2022 extensions that can stop a sell or take tokens, holder concentration, a sell route, 1-SOL impact',
+      run: c => { if (!o.safety) throw new SdkError('not_configured', 'no safety check on this server', undefined, 501); return o.safety(c.userId, c.params.mint); } },
     { method: 'GET', path: '/v1/settings', scope: 'read', summary: 'Your trading settings (MEV protection)', run: c => readSettings(st(c.userId)('settings')) },
-    { method: 'PATCH', path: '/v1/settings', scope: 'trade', summary: 'Change trading settings. mevProtection: send trades privately through Jito with a tip (off by default). maxTipSol: the most one tip may cost (default 0.0001, at most 0.001)', body: 'mevProtection? (boolean), maxTipSol? (decimal string)',
+    { method: 'PATCH', path: '/v1/settings', scope: 'trade', summary: 'Change trading settings. mevProtection: send trades privately through Jito with a tip (off by default). maxTipSol: the most one tip may cost (default 0.0001, at most 0.001). tokenSafety: block (default), warn or off for buys', body: 'mevProtection? (boolean), maxTipSol? (decimal string), tokenSafety? (block|warn|off)',
       run: async c => {
         const cur = readSettings(st(c.userId)('settings')), b = c.body ?? {}, next: UserSettings = { ...cur };
         if (b.mevProtection !== undefined) { if (typeof b.mevProtection !== 'boolean') throw new SdkError('bad_request', 'mevProtection must be true or false'); next.mevProtection = b.mevProtection; }
+        if (b.tokenSafety !== undefined) { if (!['block', 'warn', 'off'].includes(b.tokenSafety)) throw new SdkError('bad_request', 'tokenSafety must be block, warn or off'); next.tokenSafety = b.tokenSafety; }
         if (b.maxTipSol !== undefined) { const v = toUnits(b.maxTipSol, 9, 'maxTipSol'); if (v > MAX_TIP_SOL_CEILING || v < 1_000n) throw new SdkError('bad_amount', 'maxTipSol must be between 0.000001 and 0.001'); next.maxTipSol = String(b.maxTipSol); }
         st(c.userId)('settings').write(JSON.stringify(next)); await o.reload(c.userId); return next;   // the account is rebuilt with the new sender: the next trade uses it
       } },
