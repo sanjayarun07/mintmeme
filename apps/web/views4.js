@@ -1,6 +1,6 @@
 /* Solana page, trading form: market buy and sell, limit buy and sell, take profit, stop loss, trailing stop, bracket, TWAP, and the open-orders list.
    Replaces the simple trade box from views3.js. Market trades are two steps (prepare, then confirm). Standing orders need a ticked acknowledgement and spend nothing until their trigger is met. */
-V.solana.trade=function(mint,box){const w=this.w;if(!w||!w.connected){box.innerHTML=notice('plain','Real trading is off','Sign in with your wallet above to trade. Preparing a trade never signs or sends anything.');return}
+V.solana.trade=function(mint,box){const w=this.w;if(!w||!w.connected||!w.yours){box.innerHTML=notice('plain','Real trading is off in this browser','Sign in with your wallet above to trade here. Preparing a trade never signs or sends anything.');return}
   const T=[['market_buy','Market buy'],['market_sell','Market sell'],['limit_buy','Limit buy'],['limit_sell','Limit sell'],['take_profit','Take profit'],['stop_loss','Stop loss'],['trailing_stop','Trailing stop'],['bracket','Take profit + stop loss'],['twap','TWAP (split over time)']];
   const f=(id,label,val)=>`<div data-f="${id}"><label for="o_${id}">${label}</label><input id="o_${id}" inputmode="decimal" value="${esc(val)}"></div>`;
   box.innerHTML=`<div class="stack"><b>${w.signer==='wallet'?'Trade with your wallet':w.tradingKey&&w.tradingKey.active?'Trade with the trading key':'Trade with the connected key'}</b><div id="octx" class="faint">Loading price and balance…</div>

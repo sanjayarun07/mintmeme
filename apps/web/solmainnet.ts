@@ -54,10 +54,11 @@ export class SolMainnet {
   private rpcEndpoint() { if (this.rpcUrl) return this.rpcUrl; const key = process.env.ALCHEMY_API_KEY; if (!key) throw bad('ALCHEMY_API_KEY is not set (see .env.example)', 503); return urls(key).sol; }
   private redact(s: string) { const k = process.env.ALCHEMY_API_KEY; return k ? s.split(k).join('***') : s; }
 
-  async status() {
-    const l = this.guard.limits; let balance: string | null = null;
+  /** `yours`: this browser holds the session of the current connection (so it can disconnect, resume trading, change limits). A browser without it can still sign in, which takes over. */
+  async status(b?: any) {
+    const l = this.guard.limits; let balance: string | null = null; const yours = !!this.conn && !!this.session && b?.__session === this.session;
     if (this.conn) { try { balance = BigInt((await this.conn.rpc.call<any>('getBalance', [this.conn.address, { commitment: 'confirmed' }])).value).toString(); } catch { balance = null; } }
-    return { connected: !!this.conn, signer: this.remote ? 'wallet' : this.conn ? 'key' : null, address: this.conn?.address ?? null, balanceLamports: balance, killed: this.guard.killed, spentTodayLamports: this.guard.spentToday().toString(),
+    return { connected: !!this.conn, yours, signer: this.remote ? 'wallet' : this.conn ? 'key' : null, address: this.conn?.address ?? null, balanceLamports: balance, killed: this.guard.killed, spentTodayLamports: this.guard.spentToday().toString(),
       limits: { maxTradeLamports: l.maxTradeLamports.toString(), dailyCapLamports: l.dailyCapLamports.toString(), maxSlippageBps: l.maxSlippageBps },
       tradingKey: this.tradingKeyInfo(), notice: 'The key lives in this process only (memory). Restarting the server disconnects the wallet. The terminal has no login: use a wallet funded only for testing.' };
   }
@@ -182,6 +183,9 @@ export class SolMainnet {
     if (!n || n.exp < Date.now()) throw bad('the sign-in request expired: try again', 410);
     let sig: Uint8Array; try { sig = Uint8Array.from(Buffer.from(String(b?.signature ?? ''), 'base64')); } catch { throw bad('bad signature encoding'); }
     if (sig.length !== 64 || !verifySignature(address, new TextEncoder().encode(n.message), sig)) throw bad('the signature does not match this address', 401);
+    // A fresh wallet signature proves the user is here: it replaces whatever is connected (for example the trading key started from another browser or address,
+    // whose session cookie this browser does not have). Saved orders stay on disk and resume when that signer is connected again.
+    if (this.conn) await this.drop();
     const remote = new RemoteSolSigner(); this.attach(address, remote); this.remote = remote; this.rememberWallet(address); return { ...(await this.status()), __setSession: this.session };
   }
   /** Wallets that have proved control by signing in here. Only these can be a destination for the trading key's SOL (see keyFunders). */
@@ -195,7 +199,7 @@ export class SolMainnet {
   async disconnect(b?: any) { this.needSession(b); return this.drop(); }
   private async drop() { this.keyExpiry = undefined; if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
   /** Turning the kill switch ON never needs a session (it is the emergency stop). Turning it off does. */
-  killSwitch(on: boolean, b?: any) { if (!on) this.needSession(b); this.guard.setKill(!!on); return this.status(); }
+  killSwitch(on: boolean, b?: any) { if (!on) this.needSession(b); this.guard.setKill(!!on); return this.status(b); }
 
   setLimits(b: any) {
     this.needSession(b);

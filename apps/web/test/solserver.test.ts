@@ -36,3 +36,16 @@ test('review fixes: an "Origin: null" post is refused (not a crash), and a forei
     assert.equal(await raw('/api/sol/wallet/connect', 'POST', { 'content-type': 'application/json' }, '{"key":"x"}'), 404, 'the pasted-key login is gone');
   } finally { s.close(); }
 });
+
+test('a browser without the session sees that it is not its session, and signing in with a wallet takes over (the trading-key lockout)', async () => {
+  const { SolMainnet } = await import('../solmainnet.ts'); const { DevSolSigner } = await import('../../../packages/sol/src/index.ts');
+  const m: any = new SolMainnet(mkdtempSync(join(tmpdir(), 'takeover-')), 'http://127.0.0.1:1');
+  const w1 = new DevSolSigner(), a1 = w1.add(), w2 = new DevSolSigner(), a2 = w2.add(), b64 = (u: Uint8Array) => Buffer.from(u).toString('base64');
+  const signIn = async (w: any, a: string) => { const n = m.authNonce({ address: a }); return m.authVerify({ address: a, signature: b64(w.sign(a, new TextEncoder().encode(n.message))) }); };
+  const s1 = await signIn(w1, a1); const S1 = s1.__setSession;
+  assert.equal((await m.status({ __session: S1 })).yours, true); assert.equal((await m.status({ __session: 'someone-else' })).yours, false);
+  assert.throws(() => m.killSwitch(false, { __session: 'someone-else' }), /sign in again/, 'resuming needs the session');
+  const s2 = await signIn(w2, a2); assert.equal(s2.address, a2, 'a new wallet signature takes over the connection');
+  assert.equal((await m.status({ __session: s2.__setSession })).yours, true); assert.equal((await m.status({ __session: S1 })).yours, false, 'the old session is gone');
+  await m.disconnect({ __session: s2.__setSession });
+});

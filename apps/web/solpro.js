@@ -13,7 +13,7 @@
     if(!w||!w.connected){chip.innerHTML='<span class="dot off"></span><span>No wallet connected</span>';kill.hidden=true;return}
     const L=w.limits||{};
     chip.innerHTML=`<span class="dot ${w.killed?'bad':'on'}"></span><span class="mono" title="${esc(w.address)}">${esc(short(w.address))}</span><span class="sep"></span><b class="num">${esc(solfmt(w.balanceLamports))} SOL</b><span class="sep"></span><span class="muted">Market buys today ${esc(solfmt(w.spentTodayLamports))} / ${esc(solfmt(L.dailyCapLamports))}</span>`;
-    kill.hidden=false;kill.dataset.on=w.killed?'1':'0';kill.textContent=w.killed?'Trading paused: resume':'Pause trading';kill.className='btn sm '+(w.killed?'primary':'');
+    kill.hidden=false;kill.dataset.on=w.killed?'1':'0';kill.textContent=w.killed?(w.yours?'Trading paused: resume':'Trading paused: sign in to resume'):'Pause trading';kill.disabled=w.killed&&!w.yours;   // pausing works from anywhere; resuming needs this browser's sessionkill.className='btn sm '+(w.killed?'primary':'');
   }
   const origWallet=view.wallet;
   view.wallet=async function(){

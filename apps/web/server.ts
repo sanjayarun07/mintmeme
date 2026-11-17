@@ -19,7 +19,7 @@ export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
   '/api/sol/search': async b => (await routes()).solSearch(b), '/api/sol/token': async b => (await routes()).solToken(b), '/api/sol/simulate': async b => (await routes()).solSimulate(b),
   '/api/sol/auth/nonce': async b => (await solMain()).authNonce(b), '/api/sol/auth/verify': async b => (await solMain()).authVerify(b),
   '/api/sol/sign/pending': async b => (await solMain()).pendingSigns(b), '/api/sol/sign/submit': async b => (await solMain()).submitSign(b), '/api/sol/sign/reject': async b => (await solMain()).rejectSign(b),
-  '/api/sol/wallet/status': async () => (await solMain()).status(), '/api/sol/wallet/disconnect': async b => (await solMain()).disconnect(b),
+  '/api/sol/wallet/status': async b => (await solMain()).status(b), '/api/sol/wallet/disconnect': async b => (await solMain()).disconnect(b),
   '/api/sol/settings': async b => { const m = await solMain(); return b && b.maxTradeSol !== undefined ? m.setLimits(b) : m.status(); },
   '/api/sol/kill': async b => (await solMain()).killSwitch(b?.on !== false, b),
   '/api/sol/trade/prepare': async b => (await solMain()).prepare(b), '/api/sol/trade/confirm': async b => (await solMain()).confirm(b),
@@ -55,7 +55,8 @@ export function createSolServer(o: { stateDir?: string } = {}) {
     const host = req.headers.host, origin = req.headers.origin;
     const refuse = () => send(403, ser({ ok: false, title: 'Refused', why: 'Wallet and trade calls only accept JSON posts from this page.', fix: 'Use the page at the address shown when the server started.' }));
     if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host ?? '')) return refuse();
-    if (req.method === 'GET' && READ_ONLY_GET.has(u.pathname)) { try { return send(200, ser(await SOL_ROUTES[u.pathname]({}))); } catch (e) { return send((e as any).status ?? 500, ser(realError((e as any).status ?? 500, (e as Error).message))); } }
+    const session = /(?:^|;\s*)mint_sol=([A-Za-z0-9_-]{20,80})/.exec(String(req.headers.cookie ?? ''))?.[1];   // the session comes ONLY from the HttpOnly cookie
+    if (req.method === 'GET' && READ_ONLY_GET.has(u.pathname)) { try { return send(200, ser(await SOL_ROUTES[u.pathname]({ __session: session }))); } catch (e) { return send((e as any).status ?? 500, ser(realError((e as any).status ?? 500, (e as Error).message))); } }
     if (req.method !== 'POST') return send(405, ser({ ok: false, title: 'Not allowed', why: 'Use POST with a JSON body.', fix: '' }));
     // an Origin, when sent, must be exactly this page ("null" from a sandboxed frame, or anything unparsable, is refused, never thrown)
     if ((origin !== undefined && origin !== `http://${host}`) || !String(req.headers['content-type'] ?? '').startsWith('application/json')) return refuse();
@@ -67,7 +68,7 @@ export function createSolServer(o: { stateDir?: string } = {}) {
       try { const r = await fetch((await import('../../packages/live/src/config.ts')).urls(key).sol, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }); return send(r.status, await r.text()); }
       catch { return send(502, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } })); }
     }
-    const m = /(?:^|;\s*)mint_sol=([A-Za-z0-9_-]{20,80})/.exec(String(req.headers.cookie ?? '')); body = { ...body, __session: m?.[1] };   // the session comes ONLY from the HttpOnly cookie
+    body = { ...body, __session: session };
     const route = SOL_ROUTES[u.pathname]; if (!route) return send(404, ser({ ok: false, title: 'Not found', why: `No route ${u.pathname}.`, fix: '' }));
     try {
       const r = await route(body);
