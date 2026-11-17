@@ -15,7 +15,8 @@ function fileLedger(path: string): SpentLedger {
 }
 import type { WalletPolicy } from '../../packages/core/src/index.ts';
 import { randomBytes } from 'node:crypto';
-import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestError, verifySignature, b58decode, looksLikeMint, mintFacts, compileLegacy, systemTransfer, wireTx } from '../../packages/sol/src/index.ts';
+import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestError, verifySignature, b58decode, looksLikeMint, mintFacts, compileLegacy, systemTransfer, wireTx, PrivyApi, PrivySolSigner } from '../../packages/sol/src/index.ts';
+import type { PrivyConfig } from '../../packages/sol/src/index.ts';
 import type { SolSigner } from '../../packages/sol/src/index.ts';
 import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
 import { Trader } from '../../packages/sdk/src/trader.ts';
@@ -35,14 +36,20 @@ export function parseKey(text: string): Uint8Array {
   return bytes.length === 64 ? bytes.slice(0, 32) : bytes;
 }
 
-/** Hard ceilings for the server-held trading key. Settings cannot go above these. */
+/** Privy delegated signing settings from .env, or undefined when any is missing (automatic trading through Privy is then off). */
+export function privyConfig(env = process.env): PrivyConfig | undefined {
+  const c = { appId: env.PRIVY_APP_ID, appSecret: env.PRIVY_APP_SECRET, authKey: env.PRIVY_AUTH_PRIVATE_KEY, signerId: env.PRIVY_AUTH_KEY_ID, policyId: env.PRIVY_SOLANA_POLICY_ID };
+  return Object.values(c).every(v => typeof v === 'string' && v.trim() !== '') ? { ...(c as Record<keyof typeof c, string>), apiUrl: env.PRIVY_API_URL || undefined } : undefined;
+}
+
+/** Hard ceilings for orders signed without the browser (the trading key, or Privy automatic trading). Settings cannot go above these. */
 export const TRADING_KEY_CAPS = { maxTradeLamports: 50_000_000n, dailyCapLamports: 250_000_000n, maxBalanceLamports: 500_000_000n };
 
 export class SolMainnet {
   private keyExpiry?: number;
   private guard: TradeGuard; private settingsFile: string;
   private ticker?: ReturnType<typeof setInterval>; private ticking = false; private decs = new Map<string, number>();
-  private nonces = new Map<string, { message: string; exp: number }>(); private session?: string; private remote?: RemoteSolSigner;
+  private nonces = new Map<string, { message: string; exp: number }>(); private session?: string; private remote?: RemoteSolSigner; private privy = false;
   private conn?: { address: string; signer: SolSigner; chain: SolanaChain; trader: Trader; policy: WalletPolicy; rpc: SolJsonRpc };
   constructor(private dir = join(process.cwd(), '.state', 'sol-mainnet'), private rpcUrl?: string, private families: string[] = ['pump', 'jupiter']) {
     mkdirSync(dir, { recursive: true }); this.settingsFile = join(dir, 'settings.json');
@@ -58,7 +65,8 @@ export class SolMainnet {
   async status(b?: any) {
     const l = this.guard.limits; let balance: string | null = null; const yours = !!this.conn && !!this.session && b?.__session === this.session;
     if (this.conn) { try { balance = BigInt((await this.conn.rpc.call<any>('getBalance', [this.conn.address, { commitment: 'confirmed' }])).value).toString(); } catch { balance = null; } }
-    return { connected: !!this.conn, yours, signer: this.remote ? 'wallet' : this.conn ? 'key' : null, address: this.conn?.address ?? null, balanceLamports: balance, killed: this.guard.killed, spentTodayLamports: this.guard.spentToday().toString(),
+    const p = privyConfig();
+    return { connected: !!this.conn, yours, signer: this.signerKind(), address: this.conn?.address ?? null, automatic: p ? { signerId: p.signerId, policyId: p.policyId } : null, balanceLamports: balance, killed: this.guard.killed, spentTodayLamports: this.guard.spentToday().toString(),
       limits: { maxTradeLamports: l.maxTradeLamports.toString(), dailyCapLamports: l.dailyCapLamports.toString(), maxSlippageBps: l.maxSlippageBps },
       tradingKey: this.tradingKeyInfo(), notice: 'The key lives in this process only (memory). Restarting the server disconnects the wallet. The terminal has no login: use a wallet funded only for testing.' };
   }
@@ -75,6 +83,25 @@ export class SolMainnet {
     // Orders and TWAP slices are evaluated by this loop. While the kill switch is on nothing is evaluated, so nothing new fires. A wallet-signed order needs the browser open to approve each fire.
     this.ticker = setInterval(() => { void this.tickOnce(); }, 2000); (this.ticker as any).unref?.();
     void this.reloadTokens();
+  }
+  private signerKind() { return this.remote ? 'wallet' : this.privy ? 'privy' : this.conn ? 'key' : null; }
+  /** Orders signed without the browser get the trading key's ceilings: limits are lowered to them, never raised. */
+  private capLimits() {
+    const l = this.guard.limits, c = TRADING_KEY_CAPS; if (l.maxTradeLamports <= c.maxTradeLamports && l.dailyCapLamports <= c.dailyCapLamports) return;
+    this.guard.limits = { ...l, maxTradeLamports: l.maxTradeLamports > c.maxTradeLamports ? c.maxTradeLamports : l.maxTradeLamports, dailyCapLamports: l.dailyCapLamports > c.dailyCapLamports ? c.dailyCapLamports : l.dailyCapLamports }; this.persist();
+  }
+  /** Switch the signed-in Privy wallet to automatic trading: Privy signs its orders from now on, without this page. Needs the wallet signed in here (proof of control) and
+   *  the server signer added to it in the browser with this app's policy (checked with Privy, never taken from the request). Revoking in the browser stops it at once:
+   *  Privy then refuses to sign, and nothing is sent. */
+  async privyUse(b: any) {
+    this.needSession(b); const c = this.need(), cfg = privyConfig();
+    if (!cfg) throw bad('Automatic trading through Privy is not set up on this server (README → Custody plan).', 503);
+    if (!this.remote) throw bad('Sign in with your Privy wallet first.', 409);
+    let d; try { d = await new PrivyApi(cfg).delegation(c.address); } catch (e) { throw bad((e as Error).message, (e as any).status === 503 ? 503 : 502); }
+    if (!d.ok) throw bad(d.why, 409);
+    const address = c.address; await this.drop(); this.capLimits();
+    this.attach(address, new PrivySolSigner(new PrivyApi(cfg), new Map([[address, d.walletId]]))); this.privy = true;
+    return { ...(await this.status()), __setSession: this.session };
   }
   private needSession(b: any) { if (this.session && b?.__session !== this.session) throw bad('sign in again: this browser has no active wallet session', 401); }
 
@@ -164,8 +191,7 @@ export class SolMainnet {
   async tradingKeyUse() {
     const k = this.readKey(); if (!k) throw bad('create a trading key first', 404); if (k.expiresAt < Date.now()) throw bad('this trading key has expired. Create a new one (move the old file away first, after taking any funds out)', 410);
     const signer = new DevSolSigner(); if (signer.add(k.seed) !== k.address) throw bad('the saved trading key is damaged', 500);
-    // Hard ceilings for this mode: limits are lowered to them, never raised.
-    const l = this.guard.limits, c = TRADING_KEY_CAPS; if (l.maxTradeLamports > c.maxTradeLamports || l.dailyCapLamports > c.dailyCapLamports) { this.guard.limits = { ...l, maxTradeLamports: l.maxTradeLamports > c.maxTradeLamports ? c.maxTradeLamports : l.maxTradeLamports, dailyCapLamports: l.dailyCapLamports > c.dailyCapLamports ? c.dailyCapLamports : l.dailyCapLamports }; this.persist(); }
+    this.capLimits(); const c = TRADING_KEY_CAPS;
     this.attach(k.address, signer); this.remote = undefined; this.keyExpiry = k.expiresAt;
     try { const bal = BigInt((await this.conn!.rpc.call<any>('getBalance', [k.address, { commitment: 'confirmed' }])).value); if (bal > c.maxBalanceLamports) { await this.drop(); throw bad(`this key holds ${Number(bal) / 1e9} SOL. The trading key is limited to ${Number(c.maxBalanceLamports) / 1e9} SOL: move the rest out first`, 422); } } catch (e) { if (e instanceof GuardError) throw e; await this.drop(); throw bad('could not read the trading key balance, so it was not connected (its 0.5 SOL ceiling cannot be checked). Try again.', 503); }
     return { ...(await this.status()), __setSession: this.session };
@@ -197,7 +223,7 @@ export class SolMainnet {
   submitSign(b: any) { this.needSession(b); if (!this.remote) throw bad('no wallet is waiting to sign', 409); try { this.remote.submit(String(b?.id ?? ''), Uint8Array.from(Buffer.from(String(b?.signature ?? ''), 'base64'))); } catch (e) { throw bad((e as Error).message, e instanceof SignRequestError ? 422 : 400); } return { ok: true }; }
   rejectSign(b: any) { this.needSession(b); this.remote?.reject(String(b?.id ?? '')); return { ok: true }; }
   async disconnect(b?: any) { this.needSession(b); return this.drop(); }
-  private async drop() { this.keyExpiry = undefined; if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
+  private async drop() { this.keyExpiry = undefined; this.privy = false; if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
   /** Turning the kill switch ON never needs a session (it is the emergency stop). Turning it off does. */
   killSwitch(on: boolean, b?: any) { if (!on) this.needSession(b); this.guard.setKill(!!on); return this.status(b); }
 
@@ -206,7 +232,7 @@ export class SolMainnet {
     const num = (v: unknown, k: string) => { if (typeof v === 'string' && /^\d+(\.\d+)?$/.test(v) || typeof v === 'number' && v >= 0) return Number(v); throw bad(`${k} must be a number`); };
     const toLam = (sol: number) => BigInt(Math.round(sol * 1e9)); const max = toLam(num(b?.maxTradeSol, 'maxTradeSol')), cap = toLam(num(b?.dailyCapSol, 'dailyCapSol')), slip = num(b?.maxSlippagePct, 'maxSlippagePct') * 100;
     if (max <= 0n || cap < max) throw bad('the daily cap must be at least the per-trade limit, and both above zero');
-    if (this.keyExpiry !== undefined && (max >TRADING_KEY_CAPS.maxTradeLamports || cap > TRADING_KEY_CAPS.dailyCapLamports)) throw bad(`with the trading key, the limits cannot exceed ${Number(TRADING_KEY_CAPS.maxTradeLamports) / 1e9} SOL per trade and ${Number(TRADING_KEY_CAPS.dailyCapLamports) / 1e9} SOL per day`); if (!Number.isInteger(slip) || slip < 0 || slip > 5000) throw bad('slippage must be between 0 and 50 percent, in steps of 0.01');
+    if ((this.keyExpiry !== undefined || this.privy) && (max > TRADING_KEY_CAPS.maxTradeLamports || cap > TRADING_KEY_CAPS.dailyCapLamports)) throw bad(`with automatic trading, the limits cannot exceed ${Number(TRADING_KEY_CAPS.maxTradeLamports) / 1e9} SOL per trade and ${Number(TRADING_KEY_CAPS.dailyCapLamports) / 1e9} SOL per day`); if (!Number.isInteger(slip) || slip < 0 || slip > 5000) throw bad('slippage must be between 0 and 50 percent, in steps of 0.01');
     this.guard.limits = { ...this.guard.limits, maxTradeLamports: max, dailyCapLamports: cap, maxSlippageBps: slip }; this.persist();
     if (this.conn) { this.conn.policy.maxPerTx[NATIVE] = max; this.conn.policy.dailyLimit[NATIVE] = cap; } return this.status();
   }
@@ -305,7 +331,7 @@ export class SolMainnet {
     this.needSession(b); if (!this.conn) return { orders: [], twaps: [], killed: this.guard.killed, signer: null };
     const c = this.conn, orders = []; for (const o of c.trader.listOrders()) orders.push(this.orderView(o, await this.decimals(o.token).catch(() => 0)));
     const twaps = c.trader.listTwaps().map(t => ({ id: t.id, side: t.side, filled: t.filled, failed: t.failed, skipped: t.skipped, open: t.open, spent: t.spent.toString(), received: t.received.toString(), nextDueAt: t.nextDueAt ?? null, done: t.done, cancelled: t.cancelled, refused: t.refused ?? null }));
-    return { orders, twaps, killed: this.guard.killed, signer: this.remote ? 'wallet' : 'key', solUsd: await this.solUsd() };
+    return { orders, twaps, killed: this.guard.killed, signer: this.signerKind(), solUsd: await this.solUsd() };
   }
   /** Place a standing order. It spends nothing now: it trades later, by itself, when its trigger is met, within the same limits as a market trade. */
   /** When the page sends priceUsd (tpUsd / slUsd for a bracket), the trigger is fixed in dollars (see usdFeed); otherwise `price` is SOL per token. */

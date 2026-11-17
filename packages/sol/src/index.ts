@@ -12,3 +12,4 @@ export * from './search.ts';
 export * from './submitter.ts';
 export * from './stream.ts';
 export * from './remotesigner.ts';
+export * from './privysigner.ts';

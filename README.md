@@ -128,9 +128,33 @@ Advanced → Smart wallets), which may cover option C without a separate provide
 | 2 | Wallet infrastructure → **Keys and quorums** → **New key** | Create the server authorization key (P-256). Privy shows the private key **once** and cannot recover it. | `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY` |
 | 3 | App settings → Basics → **API keys** | Copy the app secret. Optional: Basics → Advanced → **IP allowlist** with your servers' addresses, so only they can use it. | `PRIVY_APP_SECRET` |
 | 4 | App settings → Basics → **Domains and clients** | Add the UI addresses to the allowed origins: `http://localhost:3000`, `http://127.0.0.1:3500`, and your production URL. | – |
-| 5 | Wallet infrastructure → **Policies** → **New policy**, chain type **Solana** | Allow only what trading needs: the Jupiter swap and pump.fun programs, plus the System, Token and Associated Token programs a swap uses (program ids from each project's official docs). Cap the SOL per transaction (default 0.05 SOL). | `PRIVY_SOLANA_POLICY_ID` |
+| 5 | Wallet infrastructure → **Policies** → **New policy**: name `memedesk-solana`, chain type **SVM (Solana)**, owner empty → **Next: Create rule**. Add the three rules in the "Solana policy rules" table below, then **Create policy** and copy its ID. | Privy checks every top-level instruction of a transaction; each must be allowed, and any matching DENY wins. | `PRIVY_SOLANA_POLICY_ID` |
 | 6 | (later, for EVM) Policies → New policy, chain type **Ethereum**; optionally Advanced → **Smart wallets** | Allow only the swap router (Uniswap V2 router for the chosen chain, address from Uniswap's deployments page) and cap the ETH per transaction. | `PRIVY_ETHEREUM_POLICY_ID` |
 | 7 | top bar: **Upgrade to production** | Only when you go live with other users' funds. Development mode is fine for testing. | – |
+
+**Solana policy rules (step 5).** Use the same method on all three rules: **`signTransaction`**. The server has Privy sign and then sends the transaction itself, so a rule for any other method (such as `signAndSendTransaction`) never applies, and Privy denies every trade. "Allow automatic trading" checks this and says so.
+
+| Rule name | Field source → field | Operator | Value | Action |
+|---|---|---|---|---|
+| `allowed-programs` | Solana program instruction → `programId` | in | `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`, `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`, `pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ`, `11111111111111111111111111111111`, `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`, `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`, `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`, `ComputeBudget111111111111111111111111111111` | ALLOW |
+| `sol-cap` | Solana system program instruction → `Transfer.lamports` | gt | `50000000` (0.05 SOL) | DENY |
+| `no-token-transfers` | Solana token program instruction → `instructionName` | in | `Transfer`, `TransferChecked` | DENY |
+
+The programs in the first rule are Jupiter v6, pump.fun, the pump.fun fee program, System, Token, Token-2022, Associated Token and Compute Budget. The second rule blocks
+a plain SOL transfer above the per-trade cap. The third blocks moving tokens out directly; swaps move tokens inside the Jupiter and pump.fun programs, which are not checked
+instruction by instruction. The policy is attached to the server's signer only, not to the wallet itself, so the user's own transfers from the app are not limited by it.
+
+**Automatic trading on `/solana` (built).** With steps 1 to 5 in `.env`:
+1. Sign in with your Privy wallet.
+2. Under **Automatic trading**, click **Allow automatic trading**. Privy asks you to add the server's signer (`PRIVY_AUTH_KEY_ID`) with the policy (`PRIVY_SOLANA_POLICY_ID`).
+3. The server checks with Privy that the signer and the policy are on that wallet. Your orders are then signed by Privy (`packages/sol/src/privysigner.ts`, `signTransaction`) without the page open, limited to 0.05 SOL per trade and 0.25 SOL per day.
+
+The engine still builds, sends and confirms every trade, and it checks each signature Privy returns against the exact transaction it built. **Stop automatic trading** removes the signer from your wallet. After that Privy refuses to sign, and nothing is sent.
+
+Tests:
+- `packages/sol/test/privysigner.test.ts` covers request signing, policy refusals, a revoked signer and a tampered transaction.
+- `npm run verify:sol-guard`, checks P1 to P7, uses a local stand-in for Privy on the validator.
+- Mainnet, 2026-11-17: a 0.005 SOL Bonk buy through Jupiter, signed by real Privy under this policy with no wallet prompt, finalized as tx `5HyLiXhuMp6fa7ocCa1s85xfc1CyFsNycbCQaq9nnGZC1FDDd3yKJ8Sn5HK4GEk9AXYTNW8nj3tk1seoTW88rxej`. The first try, with the rules on `signAndSendTransaction`, was refused by Privy and nothing was sent. A standing order (limit buy of 0.005 SOL with a USD trigger) then fired by itself, was signed by Privy and landed as tx `2TiNZtupHL8Cen3JLQCuwpGdV9fD64owbTkqZhDP7MVm9NpjnnMaHpGAuypwbnZaFXB2VHNb3sp1C8Hr5nmHJgcp`.
 
 Current state of this app (checked 2026-11-17, read-only): TEE enabled; no keys, no policies; smart wallets off; development mode.
 

@@ -4,7 +4,7 @@
 import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
-import { PrivyProvider, usePrivy, useLogin } from '@privy-io/react-auth';
+import { PrivyProvider, usePrivy, useLogin, useSigners } from '@privy-io/react-auth';
 import { useWallets, useCreateWallet, useSignMessage, useSignTransaction, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 
 const UI = { showWalletUIs: true };
@@ -25,6 +25,14 @@ function Panel({ onWallets }) {
   // The hooks' functions can change between renders: always call the latest ones.
   const sm = useRef(signMessage), st = useRef(signTransaction);
   sm.current = signMessage; st.current = signTransaction;
+  // Automatic trading: add or remove the server's signer on a Privy wallet. Privy shows the user what is being allowed; the policy id limits what the signer can sign.
+  const { addSigners, removeSigners } = useSigners(), sg = useRef();
+  sg.current = { addSigners, removeSigners, authenticated };
+  useEffect(() => {
+    const need = () => { if (!sg.current.authenticated) throw new Error('log in with Privy first'); };
+    window.MintPrivy.allow = async (address, signerId, policyId) => { need(); await sg.current.addSigners({ address, signers: [{ signerId, policyIds: [policyId] }] }); };
+    window.MintPrivy.revoke = async (address) => { need(); await sg.current.removeSigners({ address }); };
+  }, []);
 
   const wrapped = React.useMemo(() => wallets.map(w => {
     const account = { address: w.address, publicKey: new Uint8Array(0), chains: ['solana:mainnet'], features: ['solana:signMessage', 'solana:signTransaction'] };

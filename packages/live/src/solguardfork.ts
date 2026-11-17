@@ -8,6 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { base58, SolJsonRpc, DevSolSigner } from '../../sol/src/index.ts';
 import { startPumpValidator } from './pumpenv.ts';
 import { SolMainnet } from '../../../apps/web/solmainnet.ts';
+import { fakePrivy } from '../../sol/test/fakeprivy.ts';
 
 const SOLN = 1_000_000_000n;
 async function main() {
@@ -40,7 +41,7 @@ async function main() {
     const d = await sm.disconnect(S); check('G14 disconnecting drops the wallet: trades are refused again', !d.connected && await refused(() => sm.prepare({ ...S, mint, side: 'buy', sol: '0.01' }), /connect a wallet/));
 
     // ---- wallet login: the key stays in a simulated browser wallet; the server only ever sees signatures ----
-    const wallet = new DevSolSigner(), addr = wallet.add(randomBytes(32)); const sigAirdrop = await rpc.call<string>('requestAirdrop', [addr, Number(3n * SOLN)]); for (let i = 0; i < 80; i++) { const s2: any = await rpc.call('getSignatureStatuses', [[sigAirdrop]]); if (s2.value[0]?.confirmationStatus) break; await new Promise(r => setTimeout(r, 250)); }
+    const wseed = randomBytes(32), wallet = new DevSolSigner(), addr = wallet.add(wseed); const sigAirdrop = await rpc.call<string>('requestAirdrop', [addr, Number(3n * SOLN)]); for (let i = 0; i < 80; i++) { const s2: any = await rpc.call('getSignatureStatuses', [[sigAirdrop]]); if (s2.value[0]?.confirmationStatus) break; await new Promise(r => setTimeout(r, 250)); }
     const b64 = (u: Uint8Array) => Buffer.from(u).toString('base64');
     const n1 = sm.authNonce({ address: addr }); const wrongSig = b64(wallet.sign(addr, new TextEncoder().encode('some other message')));
     check('L1 a sign-in with a signature over a different message is refused and connects nothing', await refused(() => sm.authVerify({ address: addr, signature: wrongSig }), /does not match/) && !(await sm.status()).connected);
@@ -59,6 +60,28 @@ async function main() {
     await sm.killSwitch(true); check('L7 the emergency stop works without a session', await refused(() => sm.prepare({ ...LS, mint, side: 'buy', sol: '0.01', slippagePct: 3 }), /kill switch/));
     check('L8 turning it back off needs the session', await refused(async () => { sm.killSwitch(false, {}); }, /sign in again/)); await sm.killSwitch(false, LS);
     const ld = await sm.disconnect(LS); check('L9 signing out disconnects the wallet and clears the session', !ld.connected && (ld as any).__setSession === '');
+
+    // ---- Privy automatic trading: a stand-in Privy (same request signing and the README's policy) holds the same key; the engine builds, Privy signs, the validator runs it ----
+    const fp = fakePrivy({ seed: wseed, delegated: false }), fsrv = await fp.listen(), saved = { ...process.env };
+    Object.assign(process.env, { PRIVY_APP_ID: fp.cfg.appId, PRIVY_APP_SECRET: fp.cfg.appSecret, PRIVY_AUTH_PRIVATE_KEY: fp.cfg.authKey, PRIVY_AUTH_KEY_ID: fp.cfg.signerId, PRIVY_SOLANA_POLICY_ID: fp.cfg.policyId, PRIVY_API_URL: fsrv.url });
+    try {
+      check('P1 automatic trading needs a signed-in wallet', await refused(() => sm.privyUse({}), /connect a wallet/));
+      const np = sm.authNonce({ address: addr }), lp1 = await sm.authVerify({ address: addr, signature: b64(wallet.sign(addr, new TextEncoder().encode(np.message))) }); const PS = { __session: (lp1 as any).__setSession as string };
+      check('P2 without the server signer on the Privy wallet, automatic trading is refused and the wallet stays signed in', await refused(() => sm.privyUse(PS), /not allowed automatic trading/) && (await sm.status(PS)).signer === 'wallet');
+      fp.state.delegated = 'other-policy'; check('P3 a server signer without this app\'s policy is refused', await refused(() => sm.privyUse(PS), /not limited by this app's trading policy/));
+      fp.state.delegated = true; const pu = await sm.privyUse(PS) as any, PU = { __session: pu.__setSession as string };
+      check('P4 with the signer and policy on the wallet, the session switches to Privy signing with automatic-trading limits', pu.signer === 'privy' && pu.address === addr && BigInt(pu.limits.maxTradeLamports) <= 50_000_000n && PU.__session !== PS.__session, JSON.stringify(pu).slice(0, 160));
+      const t0 = await lt(), pp = await sm.prepare({ ...PU, mint, side: 'buy', sol: '0.02', slippagePct: 5 }), pr = await sm.confirm({ ...PU, ticketId: pp.ticketId, ack: true });
+      check('P5 a buy is signed by Privy with no browser and lands on the validator', pr.ok && pr.sent && (await lt()) > t0 && fp.state.signed >= 1, JSON.stringify(pr).slice(0, 200));
+      const signedBefore = fp.state.signed, tb = await lt(); await sm.createOrder({ ...PU, ack: true, mint, type: 'limit_buy', sol: '0.01', price: '1000' });
+      for (let i = 0; i < 40 && fp.state.signed === signedBefore; i++) await new Promise(r => setTimeout(r, 500));
+      for (let i = 0; i < 60 && (await lt()) === tb; i++) await new Promise(r => setTimeout(r, 500));   // the fired trade lands a moment later
+      const po = (await sm.listOrders(PU) as any).orders.find((o: any) => o.kind === 'limit_buy');
+      check('P6 a standing order fires by itself, Privy signs it, and the tokens arrive', fp.state.signed > signedBefore && po && po.status === 'fired' && (await lt()) > tb, JSON.stringify(po).slice(0, 200));
+      fp.state.delegated = false; const t1 = await lt(), rp = await sm.prepare({ ...PU, mint, side: 'buy', sol: '0.01', slippagePct: 5 }), rr = await sm.confirm({ ...PU, ticketId: rp.ticketId, ack: true });
+      check('P7 after the user revokes the signer, Privy refuses and nothing is sent', !rr.ok && !rr.sent && (await lt()) === t1, JSON.stringify(rr).slice(0, 200));
+      await sm.disconnect(PU);
+    } finally { fsrv.close(); for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k]; Object.assign(process.env, saved); }
 
     // ---- standing orders and TWAP (pasted-key mode: nothing needs a browser to approve a fire) ----
     const k2 = await sm.connect({ key: base58(seed) }); const K = { __session: (k2 as any).__setSession as string };
@@ -137,7 +160,7 @@ async function main() {
     const pass = checks.every(c => c.pass); mkdirSync('docs/live-verification', { recursive: true });
     const file = `docs/live-verification/${new Date().toISOString().replace(/[:.]/g, '-')}-sol-guard.md`;
     writeFileSync(file, ['# Guarded Solana trading path on a local validator', '', `Run: ${new Date().toISOString()}`, 'Node: local solana-test-validator with the pump.fun program and a live curve cloned. NOT mainnet. Fake SOL, throwaway key.', `Result: **${pass ? 'PASS' : 'FAIL'}** (${checks.filter(c => c.pass).length}/${checks.length})`, '', ...checks.map(c => `- ${c.pass ? 'PASS' : 'FAIL'} ${c.name}${c.pass ? '' : ' - ' + c.detail}`), '',
-      '## Not covered', '- No mainnet trade has been made. Real fills differ from a local clone: price impact, competing bots, fees and Jupiter routes are not exercised here (this run uses a pump.fun curve).', '- The terminal has no login: the cross-site request check is not exercised by this script.', ''].join('\n'));
+      '## Not covered', '- Privy (P checks) is a local stand-in that signs requests and applies the README policy the way Privy documents it; the real Privy API and its TEE are not called here.', '- No mainnet trade has been made. Real fills differ from a local clone: price impact, competing bots, fees and Jupiter routes are not exercised here (this run uses a pump.fun curve).', '- The terminal has no login: the cross-site request check is not exercised by this script.', ''].join('\n'));
     console.log(`\nreport: ${file}`); process.exitCode = pass ? 0 : 1;
   } finally { env.stop(); }
 }
