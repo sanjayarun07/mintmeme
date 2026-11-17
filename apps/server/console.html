@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MINT API console</title>
+<style>
+:root{--bg:#080808;--panel:#0e0e0e;--raise:#161616;--sunk:#0b0b0b;--line:#e4e4e41a;--line2:#e4e4e42e;--ink:#e4e4e4;--muted:#9a9a9a;--teal:#2fcb73;--teal-soft:#2fcb731f;--dn:#f0605c;--dn-soft:#e13b3b1a;--amber:#d8aa00;--amber-soft:#d8aa001a;
+  --f:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--m:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+@media (prefers-color-scheme:light){:root{--bg:#f4f4f4;--panel:#fff;--raise:#f4f4f4;--sunk:#fafafa;--line:#0808081f;--line2:#08080838;--ink:#0e0e0e;--muted:#535353;--teal:#0e8a47;--teal-soft:#0e8a471a;--dn:#c42b2b;--amber:#8a6a00}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:13px/1.5 var(--f)}
+header{position:sticky;top:0;z-index:5;display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px clamp(14px,2.4vw,28px);background:var(--bg);border-bottom:1px solid var(--line)}
+header b{font-size:15px}header .where{color:var(--muted)}.grow{flex:1}
+.bar{padding:8px clamp(14px,2.4vw,28px);font-size:12.5px;color:var(--amber);background:var(--amber-soft);border-bottom:1px solid var(--line)}
+main{max-width:1240px;margin:0 auto;padding:20px clamp(14px,2.4vw,28px) 40px;display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px;align-items:start}
+@media (max-width:1000px){main{grid-template-columns:minmax(0,1fr)}}
+.col{display:flex;flex-direction:column;gap:16px;min-width:0}
+section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+h2{margin:0 0 12px;font-size:13.5px;font-weight:650}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+input,select{width:100%;min-height:36px;padding:7px 10px;border:1px solid var(--line2);border-radius:9px;background:var(--sunk);color:var(--ink);font:inherit}
+input[type=checkbox]{width:16px;min-height:0;height:16px;vertical-align:middle;accent-color:var(--ink)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}.row>div{flex:1 1 120px;min-width:0}
+button{min-height:36px;padding:0 14px;border:1px solid var(--line2);border-radius:9px;background:var(--raise);color:var(--ink);font:inherit;font-weight:550;cursor:pointer}
+button.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}button:disabled{opacity:.5;cursor:default}button.sm{min-height:28px;padding:0 10px;font-size:12px}
+.muted{color:var(--muted)}.small{font-size:12px}.mono,.num{font-family:var(--m);font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}th{text-align:left;font-weight:500;color:var(--muted);font-size:11.5px;padding:7px 8px;border-bottom:1px solid var(--line)}td{padding:8px;border-bottom:1px solid var(--line);vertical-align:top}
+.r{text-align:right}.tw{overflow-x:auto}
+.pill{display:inline-flex;align-items:center;min-height:22px;padding:0 9px;border-radius:999px;border:1px solid var(--line2);font-size:12px}
+.pill.ok{color:var(--teal);background:var(--teal-soft);border-color:transparent}.pill.bad{color:var(--dn);background:var(--dn-soft);border-color:transparent}.pill.warn{color:var(--amber);background:var(--amber-soft);border-color:transparent}
+#out{white-space:pre-wrap;word-break:break-word;max-height:260px;overflow:auto;background:var(--sunk);border:1px solid var(--line);border-radius:9px;padding:10px;font-family:var(--m);font-size:11.5px}
+#events{max-height:220px;overflow:auto;font-family:var(--m);font-size:11.5px;color:var(--muted)}
+.res{margin-top:10px;padding:9px 11px;border-radius:9px;font-size:12.5px;border:1px solid var(--line)}.res.ok{border-color:var(--teal);background:var(--teal-soft)}.res.bad{border-color:var(--dn);background:var(--dn-soft)}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header><b>MINT</b><span class="where">API console</span><span class="grow"></span><span id="who" class="muted small">Not connected</span></header>
+<div class="bar">Practice accounts: simulated chain, fake funds. Every button calls the real HTTP API of this server; the server runs the SDK's <span class="mono">Trader</span> for your account on whichever node owns it.</div>
+<main>
+<div class="col">
+  <section>
+    <h2>Connect</h2>
+    <div class="row"><div style="flex:3 1 260px"><label for="key">API key (from <span class="mono">npm run server:key</span>; kept in this tab only)</label><input id="key" type="password" autocomplete="off" spellcheck="false"></div><div style="flex:0 0 auto"><button class="primary" id="connect">Connect</button></div></div>
+    <div id="acct" class="small muted" style="margin-top:10px"></div>
+  </section>
+
+  <section id="s-trade" hidden>
+    <h2>Market trade</h2>
+    <div class="row">
+      <div><label for="m-side">Side</label><select id="m-side"><option value="buy">Buy</option><option value="sell">Sell</option></select></div>
+      <div><label for="m-wallet">Wallet</label><select id="m-wallet" class="wallets"></select></div>
+      <div><label for="m-amt" id="m-amt-l">Amount (quote units)</label><input id="m-amt" value="10000" inputmode="numeric"></div>
+      <div><label for="m-slip">Slippage (%)</label><input id="m-slip" value="3" inputmode="decimal"></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button id="m-quote">Quote</button><button class="primary" id="m-go">Buy</button><span id="m-px" class="small muted"></span></div>
+    <div id="m-res"></div>
+  </section>
+
+  <section id="s-order" hidden>
+    <h2>Standing order</h2>
+    <div class="row">
+      <div><label for="o-type">Type</label><select id="o-type"><option value="limit-buy">Limit buy</option><option value="limit-sell">Limit sell</option><option value="take-profit">Take profit</option><option value="stop-loss">Stop loss</option><option value="trailing-stop">Trailing stop</option><option value="bracket">Take profit + stop loss</option></select></div>
+      <div><label for="o-wallet">Wallet</label><select id="o-wallet" class="wallets"></select></div>
+      <div><label for="o-amt" id="o-amt-l">Amount</label><input id="o-amt" value="1000" inputmode="numeric"></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div data-o="price"><label for="o-price">Trigger price (quote per token)</label><input id="o-price" inputmode="decimal"></div>
+      <div data-o="tp" hidden><label for="o-tp">Take profit price</label><input id="o-tp" inputmode="decimal"></div>
+      <div data-o="sl" hidden><label for="o-sl">Stop loss price</label><input id="o-sl" inputmode="decimal"></div>
+      <div data-o="trail" hidden><label for="o-trail">Trail (% below peak)</label><input id="o-trail" value="10" inputmode="decimal"></div>
+      <div><label for="o-slip">Slippage (%)</label><input id="o-slip" value="2" inputmode="decimal"></div>
+    </div>
+    <div class="row" style="margin-top:10px;align-items:center"><label style="margin:0;color:var(--ink)"><input type="checkbox" id="o-chase"> Chase: +1% slippage per failed fill, up to <input id="o-chasemax" value="5" style="width:56px;min-height:28px;display:inline-block"> %</label></div>
+    <div class="row" style="margin-top:10px"><button class="primary" id="o-go">Place order</button><span id="o-hint" class="small muted"></span></div>
+    <div id="o-res"></div>
+  </section>
+
+  <section id="s-orders" hidden>
+    <h2>Orders</h2>
+    <div class="tw"><table><thead><tr><th>Id</th><th>Type</th><th class="r">Amount</th><th class="r">Trigger</th><th>Status</th><th></th></tr></thead><tbody id="orders"></tbody></table></div>
+  </section>
+
+  <section id="s-multi" hidden>
+    <h2>Bulk and TWAP</h2>
+    <div class="row"><div><label for="b-total">Bulk buy total (quote units, split over w1 and w2)</label><input id="b-total" value="4000" inputmode="numeric"></div><div style="flex:0 0 auto"><button id="b-go">Bulk buy</button></div></div>
+    <div class="row" style="margin-top:10px">
+      <div><label for="t-side">TWAP side</label><select id="t-side"><option value="buy">Buy</option><option value="sell">Sell</option></select></div>
+      <div><label for="t-total">Total</label><input id="t-total" value="3000" inputmode="numeric"></div>
+      <div><label for="t-n">Slices</label><input id="t-n" value="3" inputmode="numeric"></div>
+      <div><label for="t-int">Seconds apart</label><input id="t-int" value="2" inputmode="numeric"></div>
+      <div style="flex:0 0 auto"><button id="t-go">Start TWAP</button></div>
+    </div>
+    <div id="b-res"></div>
+  </section>
+
+  <section id="s-pos" hidden>
+    <h2>Positions and trades</h2>
+    <div class="tw"><table><thead><tr><th>Token</th><th class="r">Held</th><th class="r">Cost</th><th class="r">P&amp;L</th></tr></thead><tbody id="pos"></tbody></table></div>
+    <div class="tw" style="margin-top:12px"><table><thead><tr><th>Trade</th><th>Origin</th><th>State</th><th class="r">In</th><th class="r">Out</th></tr></thead><tbody id="trades"></tbody></table></div>
+  </section>
+</div>
+
+<div class="col">
+  <section id="s-node">
+    <h2>Cluster</h2>
+    <div class="small">You are on <span class="mono" id="entry"></span>.</div>
+    <div class="small" id="served" style="margin-top:6px">Each response names the node that ran it.</div>
+    <div class="row" style="margin-top:10px"><button class="sm" id="pause" hidden>Pause new buys</button><button class="sm" id="refresh" hidden>Refresh</button></div>
+  </section>
+  <section id="s-events" hidden><h2>Live events</h2><div id="events"></div></section>
+  <section><h2>Last response</h2><div id="out" class="muted">Nothing yet.</div></section>
+</div>
+</main>
+<script>
+const $=s=>document.querySelector(s), E18=10n**18n; let KEY='', ACC=null, paused=false, evAbort=null;
+$('#entry').textContent=location.origin;
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+/** Human price (quote per token, up to 18 decimals) <-> priceE18 string. Practice token and quote both have 18 decimals. */
+const toE18=v=>{const s=String(v).trim();if(!/^\d+(\.\d{1,18})?$/.test(s))throw new Error('enter a price like 1.25');const[w,f='']=s.split('.');return (BigInt(w)*E18+BigInt(f.padEnd(18,'0'))).toString()};
+/** Ids are "<user>.<id>": show the part after the user; long generated ids are cut to 14 characters (the full id is in the tooltip). */
+const shortId=id=>{const s=String(id).includes('.')?String(id).split('.').slice(1).join('.'):String(id);return s.length>16?s.slice(0,14)+'…':s};
+const fromE18=v=>{if(v==null)return '';const b=BigInt(v),w=b/E18,f=(b%E18).toString().padStart(18,'0').replace(/0+$/,'');return f?`${w}.${f.slice(0,8)}`:`${w}`};
+async function api(method,path,body){
+  const r=await fetch(path,{method,headers:{authorization:'Bearer '+KEY,...(body?{'content-type':'application/json'}:{}),...(method==='POST'&&path.startsWith('/v1/trades/')?{'idempotency-key':'ui-'+Date.now()+'-'+Math.random().toString(36).slice(2)}:{})},body:body?JSON.stringify(body):undefined});
+  const node=r.headers.get('x-memedesk-node'), j=await r.json().catch(()=>({}));
+  $('#out').textContent=`${method} ${path}  ->  HTTP ${r.status}${node?`  (run by ${node})`:''}\n\n`+JSON.stringify(j,null,2).slice(0,4000);
+  if(node)$('#served').innerHTML=`Last request ran on <span class="mono">${esc(node)}</span>${node===location.origin?' (this node owns your account)':' (forwarded: another node owns your account)'}.`;
+  if(!r.ok){const e=j.error||{};throw Object.assign(new Error(e.message||`HTTP ${r.status}`),{fix:e.fix,code:e.code})}
+  return j;
+}
+const say=(el,ok,t,d='')=>{$(el).innerHTML=`<div class="res ${ok?'ok':'bad'}"><b>${esc(t)}</b>${d?`<div class="small" style="margin-top:3px">${esc(d)}</div>`:''}</div>`};
+const fail=(el,e)=>say(el,false,e.message,e.fix||'');
+
+async function connect(){
+  KEY=$('#key').value.trim(); if(!KEY)return;
+  try{ACC=await api('GET','/v1/overview')}catch(e){$('#acct').innerHTML=`<span class="pill bad">${esc(e.message)}</span>`;return}
+  paused=!!ACC.entriesPaused; $('#who').innerHTML=`<span class="pill ok">${esc(ACC.userId)}</span>`;
+  $('#acct').innerHTML=`Account <b>${esc(ACC.userId)}</b> on <span class="mono">${esc(ACC.chain)}</span> · block ${esc(ACC.block)} · ${esc(ACC.orders.active)} active orders · wallets w1, w2 · token <span class="mono">0xMEME</span>`;
+  document.querySelectorAll('.wallets').forEach(s=>s.innerHTML='<option>w1</option><option>w2</option>');
+  for(const id of ['#s-trade','#s-order','#s-orders','#s-multi','#s-pos','#s-events','#pause','#refresh'])$(id).hidden=false;
+  $('#pause').textContent=paused?'Resume buys':'Pause new buys';
+  await marketPrice(); await refresh(); events();
+}
+let spot=null;
+async function marketPrice(){try{const q=await api('POST','/v1/quote',{side:'buy',token:'0xMEME',amount:'1000'});spot=1000/Number(q.amountOut);$('#m-px').textContent=`Market about ${spot.toPrecision(6)} quote per token`;defaults()}catch{}}
+function defaults(){if(!spot)return;const t=$('#o-type').value,f=x=>(spot*x).toFixed(6);
+  ({'limit-buy':()=>$('#o-price').value=f(0.9),'limit-sell':()=>$('#o-price').value=f(1.2),'take-profit':()=>$('#o-price').value=f(1.2),'stop-loss':()=>$('#o-price').value=f(0.8),'bracket':()=>{$('#o-tp').value=f(1.3);$('#o-sl').value=f(0.7)}}[t]||(()=>{}))();
+  $('#o-hint').textContent=`Market now about ${spot.toPrecision(6)}.`}
+function orderForm(){const t=$('#o-type').value;$('[data-o=price]').hidden=t==='bracket'||t==='trailing-stop';$('[data-o=tp]').hidden=$('[data-o=sl]').hidden=t!=='bracket';$('[data-o=trail]').hidden=t!=='trailing-stop';
+  $('#o-amt-l').textContent=t==='limit-buy'?'Budget (quote units)':'Tokens to sell (units)';defaults()}
+$('#o-type').onchange=orderForm;
+$('#m-side').onchange=()=>{const b=$('#m-side').value==='buy';$('#m-go').textContent=b?'Buy':'Sell';$('#m-amt-l').textContent=b?'Amount (quote units)':'Tokens to sell (units)'};
+$('#connect').onclick=connect;$('#key').onkeydown=e=>{if(e.key==='Enter')connect()};
+$('#m-quote').onclick=async()=>{try{const q=await api('POST','/v1/quote',{side:$('#m-side').value,token:'0xMEME',amount:$('#m-amt').value.trim(),slippageBps:Math.round(Number($('#m-slip').value)*100)});say('#m-res',true,`Best route ${q.venue}: ${q.amountOut} out, at least ${q.minOut}`,`Price impact ${(q.priceImpactBps/100).toFixed(2)}% · fee ${q.platformFee}. Nothing sent.`)}catch(e){fail('#m-res',e)}};
+$('#m-go').onclick=async()=>{const side=$('#m-side').value;try{const t=await api('POST','/v1/trades/'+side,{walletId:$('#m-wallet').value,token:'0xMEME',amount:$('#m-amt').value.trim(),slippageBps:Math.round(Number($('#m-slip').value)*100)});say('#m-res',t.state==='finalized',`${side==='buy'?'Buy':'Sell'} ${t.state}`,t.fill?`Received ${t.fill.received} · trade ${t.key}`:(t.failure||''));refresh();marketPrice()}catch(e){fail('#m-res',e)}};
+$('#o-go').onclick=async()=>{const t=$('#o-type').value,slip=Math.round(Number($('#o-slip').value)*100);
+  try{const b={walletId:$('#o-wallet').value,token:'0xMEME',amount:$('#o-amt').value.trim(),slippageBps:slip};
+    if($('#o-chase').checked)b.chase={stepBps:100,maxBps:Math.round(Number($('#o-chasemax').value)*100)};
+    if(t==='bracket'){b.takeProfitE18=toE18($('#o-tp').value);b.stopLossE18=toE18($('#o-sl').value)}else if(t==='trailing-stop'){b.trailBps=Math.round(Number($('#o-trail').value)*100)}else b.priceE18=toE18($('#o-price').value);
+    const r=await api('POST','/v1/orders/'+t,b),list=Array.isArray(r)?r:[r];say('#o-res',true,`Placed ${list.length===2?'2 linked orders':list[0].kind.replace('_',' ')}`,list.map(o=>o.id+(o.chase?` (chase to ${o.chase.maxBps/100}%, ${o.maxAttempts} attempts)`:'')).join(', '));refresh()}catch(e){fail('#o-res',e)}};
+async function refresh(){
+  try{const os=await api('GET','/v1/orders');$('#orders').innerHTML=os.length?os.slice().reverse().map(o=>`<tr><td class="mono" title="${esc(o.id)}">${esc(shortId(o.id))}</td><td>${esc(o.kind.replace('_',' '))}${o.ocoGroup?' <span class="muted small">(bracket)</span>':''}</td><td class="r num">${esc(o.amount)}</td><td class="r num">${o.trailBps?esc(o.trailBps/100)+'% trail':esc(fromE18(o.triggerPriceE18))}${o.chase?`<br><span class="muted small">chase ${o.slippageBps/100}→${o.chase.maxBps/100}%</span>`:''}</td><td><span class="pill ${o.status==='active'?'warn':o.status==='fired'?'ok':o.status==='failed'?'bad':''}">${esc(o.status==='fired'?'filled':o.status)}</span>${o.reason&&o.status==='active'?`<div class="muted small">${esc(o.reason)}</div>`:''}</td><td class="r" style="white-space:nowrap">${o.status==='active'&&!o.trailBps?`<button class="sm" data-edit="${esc(o.id)}" data-px="${esc(fromE18(o.triggerPriceE18))}">Edit</button> `:''}${o.status==='active'?`<button class="sm" data-cancel="${esc(o.id)}">Cancel</button>`:''}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No orders yet.</td></tr>';
+    document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=async()=>{try{await api('DELETE','/v1/orders/'+encodeURIComponent(b.dataset.cancel));refresh()}catch(e){fail('#o-res',e)}});
+    document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{const td=b.closest('tr').children[3];td.innerHTML=`<input value="${esc(b.dataset.px)}" style="min-width:110px"><div class="row" style="gap:6px;margin-top:6px;justify-content:flex-end"><button class="sm primary">Save</button><button class="sm">Keep</button></div>`;const [inp]=td.getElementsByTagName('input'),[save,keep]=td.getElementsByTagName('button');inp.focus();keep.onclick=refresh;
+      save.onclick=async()=>{try{await api('PATCH','/v1/orders/'+encodeURIComponent(b.dataset.edit),{priceE18:toE18(inp.value)});say('#o-res',true,'Trigger moved',`${b.dataset.edit} now ${inp.value}`);refresh()}catch(e){fail('#o-res',e)}}});
+  }catch{}
+  try{const ps=await api('GET','/v1/positions');$('#pos').innerHTML=(ps||[]).length?ps.map(p=>`<tr><td class="mono">${esc(p.token)}</td><td class="r num">${esc(p.balance)}</td><td class="r num">${esc(p.knownCost)}</td><td class="r num">${p.unrealizedPnl==null?'<span class="muted">unknown</span>':esc(p.unrealizedPnl)}<div class="muted small">realized ${esc(p.realizedPnl)}</div></td></tr>`).join(''):'<tr><td colspan="4" class="muted">No positions yet.</td></tr>'}catch{}
+  try{const ts=await api('GET','/v1/trades?limit=8');$('#trades').innerHTML=(ts||[]).length?ts.map(t=>`<tr><td class="mono" title="${esc(t.key)}">${esc(shortId(t.key))}</td><td>${esc(t.origin)}</td><td><span class="pill ${t.state==='finalized'?'ok':t.state==='failed'?'bad':'warn'}">${esc(t.state)}</span></td><td class="r num">${esc(t.amountIn)}</td><td class="r num">${esc(t.fill?.received??'')}</td></tr>`).join(''):'<tr><td colspan="5" class="muted">No trades yet.</td></tr>'}catch{}
+}
+$('#refresh').onclick=refresh;
+$('#pause').onclick=async()=>{try{await api('POST',paused?'/v1/entries/resume':'/v1/entries/pause');paused=!paused;$('#pause').textContent=paused?'Resume buys':'Pause new buys'}catch(e){fail('#o-res',e)}};
+$('#b-go').onclick=async()=>{try{const id='bulk-'+Date.now();await api('POST','/v1/bulk/buy',{id,token:'0xMEME',wallets:['w1','w2'],total:$('#b-total').value.trim()});say('#b-res',true,'Bulk buy started',id+': legs run one after another; watch Live events.');setTimeout(async()=>{try{const s=await api('GET','/v1/bulk/'+encodeURIComponent(ACC.userId+'.'+id));say('#b-res',s.filled>0,`Bulk: ${s.filled} filled, ${s.failed} failed, ${s.skipped} skipped`,s.done?'Done.':'Still running.');refresh()}catch(e){fail('#b-res',e)}},4000)}catch(e){fail('#b-res',e)}};
+$('#t-go').onclick=async()=>{try{const id='twap-'+Date.now(),n=Number($('#t-n').value),iv=Number($('#t-int').value);await api('POST','/v1/twap',{id,walletId:'w1',token:'0xMEME',side:$('#t-side').value,total:$('#t-total').value.trim(),slices:n,intervalS:iv});say('#b-res',true,'TWAP started',`${id}: ${n} slices, ${iv} s apart.`);
+  const poll=async(k)=>{try{const s=await api('GET','/v1/twap/'+encodeURIComponent(ACC.userId+'.'+id));say('#b-res',!s.failed,`TWAP: ${s.filled} of ${n} filled${s.skipped?`, ${s.skipped} skipped`:''}`,s.done?'Done.':'Running…');if(!s.done&&k<40)setTimeout(()=>poll(k+1),1500);else refresh()}catch(e){fail('#b-res',e)}};setTimeout(()=>poll(0),1500)}catch(e){fail('#b-res',e)}};
+async function events(){
+  if(evAbort)evAbort.abort();evAbort=new AbortController();const box=$('#events');box.textContent='Listening…';
+  try{const r=await fetch('/v1/events',{headers:{authorization:'Bearer '+KEY},signal:evAbort.signal});const rd=r.body.getReader();let buf='';
+    for(;;){const{value,done}=await rd.read();if(done)break;buf+=new TextDecoder().decode(value);let i;while((i=buf.indexOf('\n\n'))>=0){const msg=buf.slice(0,i);buf=buf.slice(i+2);const d=msg.split('\n').find(l=>l.startsWith('data: '));if(!d)continue;
+      try{const e=JSON.parse(d.slice(6));const line=document.createElement('div');line.textContent=`${new Date().toLocaleTimeString()}  ${e.type}  ${e.id||e.key||''}  ${e.status||e.state||''}${e.filled!=null?` filled ${e.filled}`:''}`;if(box.textContent==='Listening…')box.textContent='';box.prepend(line);if(e.type==='order'||e.type==='trade')clearTimeout(window.__rt),window.__rt=setTimeout(refresh,400)}catch{}}}}
+  catch(e){if(e.name!=='AbortError')box.textContent='Event stream closed. Reconnect to resume.'}}
+orderForm();
+</script>
+</body>
+</html>

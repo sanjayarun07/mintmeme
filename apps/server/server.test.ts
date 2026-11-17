@@ -116,3 +116,12 @@ test('the /solana sample page is linked to a local terminal: page and /api/sol c
     assert.ok(isLoopback('127.0.0.1') && isLoopback('::1') && isLoopback('::ffff:127.0.0.1') && !isLoopback('10.0.3.7') && !isLoopback(undefined), 'only this machine is served');
   } finally { await nd.drain().catch(() => {}); await bare.nd.drain().catch(() => {}); term.close(); wipe(n); }
 });
+
+test('the API console is served by every node, and every API response names the node that ran it (the owner, also when forwarded)', { skip, timeout: 30_000 }, async () => {
+  const n = ns(); const A = await node(n), B = await node(n);
+  try {
+    const page = await fetch(B.url + '/console'); assert.equal(page.status, 200); assert.match(await page.text(), /MINT API console/); assert.match(page.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
+    const own = await fetch(A.url + '/v1/overview', { headers: { authorization: 'Bearer ' + KA } }); assert.equal(own.headers.get('x-memedesk-node'), A.url, 'served by the owner');
+    const fwd = await fetch(B.url + '/v1/overview', { headers: { authorization: 'Bearer ' + KA } }); assert.equal(fwd.status, 200); assert.equal(fwd.headers.get('x-memedesk-node'), A.url, 'forwarded: still names the owner');
+  } finally { await A.nd.drain().catch(() => {}); await B.nd.drain().catch(() => {}); wipe(n); }
+});

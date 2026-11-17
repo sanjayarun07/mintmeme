@@ -11,6 +11,7 @@
  *  Limits (read docs/PRODUCTION_SERVER.md): rate limits are per node; Redis is the single source of truth (run it with AOF); there is no Postgres backend. */
 import http from 'node:http';
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createApi } from '../api/server.ts';
 import type { ApiKey } from '../api/server.ts';
 import { SyncRedis } from '../../packages/core/src/index.ts';
@@ -41,7 +42,9 @@ const SOLANA_SAMPLE = new Set(['/solana', '/solana.html', '/solana.css', '/style
 export const isSolanaSamplePath = (p: string) => SOLANA_SAMPLE.has(p) || p.startsWith('/api/sol/');
 export const isLoopback = (a: string | undefined) => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 const sha = (s: string) => createHash('sha256').update(s).digest();
-const HOP = 'x-memedesk-hop';
+const HOP = 'x-memedesk-hop', NODE_HEADER = 'x-memedesk-node';
+/** The API console (apps/server/console.html): a static page with no secrets; the user types a key and it calls this node's API. */
+const CONSOLE_HTML = readFileSync(new URL('./console.html', import.meta.url), 'utf8');
 
 export async function createNode(o: NodeOptions) {
   const ttl = o.leaseTtlMs ?? 15_000, maxUsers = o.maxUsers ?? 500, log = o.log ?? (m => console.log(`[node ${o.publicUrl}] ${m}`));
@@ -120,16 +123,18 @@ export async function createNode(o: NodeOptions) {
       if (path === '/healthz') return json(res, 200, { ok: true, node: o.publicUrl, users: owned.size });
       if (path === '/readyz') { let ok = !draining; try { ok = ok && r.cmd('PING') === 'PONG'; } catch { ok = false; } return json(res, ok ? 200 : 503, { ready: ok, draining }); }
       if (path === '/metrics') { res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); return res.end(metrics()); }
+      if (path === '/console' || path === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'" }); return res.end(CONSOLE_HTML); }
       if (isSolanaSamplePath(path)) {
         if (!o.solanaSampleUrl || !isLoopback(req.socket.remoteAddress)) return json(res, 404, { error: { code: 'not_found', message: `No route ${path}.` } });
         return sampleProxy(req, res, o.solanaSampleUrl);
       }
       m.requests++;
       const user = userOf(req);
+      if (owned.has(user ?? '')) res.setHeader(NODE_HEADER, o.publicUrl);   // which node ran it: a forwarded response keeps the owner's value
       if (!user || path === '/v1/health' || path === '/v1/openapi.json' || owned.has(user)) return void api.server.emit('request', req, res);   // unknown keys get the API's own 401
       const owner = ownerOf(r, o.namespace, user);
       if (owner && owner !== o.publicUrl) { if (req.headers[HOP]) return json(res, 503, { error: { code: 'routing_loop', message: 'Ownership is moving between nodes.', fix: 'Retry in a few seconds.' } }, { 'retry-after': '2' }); return proxy(req, res, owner); }
-      if (await claim(user)) return void api.server.emit('request', req, res);
+      if (await claim(user)) { res.setHeader(NODE_HEADER, o.publicUrl); return void api.server.emit('request', req, res); }
       const now = ownerOf(r, o.namespace, user); if (now && now !== o.publicUrl && !req.headers[HOP]) return proxy(req, res, now);   // another node won the race
       return json(res, 503, { error: { code: draining ? 'draining' : 'no_capacity', message: draining ? 'This node is shutting down.' : 'No node has room for this account right now.', fix: 'Retry shortly; add nodes or raise MAX_USERS_PER_NODE if this persists.' } }, { 'retry-after': '5' });
     } catch (e) { log(`request failed: ${(e as Error).message}`); if (!res.headersSent) json(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the node log.' } }); }

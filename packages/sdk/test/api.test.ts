@@ -100,3 +100,17 @@ test('over HTTP: chase is accepted on orders, PATCH moves a trigger (owner only)
     const spec: any = await (await fetch(s.url + '/v1/openapi.json')).json(); assert.ok(spec.paths['/v1/orders/{id}'].patch, 'PATCH is in the OpenAPI document');
   } finally { await s.api.close(); }
 });
+
+test('orders, bulk and TWAP placed WITHOUT an id still get an id under the caller, so the owner can read, edit and cancel them (and nobody else can)', async () => {
+  const s = await boot();
+  try {
+    await s.alice.buy({ walletId: 'w1', token: T, amount: 50_000n, key: 'seed' });
+    const o = await s.alice.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceE18: (10n ** 30n).toString() });
+    assert.match(o.id, /^alice\.a-/); assert.equal((await s.alice.order(o.id)).status, 'active');
+    assert.equal((await s.alice.editOrder(o.id, { priceE18: (10n ** 31n).toString() })).triggerPriceE18, (10n ** 31n).toString());
+    await assert.rejects(s.bob.cancelOrder(o.id), (e: any) => e.status === 404); assert.equal((await s.alice.cancelOrder(o.id)).status, 'cancelled');
+    const br = await s.alice.bracket({ walletId: 'w1', token: T, amount: 1_000n, takeProfitE18: (10n ** 30n).toString(), stopLossE18: '1' });
+    assert.ok(br.every((l: any) => l.id.startsWith('alice.a-'))); assert.equal((await s.alice.cancelOrder(br[1].id)).status, 'cancelled');
+    const tw = await s.alice.twap({ walletId: 'w1', token: T, side: 'buy', total: 3_000n, slices: 3, intervalS: 60 }); assert.match(tw.id, /^alice\.a-/); assert.ok(await s.alice.twapStatus(tw.id));
+  } finally { await s.api.close(); }
+});

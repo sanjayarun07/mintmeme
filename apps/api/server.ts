@@ -5,7 +5,7 @@
  *   - Listens on 127.0.0.1 by default. Put TLS (a reverse proxy) in front before exposing it: API keys are bearer secrets.
  *   - 256 KB body cap, JSON only, per-key rate limit, no stack traces in errors, amounts as decimal strings (see packages/sdk/src/wire.ts). */
 import http from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { SdkError, ID_RE, plain, toJson } from '../../packages/sdk/src/wire.ts';
 import type { Trader } from '../../packages/sdk/src/trader.ts';
 
@@ -28,7 +28,8 @@ const found = <T>(o: T | undefined, what: string, id: string): T => { if (!o) th
 const lim = (q: URLSearchParams) => { const n = q.get('limit'); return n === null ? undefined : Number(n); };
 
 function routes(o: ApiOptions): Route[] {
-  const scoped = (c: Ctx) => ({ ...c.body, id: ns(c.userId, c.body?.id, 'id') });
+  // Every id is stored under the caller's prefix, including ids we make up: an order placed without an id must still be readable, editable and cancellable by its owner.
+  const scoped = (c: Ctx) => ({ ...c.body, id: ns(c.userId, c.body?.id ?? `a-${randomUUID()}`, 'id') });
   const idem = (c: Ctx) => ns(c.userId, c.headers['idempotency-key'] ?? c.body?.key, 'Idempotency-Key');
   return [
     { method: 'GET', path: '/v1/overview', scope: 'read', summary: 'Account state: chain, block, active orders, running bulk and TWAP jobs', run: c => c.t.overview() },
