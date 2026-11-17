@@ -19,7 +19,7 @@ services:
       NAMESPACE: memedesk
       MODE: practice
       LEASE_TTL_MS: "15000"
-      MAX_USERS_PER_NODE: "500"
+      MAX_USERS_PER_NODE: "300"
     volumes: ["${KEYS_FILE:-./keys.txt}:/run/memedesk/keys.txt:ro"]
     depends_on: { redis: { condition: service_healthy } }
     stop_grace_period: 30s

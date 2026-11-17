@@ -11,6 +11,7 @@
  *  Limits (read docs/PRODUCTION_SERVER.md): rate limits are per node; Redis is the single source of truth (run it with AOF); there is no Postgres backend. */
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createApi } from '../api/server.ts';
 import type { ApiKey } from '../api/server.ts';
 import { SyncRedis } from '../../packages/core/src/index.ts';
@@ -48,7 +49,8 @@ const CONSOLE_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-con
   'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'" };
 
 export async function createNode(o: NodeOptions) {
-  const ttl = o.leaseTtlMs ?? 15_000, maxUsers = o.maxUsers ?? 500, log = o.log ?? (m => console.log(`[node ${o.publicUrl}] ${m}`));
+  // maxUsers default 300: the most users per node measured (npm run server:loadtest, docs/PRODUCTION_SERVER.md)
+  const ttl = o.leaseTtlMs ?? 15_000, maxUsers = o.maxUsers ?? 300, log = o.log ?? (m => console.log(`[node ${o.publicUrl}] ${m}`));
   const r = new SyncRedis(o.redisUrl, 5000);
   if (r.cmd('PING') !== 'PONG') throw new Error('redis: unexpected reply to PING');
   let aof = 'unknown'; try { aof = r.cmd('CONFIG', 'GET', 'appendonly')?.[1] ?? 'unknown'; } catch { /* CONFIG may be disabled on managed Redis */ }
@@ -120,8 +122,15 @@ export async function createNode(o: NodeOptions) {
     if (origin) { try { if (new URL(origin).host === req.headers.host) headers.origin = new URL(base).origin; } catch { /* malformed: pass through, the terminal refuses it */ } }
     forward(req, res, base, headers, () => json(res, 502, { error: { code: 'terminal_unreachable', message: `The Solana terminal at ${base} did not answer.`, fix: 'Start it with: npm run web' } }));
   };
-  const metrics = () => [
+  // event-loop delay since the last scrape: Redis calls are synchronous and every owned Trader ticks on this loop, so this is the node's load signal
+  const ELD_RES = 10, eld = monitorEventLoopDelay({ resolution: ELD_RES }); eld.enable();
+  const metrics = () => {
+    const ms = (n: number) => Math.max(0, n / 1e6 - ELD_RES).toFixed(1);   // the sampler's own interval is not delay: report only the time beyond it
+    let orders = 0; for (const x of owned.values()) orders += x.acct.trader.listOrders({ status: 'active' }).length;
+    const out = [
     '# TYPE memedesk_users_owned gauge', `memedesk_users_owned ${owned.size}`,
+    '# TYPE memedesk_orders_active gauge', `memedesk_orders_active ${orders}`,
+    '# TYPE memedesk_event_loop_delay_ms gauge', `memedesk_event_loop_delay_ms{quantile="0.5"} ${ms(eld.percentile(50))}`, `memedesk_event_loop_delay_ms{quantile="0.99"} ${ms(eld.percentile(99))}`, `memedesk_event_loop_delay_ms{quantile="1"} ${ms(eld.max)}`,
     '# TYPE memedesk_requests_total counter', `memedesk_requests_total ${m.requests}`,
     '# TYPE memedesk_proxied_total counter', `memedesk_proxied_total ${m.proxied}`,
     '# TYPE memedesk_proxy_errors_total counter', `memedesk_proxy_errors_total ${m.proxyErrors}`,
@@ -129,6 +138,8 @@ export async function createNode(o: NodeOptions) {
     '# TYPE memedesk_leases_lost_total counter', `memedesk_leases_lost_total ${m.leasesLost}`,
     '# TYPE memedesk_capacity_refusals_total counter', `memedesk_capacity_refusals_total ${m.refusedNoCapacity}`,
     '# TYPE memedesk_draining gauge', `memedesk_draining ${draining ? 1 : 0}`, ''].join('\n');
+    eld.reset(); return out;
+  };
   const serveLocal = (req: http.IncomingMessage, res: http.ServerResponse) => { res.setHeader(NODE_HEADER, o.publicUrl); api.server.emit('request', req, res); };
 
   const server = http.createServer(async (req, res) => {
@@ -138,7 +149,7 @@ export async function createNode(o: NodeOptions) {
       const path = new URL(req.url!, 'http://x').pathname;
       if (path === '/healthz') return json(res, 200, { ok: true, node: o.publicUrl, users: owned.size });
       if (path === '/readyz') { let ok = !draining; try { ok = ok && r.cmd('PING') === 'PONG'; } catch { ok = false; } return json(res, ok ? 200 : 503, { ready: ok, draining }); }
-      if (path === '/metrics') { res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); return res.end(metrics()); }
+      if (path === '/metrics') { const body = metrics(); res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); return res.end(body); }   // build first: a throw must not leave a half-sent response
       if (path === '/console' || path === '/') { res.writeHead(200, CONSOLE_HEADERS); return res.end(CONSOLE_HTML); }
       if (isSolanaSamplePath(path)) {
         if (!o.solanaSampleUrl || !isLoopback(req.socket.remoteAddress) || !isLoopbackHost(req.headers.host)) return json(res, 404, { error: { code: 'not_found', message: `No route ${path}.` } });
@@ -153,9 +164,9 @@ export async function createNode(o: NodeOptions) {
       if (await claim(user)) return serveLocal(req, res);
       const now = ownerOf(r, o.namespace, user); if (now && now !== o.publicUrl && !req.headers[HOP]) return toOwner(req, res, now);   // another node won the race
       return json(res, 503, { error: { code: draining ? 'draining' : 'no_capacity', message: draining ? 'This node is shutting down.' : 'No node has room for this account right now.', fix: 'Retry shortly; add nodes or raise MAX_USERS_PER_NODE if this persists.' } }, { 'retry-after': '5' });
-    } catch (e) { log(`request failed: ${(e as Error).message}`); if (!res.headersSent) json(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the node log.' } }); }
+    } catch (e) { log(`request failed: ${(e as Error).message}`); if (!res.headersSent) json(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the node log.' } }); else res.end(); }   // never leave a request hanging
   });
-  const stopServing = async () => { draining = true; clearInterval(sweepTimer); clearInterval(renewTimer); await Promise.allSettled(claiming.values()); };
+  const stopServing = async () => { draining = true; clearInterval(sweepTimer); clearInterval(renewTimer); eld.disable(); await Promise.allSettled(claiming.values()); };
   const closeHttp = () => new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); });
 
   return {

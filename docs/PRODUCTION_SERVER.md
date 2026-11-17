@@ -39,6 +39,25 @@ Status: the cluster mechanics (ownership, routing, failover, durability of order
 | Two node processes via `main.ts` | request on the non-owner forwarded; order placed through it; SIGTERM on the owner: the other node owned the user at once, order still active with its chase settings; `PATCH` edit worked on the new owner; no lease left behind |
 | Docker: Redis (AOF) + 3 nodes + nginx (`deploy/server`) | requests through the load balancer reached the owner; `docker stop` of the owner: next request answered by a new owner in **1 s**; `SIGKILL` of the next owner: answered after **15 s** (= `LEASE_TTL_MS`); the order stayed active throughout |
 
+### Throughput (npm run server:loadtest)
+
+Three node processes on one machine (Apple M3 Max, 16 threads) and one local Redis, practice accounts, 64 concurrent clients, 15 s per phase. Each request went to the
+user's owner node half the time and to a random node otherwise, so about a third were forwarded one hop. Reports: `docs/live-verification/2026-11-17T15-04-11Z-server-load-200u.md`
+and `…15-05-23Z-server-load-600u.md`.
+
+| | 200 users (about 66 per node) | 600 users (about 200 per node) |
+|---|---|---|
+| Reads (`GET /v1/overview`), all nodes together | 38 849/s, p50 1.4 ms, p99 5.6 ms, 0 errors | 33 503/s, p50 1.4 ms, p99 6.9 ms, 0 errors |
+| Forwarding cost on reads (p50 direct vs forwarded) | 1.0 vs 2.4 ms | 0.9 vs 3.3 ms |
+| Market buys (each a full engine trade with write-ahead saves), all nodes | 689/s, p50 64.6 ms, p99 407 ms, 1 error in 10 340 | 1 065/s, p50 42.2 ms, p99 250 ms, 0 errors |
+| Standing orders watched every tick | 1 000 | 3 000 |
+| Event-loop delay per node with those orders, under read load (p99) | 1.6 to 2.6 ms | 3.0 to 3.6 ms |
+| SIGKILL of one node (lease TTL 15 s) | its 68 users all answered again after 15.1 s | its 201 users all answered again after 14.8 s |
+
+After that failover the two survivors carried about 300 users and 1 500 orders each with no errors, so 300 users per node is the measured ceiling and the default
+`MAX_USERS_PER_NODE`. Buys get faster with more users because each user's trades are serialised; reads and order watching barely load the event loop at this scale.
+These are one machine's numbers with a local Redis: a networked Redis adds its round trip to every synchronous call, so measure on the target hardware.
+
 The first Docker run took 60 s per failover: nginx's default connect timeout on a stopped container. `nginx.conf` now sets `proxy_connect_timeout 2s` and node-to-node
 forwarding has a 3 s connect timeout; the numbers above are after that fix.
 
@@ -63,7 +82,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `PORT`, `HOST` | 3500, 127.0.0.1 | `HOST=0.0.0.0` in a container. |
 | `NAMESPACE` | memedesk | Redis key prefix. One namespace per environment. |
 | `LEASE_TTL_MS` | 15000 | Worst-case takeover time after a crash. Lower = faster failover, more renewals. |
-| `MAX_USERS_PER_NODE` | 500 | A full node turns away unowned users with `503 no_capacity`. |
+| `MAX_USERS_PER_NODE` | 300 | A full node turns away unowned users with `503 no_capacity`. 300 is the most measured per node (load test below); raise it only after measuring your hardware. |
 | `SWEEP_MS` | 2000 | How often a node looks for unowned users. |
 | `RATE_PER_SECOND`, `RATE_BURST` | 20, 40 | Per key, **per node**. |
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
@@ -101,4 +120,4 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 - **Key rotation** means editing `API_KEYS_FILE` on every node and rolling them. No key management API.
 - **TLS** is the load balancer's job; the nodes speak plain HTTP on the private network.
 - **Practice balances** are not durable: a user's simulated world is rebuilt with fresh fake funds on the node that takes it over. Orders and the trade journal are durable.
-- Not load-tested; the numbers above are correctness and failover checks, not throughput.
+- Load-tested on one machine with a local Redis only (throughput section above); nothing above 300 users per node or with a networked Redis has been measured.

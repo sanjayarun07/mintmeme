@@ -13,7 +13,9 @@
     "server:key": "node --experimental-transform-types --no-warnings apps/server/keys.ts",
     "web": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/web/server.ts",
     "build:privy": "cd apps/privy && npm install && npm run build",
-    "verify:sol-guard": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/solguardfork.ts"
+    "verify:sol-guard": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/solguardfork.ts",
+    "server:loadtest": "node --experimental-transform-types --no-warnings apps/server/loadtest.ts",
+    "verify:evm": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/traderfork.ts"
   },
   "engines": {
     "node": ">=22.18"
