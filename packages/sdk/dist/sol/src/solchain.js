@@ -3,7 +3,8 @@ import { base58, ataAddress, createAtaIdempotent, systemTransfer, syncNative, cl
 import { RaydiumVenue, loadPoolKeys, decodePoolState, AMM_STATUS_SWAP } from './raydium.js';
 import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMessage, decodeTable, gateInstructions, walletTokenAccountsAtRisk, unsignedV0, wireV0, JupiterVenue, JupiterRefused } from './jupiterswap.js';
 import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.js';
-import { PROGRAMS, pubkeyBytes } from './tx.js';
+import { PriorityFees, limitFromSimulation, clampPrice, PRIORITY_DEFAULTS } from './priorityfee.js';
+import { PROGRAMS, pubkeyBytes, COMPUTE_BUDGET } from './tx.js';
 import { decodeFeeConfig, PumpVenue, PUMP_PROGRAM, decodeCurve, decodeGlobal, pumpAddresses, untradableReason, buy as pumpBuy, quoteBuy, sell as pumpSell, createAtaIdempotent2 } from './pump.js';
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
 export class SolJsonRpcError extends Error {
@@ -47,6 +48,7 @@ export class SolanaChain {
     rent;
     cfg;
     tipped = new Set();
+    fees;
     /** Signatures this process sent recently. Solana has no mempool query, so a just-sent tx is not visible for a moment: report it as pending instead of absent (avoids pointless identical resends). */
     sentAt = new Map();
     static VISIBILITY_GRACE_MS = 4000;
@@ -58,6 +60,8 @@ export class SolanaChain {
         this.cfg = { ...cfg, pools: [...cfg.pools] };
         this.id = cfg.id;
         this.finalityDepth = cfg.finalityDepth ?? FINAL;
+        if (cfg.priority)
+            this.fees = new PriorityFees(rpc, cfg.priority);
     }
     venues() { return [...this.state.venues.values()]; }
     /** Add a pool to track. SnipeRunner passes `{ id, pair }`; the program defaults to the first configured pool's program. */
@@ -300,7 +304,7 @@ export class SolanaChain {
             tables.push(t);
         });
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-        const message = compileV0(w, b.ixs, b99(bh.value.blockhash), tables);
+        let message = compileV0(w, b.ixs, b99(bh.value.blockhash), tables);
         const final = resolveMessage(parseMessage(message), tables);
         const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
         const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM), outAta = ataAddress(w, outM), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
@@ -339,6 +343,16 @@ export class SolanaChain {
             throw new JupiterRefused('SOL to SOL is not a swap');
         if (got < tx.minOut)
             throw new JupiterRefused(`simulated output ${got} is below the minimum ${tx.minOut}`);
+        // Fees, as Jupiter's compute-unit guide recommends: Jupiter sets only a price, so the network would charge it on up to 1.4M units. Set the limit from this simulation
+        // (units used x 1.2) and the price from recent fees on the route's accounts (or Jupiter's price, capped), then recompile the same instructions and gate them again.
+        if (this.fees || gate.computeUnitLimit === 0) {
+            const limit = gate.computeUnitLimit || limitFromSimulation(Number(sim.value.unitsConsumed ?? 1_400_000)), cap = this.cfg.priority?.maxLamports ?? PRIORITY_DEFAULTS.maxLamports;
+            const jupPrice = b.ixs.filter(i => i.programId === COMPUTE_BUDGET && i.data[0] === 3 && i.data.length === 9).map(i => Buffer.from(i.data).readBigUInt64LE(1))[0] ?? 0n;
+            const price = this.fees ? await this.fees.price(cand, limit).catch(() => clampPrice(jupPrice, limit, cap)) : clampPrice(jupPrice, limit, j.maxPriorityLamports ?? 2000000n);
+            const cb = (data) => ({ programId: COMPUTE_BUDGET, accounts: [], data });
+            message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...b.ixs.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
+            gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
+        }
         return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
     }
     async simulate(tx) {
@@ -383,7 +397,7 @@ export class SolanaChain {
             const sig = await this.signer.sign(tx.wallet, message);
             return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) };
         }
-        const ixs = this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined;
+        const ixs = this.fees && (tx.kind ?? 'swap') === 'swap' ? await this.withPriority(this.instructions(tx), tx.wallet) : this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined;
         if (extra)
             ixs.push(extra);
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
@@ -391,6 +405,21 @@ export class SolanaChain {
         if (extra)
             this.tipped.add(base58(sig));
         return { raw: Buffer.from(wireTx(message, [sig])).toString('base64'), hash: base58(sig) };
+    }
+    /** pump.fun and Raydium: the limit from a simulation (units used x 1.2; the configured limit if it cannot be simulated) and the price from recent fees on the accounts
+     *  this trade writes, capped (priorityfee.ts). An estimate that cannot be read falls back to the floor price. */
+    async withPriority(ixs, payer) {
+        const body = ixs.filter(i => i.program !== COMPUTE_BUDGET);
+        let limit = this.cfg.computeUnitLimit ?? 300_000;
+        try {
+            const r = await this.rpcCall('simulateTransaction', [Buffer.from(unsignedTx(compileLegacy(payer, [setComputeUnitLimit(1_400_000), ...body]))).toString('base64'), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64' }]);
+            if (!r.value.err && r.value.unitsConsumed)
+                limit = limitFromSimulation(Number(r.value.unitsConsumed));
+        }
+        catch { /* keep the configured limit */ }
+        const writable = body.flatMap(i => i.keys.filter(k => k.writable && !k.signer).map(k => k.pubkey)), p = this.cfg.priority;
+        const price = await this.fees.price(writable, limit).catch(() => clampPrice(p.minMicroLamports ?? PRIORITY_DEFAULTS.minMicroLamports, limit, p.maxLamports ?? PRIORITY_DEFAULTS.maxLamports));
+        return [setComputeUnitLimit(limit), setComputeUnitPrice(price), ...body];
     }
     async submit(tx) {
         if (!tx.raw)

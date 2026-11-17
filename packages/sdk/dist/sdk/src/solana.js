@@ -145,7 +145,7 @@ export async function createSolanaTrader(o) {
         else
             why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why;
     }
-    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] } }, rpc, new PrivySolSigner(privy, signable));
+    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }) }, rpc, new PrivySolSigner(privy, signable));
     const policies = new Map(), owners = new Map();
     if (o.address) {
         owners.set(o.address, 'x');

@@ -7,7 +7,7 @@
  *   - Swap API V2 base URL, `/build` request/response shape, keyless limit 0.5 requests/s, `x-api-key` header: https://developers.jup.ag/docs/swap/build/index.md and https://developers.jup.ag/docs/swap/index.md
  *   - DEX program ids Jupiter can route through (112 on the day): `GET https://api.jup.ag/swap/v2/program-id-to-label` (https://developers.jup.ag/docs/api-reference/swap/program-id-to-label.md). Fetched live and cached; if it cannot be fetched we REFUSE to trade.
  *   - Jupiter v6 swap aggregator program `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`: named in https://developers.jup.ag/docs/swap/routing/rfq/v2/streaming.md ("the Jupiter v6 swap aggregator program"), and it is what `/build` returned as `swapInstruction.programId`.
- *  What is NOT done: no Jito/tips (tipInstruction is refused), no Token-2022 (refused), no platform fee, no priority-fee estimation beyond a hard cap, no `/execute` or `/submit` (we send through our own node).
+ *  What is NOT done: no Jito/tips (tipInstruction is refused), no Token-2022 (refused), no platform fee, priority fee: the compute-unit limit is set from our simulation and the price from priorityfee.ts (or Jupiter's, capped) by SolanaChain, no `/execute` or `/submit` (we send through our own node).
  *  The gate cannot read the aggregator's instruction data, so protection for the swap itself is (a) the on-chain slippage we pass, set so Jupiter's own minimum output is >= the engine's minOut, and (b) the simulated balance check. */
 import { u64le, u32le } from './tx.ts';
 import type { Venue, Quote } from '../../core/src/index.ts';

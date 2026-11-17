@@ -74,7 +74,7 @@ export class SolMainnet {
   private attach(address: string, signer: SolSigner) {
     if (this.conn) throw bad('a wallet is already connected: disconnect it first', 409);
     const rpc = new SolJsonRpc(this.rpcEndpoint());
-    const chain = new SolanaChain({ id: 'sol-main', wsol: WSOL, pools: [], pump: { mints: [] }, jupiter: { pairs: [] } }, rpc, signer);
+    const chain = new SolanaChain({ id: 'sol-main', wsol: WSOL, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, priority: {} }, rpc, signer);   // priority fees from recent network fees, at most 0.0001 SOL per transaction
     const policy: WalletPolicy = { userId: 'u1', chains: ['sol-main'], allowedVenues: this.families, maxPerTx: { [NATIVE]: this.guard.limits.maxTradeLamports }, dailyLimit: { [NATIVE]: this.guard.limits.dailyCapLamports }, destinations: [], deviceSecret: 'local' };
     const store = Store.open(join(this.dir, `engine-${address.slice(0, 8)}.json`));
     const engine = new Engine({ store, chain, signer: new PolicySigner(new Map([[address, 'x']]), new Map([[address, policy]]), fileLedger(join(this.dir, `ledger-${address.slice(0, 8)}.json`))), router: new Router(chain), platformFeeBps: 0 });

@@ -16,6 +16,7 @@ import type { SolRpc } from './raydium.ts';
 import type { SolSigner } from './signer.ts';
 import type { JupCfg } from './jupiterswap.ts';
 import type { TxSubmitter } from './submitter.ts';
+import type { PriorityConfig } from './priorityfee.ts';
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
 export declare class SolJsonRpcError extends Error {
     data?: any;
@@ -40,6 +41,8 @@ export interface SolChainConfig {
     computeUnitLimit?: number;
     priorityMicroLamports?: bigint;
     finalityDepth?: number;
+    /** Automatic priority fees (priorityfee.ts): price from recent fees on the trade's accounts, limit from simulation, total capped. Unset: the fixed `priorityMicroLamports` (default none) and Jupiter's own price. */
+    priority?: PriorityConfig;
     /** Jupiter routes the engine may use. `pairs` are directions (a pair needs one entry per direction); `refAmount` is the size of the quote snapshot used for estimates. */
     /** pump.fun bonding curves to track, by mint. Only curves we can trade (not complete, not mayhem or cashback) become tradable venues; the rest are loaded with the reason they are not. */
     pump?: {
@@ -71,6 +74,7 @@ export declare class SolanaChain implements ChainPort {
     private rent?;
     private cfg;
     private tipped;
+    private fees?;
     /** Signatures this process sent recently. Solana has no mempool query, so a just-sent tx is not visible for a moment: report it as pending instead of absent (avoids pointless identical resends). */
     private sentAt;
     static VISIBILITY_GRACE_MS: number;
@@ -132,6 +136,9 @@ export declare class SolanaChain implements ChainPort {
         raw: string;
         hash: string;
     }>;
+    /** pump.fun and Raydium: the limit from a simulation (units used x 1.2; the configured limit if it cannot be simulated) and the price from recent fees on the accounts
+     *  this trade writes, capped (priorityfee.ts). An estimate that cannot be read falls back to the floor price. */
+    private withPriority;
     submit(tx: SimTx): Promise<string>;
     private status;
     lookup(hash: string): Promise<"included" | "none" | "pending">;

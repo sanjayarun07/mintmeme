@@ -190,6 +190,11 @@ await s.prepare(mint); await s.trader.limitBuy({ walletId: userWallet, token: mi
 s.trader.on(e => console.log(e));
 ```
 
+**Priority fees** are on by default (`priority` option; `false` turns them off). Each transaction gets a compute-unit limit from a simulation (units used × 1.2, as
+Jupiter's compute-unit guide recommends; Jupiter's `/build` sets no limit, so the fee would otherwise be charged on up to 1.4M units) and a price from Solana's
+`getRecentPrioritizationFees` for the accounts the trade writes: the 75th percentile, at least 10,000 micro-lamports per unit, and never more than 0.0001 SOL in total per
+transaction. Tune with `priority: { percentile, minMicroLamports, maxLamports }`.
+
 Defaults: Jupiter and pump.fun only, at most 0.05 SOL per buy and 0.25 SOL of buys per day (`caps` lowers or changes them), sells of held tokens not capped in SOL, SOL/USD
 from a Jupiter quote (`solUsd` replaces it). For many users in one process, share one `PrivyApi` and one `jupiterSolUsd()` across them.
 

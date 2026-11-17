@@ -4,7 +4,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import net from 'node:net';
-import { SolJsonRpc, DevSolSigner } from '../../sol/src/index.ts';
+import { SolJsonRpc, DevSolSigner, b58decode } from '../../sol/src/index.ts';
 import { SyncRedis } from '../../core/src/index.ts';
 import { startPumpValidator } from './pumpenv.ts';
 import { fakePrivy } from '../../sol/test/fakeprivy.ts';
@@ -40,6 +40,9 @@ async function main() {
     const t0 = await tokens(), buy = { status: 200, j: await cl(other.url).swap({ side: 'buy', mint, sol: '0.02', slippagePct: 5, key: 'fork-buy-1' }) };   // plain units, the linked wallet by default
     let tr = buy.j; for (let i = 0; i < 40 && !['finalized', 'failed', 'expired'].includes(tr.state); i++) { await sleep(1000); tr = (await call(other.url, 'POST', `/v1/trades/alice.fork-buy-1/advance`)).j; }
     check('S2 a market buy in plain units (sol: "0.02", no walletId) through the non-owner node is signed by Privy and lands', buy.status === 200 && tr.state !== 'failed' && (await tokens()) > t0 && fp.state.signed >= 1, JSON.stringify(tr).slice(0, 240));
+    { const t: any = await rpc.call('getTransaction', [tr.txHash, { encoding: 'json', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]); const m = t?.transaction?.message, cb = m ? m.accountKeys.indexOf('ComputeBudget111111111111111111111111111111') : -1;
+      const ds = (m?.instructions ?? []).filter((i: any) => i.programIdIndex === cb).map((i: any) => Buffer.from(b58decode(i.data))), lim = ds.find((d: Buffer) => d[0] === 2)?.readUInt32LE(1), price = ds.find((d: Buffer) => d[0] === 3)?.readBigUInt64LE(1);
+      check('S10 the buy carries a compute-unit limit from simulation (not 300,000 or 1.4M) and a priority price capped at 0.0001 SOL in total', !!lim && lim < 300_000 && price !== undefined && price > 0n && price * BigInt(lim) <= 100_000n * 1_000_000n && BigInt(t.meta.computeUnitsConsumed ?? 0) <= BigInt(lim), JSON.stringify({ lim, price: String(price), used: t?.meta?.computeUnitsConsumed, fee: t?.meta?.fee })); }
     check('S3 the same idempotency key again does not trade twice', (await cl(other.url).swap({ side: 'buy', mint, sol: '0.02', slippagePct: 5, key: 'fork-buy-1' })).key === tr.key && fp.state.signed === 1, String(fp.state.signed));
     check('S4 a buy above the per-trade cap (0.05 SOL) is refused by the policy signer', /per-tx limit/.test(JSON.stringify((await call(other.url, 'POST', '/v1/trades/buy', { walletId: addr, token: mint, amount: '60000000', slippageBps: 500 })).j)));
     // a standing order that cannot fire yet; then the owner crashes

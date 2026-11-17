@@ -11,7 +11,7 @@ import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.ts';
 import type { Backend, SpentLedger, WalletPolicy } from '../../core/src/index.ts';
 import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, looksLikeMint } from '../../sol/src/index.ts';
-import type { PrivyConfig } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig } from '../../sol/src/index.ts';
 import { fetchJupiterQuote } from '../../sol/src/jupiter.ts';
 import { Trader } from './trader.ts';
 import { SdkError } from './wire.ts';
@@ -33,6 +33,8 @@ export interface SolanaTraderOptions {
   solUsd?: () => Promise<{ price: number; at: number } | null>;
   /** The Privy wallet id you saved when the user linked (checked against Privy). Optional. */
   walletId?: string;
+  /** Priority fees (packages/sol/src/priorityfee.ts). Default on: 75th percentile of recent fees on the trade's accounts, at most 0.0001 SOL per transaction. false: off. */
+  priority?: PriorityConfig | false;
   log?: (m: string) => void;
 }
 export interface SolanaTrader { trader: Trader; chain: SolanaChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
@@ -97,7 +99,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   if (!o.address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(o.address);   // throws when Privy is unreachable: nothing can be signed, so the caller should retry rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[o.address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
-  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] } }, rpc, new PrivySolSigner(privy, signable));
+  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }) }, rpc, new PrivySolSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (o.address) { owners.set(o.address, 'x'); policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });

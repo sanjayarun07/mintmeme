@@ -1,6 +1,6 @@
 import type { Backend } from '../../core/src/index.ts';
 import { SolanaChain, PrivyApi } from '../../sol/src/index.ts';
-import type { PrivyConfig } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig } from '../../sol/src/index.ts';
 import { Trader } from './trader.ts';
 export declare const WSOL_MINT = "So11111111111111111111111111111111111111112";
 /** Defaults: at most 0.05 SOL per buy and 0.25 SOL of buys per day. Lower them per user if you like; the Privy policy caps SOL transfers separately. */
@@ -28,6 +28,8 @@ export interface SolanaTraderOptions {
     } | null>;
     /** The Privy wallet id you saved when the user linked (checked against Privy). Optional. */
     walletId?: string;
+    /** Priority fees (packages/sol/src/priorityfee.ts). Default on: 75th percentile of recent fees on the trade's accounts, at most 0.0001 SOL per transaction. false: off. */
+    priority?: PriorityConfig | false;
     log?: (m: string) => void;
 }
 export interface SolanaTrader {

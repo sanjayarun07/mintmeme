@@ -22,7 +22,9 @@ import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMe
 import type { JupCfg, JIx, Table } from './jupiterswap.ts';
 import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.ts';
 import type { TxSubmitter } from './submitter.ts';
-import { PROGRAMS, pubkeyBytes } from './tx.ts';
+import { PriorityFees, limitFromSimulation, clampPrice, PRIORITY_DEFAULTS } from './priorityfee.ts';
+import type { PriorityConfig } from './priorityfee.ts';
+import { PROGRAMS, pubkeyBytes, COMPUTE_BUDGET } from './tx.ts';
 import { decodeFeeConfig, PumpVenue, PUMP_PROGRAM, decodeCurve, decodeGlobal, pumpAddresses, untradableReason, buy as pumpBuy, quoteBuy, sell as pumpSell, createAtaIdempotent2 } from './pump.ts';
 
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
@@ -40,6 +42,8 @@ export class SolJsonRpc implements SolRpc {
 
 const b99 = (h: string) => b58decode(h);
 export interface SolChainConfig { id: string; wsol: string; /** Raydium AMM v4 program for pools added later (sniping); defaults to the first configured pool's program */ program?: string; pools: { id: string; program: string }[]; computeUnitLimit?: number; priorityMicroLamports?: bigint; finalityDepth?: number;
+  /** Automatic priority fees (priorityfee.ts): price from recent fees on the trade's accounts, limit from simulation, total capped. Unset: the fixed `priorityMicroLamports` (default none) and Jupiter's own price. */
+  priority?: PriorityConfig;
   /** Jupiter routes the engine may use. `pairs` are directions (a pair needs one entry per direction); `refAmount` is the size of the quote snapshot used for estimates. */
   /** pump.fun bonding curves to track, by mint. Only curves we can trade (not complete, not mayhem or cashback) become tradable venues; the rest are loaded with the reason they are not. */
   pump?: { mints: string[] };
@@ -51,12 +55,12 @@ const FINAL = 32, TOKEN_ACCOUNT_SIZE = 165;
 export class SolanaChain implements ChainPort {
   id: string; family = 'solana'; time = 0; block = 0; finalityDepth: number;
   state = { venues: new Map<string, Venue>() };
-  private keys = new Map<string, PoolKeys>(); private rent?: bigint; private cfg: SolChainConfig; private tipped = new Set<string>();
+  private keys = new Map<string, PoolKeys>(); private rent?: bigint; private cfg: SolChainConfig; private tipped = new Set<string>(); private fees?: PriorityFees;
   /** Signatures this process sent recently. Solana has no mempool query, so a just-sent tx is not visible for a moment: report it as pending instead of absent (avoids pointless identical resends). */
   private sentAt = new Map<string, number>(); static VISIBILITY_GRACE_MS = 4000;
   /** Set when the last Jupiter quote refresh failed (the Jupiter venue is then absent, so routing falls back to other venues). */
   jupiterError?: string;
-  constructor(cfg: SolChainConfig, private rpc: SolRpc, private signer: SolSigner) { this.cfg = { ...cfg, pools: [...cfg.pools] }; this.id = cfg.id; this.finalityDepth = cfg.finalityDepth ?? FINAL; }
+  constructor(cfg: SolChainConfig, private rpc: SolRpc, private signer: SolSigner) { this.cfg = { ...cfg, pools: [...cfg.pools] }; this.id = cfg.id; this.finalityDepth = cfg.finalityDepth ?? FINAL; if (cfg.priority) this.fees = new PriorityFees(rpc as any, cfg.priority); }
   venues() { return [...this.state.venues.values()]; }
   /** Add a pool to track. SnipeRunner passes `{ id, pair }`; the program defaults to the first configured pool's program. */
   addPool(p: { id: string; program?: string; pair?: string }) { const program = p.program ?? this.cfg.program ?? this.cfg.pools[0]?.program; if (!program) throw new Error('no Raydium program configured for new pools'); if (!this.cfg.pools.some(x => x.id === p.id)) this.cfg.pools.push({ id: p.id, program }); }
@@ -191,7 +195,7 @@ export class SolanaChain implements ChainPort {
     ids.forEach((id, i) => { const a = infos[i]; if (!a) throw new JupiterRefused(`lookup table ${id} does not exist on chain`); const t = decodeTable(id, a.data);
       b.claimedTables[i].addresses.forEach((x, k) => { if (t.addresses[k] !== x) throw new JupiterRefused(`lookup table ${id} on chain differs from what Jupiter described`); }); tables.push(t); });
     const bh: any = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-    const message = compileV0(w, b.ixs, b99(bh.value.blockhash), tables);
+    let message = compileV0(w, b.ixs, b99(bh.value.blockhash), tables);
     const final = resolveMessage(parseMessage(message), tables);
     const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
     const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM), outAta = ataAddress(w, outM), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
@@ -213,6 +217,16 @@ export class SolanaChain implements ChainPort {
     if (tx.tokenOut === NATIVE) got = lam(post[0]) - lam(pre[0]) + feeAll + rent; else got = tok(post[k]) - tok(pre[k]);
     if (tx.tokenIn === NATIVE && tx.tokenOut === NATIVE) throw new JupiterRefused('SOL to SOL is not a swap');
     if (got < tx.minOut) throw new JupiterRefused(`simulated output ${got} is below the minimum ${tx.minOut}`);
+    // Fees, as Jupiter's compute-unit guide recommends: Jupiter sets only a price, so the network would charge it on up to 1.4M units. Set the limit from this simulation
+    // (units used x 1.2) and the price from recent fees on the route's accounts (or Jupiter's price, capped), then recompile the same instructions and gate them again.
+    if (this.fees || gate.computeUnitLimit === 0) {
+      const limit = gate.computeUnitLimit || limitFromSimulation(Number(sim.value.unitsConsumed ?? 1_400_000)), cap = this.cfg.priority?.maxLamports ?? PRIORITY_DEFAULTS.maxLamports;
+      const jupPrice = b.ixs.filter(i => i.programId === COMPUTE_BUDGET && i.data[0] === 3 && i.data.length === 9).map(i => Buffer.from(i.data).readBigUInt64LE(1))[0] ?? 0n;
+      const price = this.fees ? await this.fees.price(cand, limit).catch(() => clampPrice(jupPrice, limit, cap)) : clampPrice(jupPrice, limit, j.maxPriorityLamports ?? 2_000_000n);
+      const cb = (data: Uint8Array): JIx => ({ programId: COMPUTE_BUDGET, accounts: [], data });
+      message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...b.ixs.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
+      gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
+    }
     return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
   }
 
@@ -236,10 +250,21 @@ export class SolanaChain implements ChainPort {
   async prepare(tx: SimTx) {
     const jv = this.jupVenue(tx);
     if (jv) { const { message } = await this.buildJupiter(tx, jv); const sig = await this.signer.sign(tx.wallet, message); return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) }; }
-    const ixs = this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; if (extra) ixs.push(extra);
+    const ixs = this.fees && (tx.kind ?? 'swap') === 'swap' ? await this.withPriority(this.instructions(tx), tx.wallet) : this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; if (extra) ixs.push(extra);
     const bh: any = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
     const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = await this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig));
     return { raw: Buffer.from(wireTx(message, [sig])).toString('base64'), hash: base58(sig) };
+  }
+
+  /** pump.fun and Raydium: the limit from a simulation (units used x 1.2; the configured limit if it cannot be simulated) and the price from recent fees on the accounts
+   *  this trade writes, capped (priorityfee.ts). An estimate that cannot be read falls back to the floor price. */
+  private async withPriority(ixs: Ix[], payer: string): Promise<Ix[]> {
+    const body = ixs.filter(i => i.program !== COMPUTE_BUDGET); let limit = this.cfg.computeUnitLimit ?? 300_000;
+    try { const r: any = await this.rpcCall('simulateTransaction', [Buffer.from(unsignedTx(compileLegacy(payer, [setComputeUnitLimit(1_400_000), ...body]))).toString('base64'), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64' }]);
+      if (!r.value.err && r.value.unitsConsumed) limit = limitFromSimulation(Number(r.value.unitsConsumed)); } catch { /* keep the configured limit */ }
+    const writable = body.flatMap(i => i.keys.filter(k => k.writable && !k.signer).map(k => k.pubkey)), p = this.cfg.priority!;
+    const price = await this.fees!.price(writable, limit).catch(() => clampPrice(p.minMicroLamports ?? PRIORITY_DEFAULTS.minMicroLamports, limit, p.maxLamports ?? PRIORITY_DEFAULTS.maxLamports));
+    return [setComputeUnitLimit(limit), setComputeUnitPrice(price), ...body];
   }
 
   async submit(tx: SimTx) {

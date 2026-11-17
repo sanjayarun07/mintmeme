@@ -21,9 +21,9 @@ plan) and `SOLANA_RPC_URL` (or `ALCHEMY_API_KEY`). A node refuses to start witho
   If Privy is unreachable, the claim fails and the next sweep retries it.
 - **Before each trade** the node learns the token (its venues) and reads the chain's clock and pools; each tick refreshes pools and learns the tokens of restored orders.
 
-Verified (`npm run verify:server-sol`, report in `docs/live-verification/`, 9 of 9): linking through one node; a market buy in plain units sent to the non-owner node, forwarded,
+Verified (`npm run verify:server-sol`, report in `docs/live-verification/`, 10 of 10): linking through one node; a market buy in plain units sent to the non-owner node, forwarded,
 signed by the Privy stand-in and landed; the same idempotency key not trading twice; the per-trade cap; a limit order surviving a crash of the owner node, the other node
-asking Privy again, the order edited there and firing by itself; a sell of half the holding in plain units; and a revoked signer failing with nothing sent. `apps/server/realmode.test.ts` covers linking, refusals
+asking Privy again, the order edited there and firing by itself; a sell of half the holding in plain units; a compute-unit limit from simulation and a capped priority fee on the landed buy; and a revoked signer failing with nothing sent. `apps/server/realmode.test.ts` covers linking, refusals
 and failover without a chain.
 
 **Mainnet, 2026-11-17 (user-approved):** two nodes in `MODE=solana-mainnet`; the user linked their Privy wallet from the `/solana` page's Execution server box (served by a node, same origin
