@@ -54,9 +54,11 @@ export declare class MemeClient {
     trailingStop(p: Omit<PriceOrderInput, 'priceE18'> & {
         trailBps: number;
     }): Promise<any>;
-    bracket(p: Omit<PriceOrderInput, 'priceE18'> & {
+    bracket(p: Omit<PriceOrderInput, 'priceE18' | 'priceUsd'> & {
         takeProfitE18?: Amount;
         stopLossE18?: Amount;
+        takeProfitUsd?: string;
+        stopLossUsd?: string;
         trailBps?: number;
     }): Promise<any>;
     orders(q?: {
@@ -64,6 +66,11 @@ export declare class MemeClient {
         token?: string;
     }): Promise<any>;
     order(id: string): Promise<any>;
+    /** Move an active order's trigger: priceE18 (quote token) or priceUsd (dollars). */
+    editOrder(id: string, p: {
+        priceE18?: Amount;
+        priceUsd?: string;
+    }): Promise<any>;
     cancelOrder(id: string): Promise<any>;
     bulkBuy(p: BulkInput): Promise<any>;
     bulkSell(p: BulkInput & {

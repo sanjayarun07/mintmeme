@@ -26,6 +26,18 @@ export interface TraderConfig {
   /** Plan limits: called before an order is placed with the user's active order count. */
   orderGate?: ConstructorParameters<typeof OrderRunner>[0]['gate'];
   defaults?: { slippageBps?: number; orderTtlS?: number; maxDeviationBps?: number; maxAttempts?: number; maxQuoteAgeMs?: number; minLiquidity?: bigint };
+  /** Enables triggers fixed in US dollars (priceUsd / takeProfitUsd / stopLossUsd). The engine compares prices in the quote token, so each tick the Trader re-derives the quote-token
+   *  trigger from `quoteUsd()`. A price older than maxAgeMs (default 120 s) never moves a trigger: the order keeps its last quote-token trigger until a fresh price arrives. */
+  usd?: UsdFeed;
+}
+export interface UsdFeed {
+  /** USD per WHOLE quote token (e.g. SOL/USD) and when it was observed (ms). Return null when unknown. */
+  quoteUsd: () => { price: number; at: number } | null | Promise<{ price: number; at: number } | null>;
+  /** Decimals of the quote token (9 for SOL, 18 for ETH). */
+  quoteDecimals: number;
+  /** Decimals of a token, to convert a per-whole-token price into raw units. */
+  tokenDecimals: (token: string) => number | Promise<number>;
+  maxAgeMs?: number;
 }
 export interface TradeView { key: string; state: string; walletId: string; origin: string; tokenIn: string; tokenOut: string; amountIn: bigint; fill?: Fill; venue?: string; txHash?: string; failure?: string; history: { state: string; note?: string }[] }
 export interface QuoteView { venue: string; amountOut: bigint; minOut: bigint; priceImpactBps: number; platformFee: bigint; venueFee: bigint; liquidity: bigint; alternatives: { venue: string; amountOut: bigint }[] }
@@ -40,6 +52,19 @@ export type TraderEvent =
 
 const TERMINAL = new Set(['finalized', 'failed', 'expired']);
 const E18 = 10n ** 18n;
+/** A USD price per whole token as a plain decimal string ("0.0000024"): no exponent, above zero, at most 18 decimals. */
+function usdText(v: unknown, what: string): string {
+  const s = typeof v === 'number' ? (Number.isFinite(v) && v > 0 ? v.toFixed(18).replace(/0+$/, '').replace(/\.$/, '') : '') : String(v ?? '').trim();
+  if (!/^\d+(\.\d{1,18})?$/.test(s) || !/[1-9]/.test(s)) throw new SdkError('bad_amount', `${what} must be a USD price above zero as a decimal string, e.g. "0.0000024"`);
+  return s;
+}
+/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. Integer maths after one rounding of the rate to 1e-9 USD. */
+export function usdToE18(usd: string, quoteUsd: number, quoteDecimals: number, tokenDecimals: number): bigint {
+  const rate = BigInt(Math.round(quoteUsd * 1e9)); if (rate <= 0n) throw new SdkError('unavailable', 'the quote-token USD price is not usable', undefined, 503);
+  const [w, f = ''] = usd.split('.'); const usd18 = BigInt(w + f.padEnd(18, '0'));
+  const quotePerToken18 = usd18 * 10n ** 9n / rate;   // whole quote per whole token, x1e18
+  return quotePerToken18 * 10n ** BigInt(quoteDecimals) / 10n ** BigInt(tokenDecimals);
+}
 
 export class Trader {
   readonly orders: OrderRunner; readonly portfolio: Portfolio; readonly alerts = new PriceAlerts();
@@ -132,43 +157,88 @@ export class Trader {
   private record(r: TxRecord) { if (r.intent.userId === this.userId && r.fill && (r.state === 'finalized' || r.state === 'confirmed')) this.portfolio.recordTrade({ id: r.key, userId: this.userId, chain: r.intent.chain, tokenIn: r.intent.tokenIn, tokenOut: r.intent.tokenOut, venue: r.quote?.venue ?? '', state: r.state, fill: r.fill, ts: this.chain.time, origin: r.intent.origin }); }
 
   // ───────────────────────── price orders ─────────────────────────
-  private orderBase(p: { id?: string; walletId: string; token: string; amount: Amount; slippageBps?: number; ttlS?: number; maxDeviationBps?: number; maxAttempts?: number; maxQuoteAgeMs?: number; minLiquidity?: Amount }, kind: OrderKind, oid?: string) {
+  private orderBase(p: { id?: string; walletId: string; token: string; amount: Amount; slippageBps?: number; ttlS?: number; maxDeviationBps?: number; maxAttempts?: number; maxQuoteAgeMs?: number; minLiquidity?: Amount; chase?: ChaseInput }, kind: OrderKind, oid?: string) {
     const d = this.d(); const idv = oid ?? (p.id ? idOf(p.id) : `o-${randomUUID()}`);
     const o: Order = { id: idv, userId: this.userId, walletId: idOf(p.walletId, 'walletId'), chain: this.chain.id, token: idOf(p.token, 'token'), quoteToken: this.quoteToken, kind, amount: amount(p.amount, 'amount'),
       expiresAt: this.chain.time + (p.ttlS === undefined ? d.orderTtlS : int(p.ttlS, 'ttlS', 60, 365 * 86_400)), maxQuoteAgeMs: p.maxQuoteAgeMs === undefined ? d.maxQuoteAgeMs : int(p.maxQuoteAgeMs, 'maxQuoteAgeMs', 100, 600_000),
       minLiquidity: p.minLiquidity === undefined ? d.minLiquidity : amount(p.minLiquidity, 'minLiquidity', { allowZero: true }), maxDeviationBps: p.maxDeviationBps === undefined ? d.maxDeviationBps : int(p.maxDeviationBps, 'maxDeviationBps', 0, 10_000),
       maxAttempts: p.maxAttempts === undefined ? d.maxAttempts : int(p.maxAttempts, 'maxAttempts', 1, 10), slippageBps: this.slip(p.slippageBps), venues: this.c.venues, status: 'active', attempts: 0 };
     if (o.token === o.quoteToken) throw new SdkError('bad_request', 'token and quote token are the same');
+    if (p.chase) {   // slippage chase: validated, capped, and given enough attempts to reach its cap (at most 10)
+      const stepBps = int(p.chase.stepBps, 'chase.stepBps', 10, 1_000), maxBps = int(p.chase.maxBps, 'chase.maxBps', 0, 5_000);
+      if (maxBps <= o.slippageBps) throw new SdkError('bad_request', `chase needs a maximum slippage above the starting ${o.slippageBps / 100}%`);
+      o.chase = { stepBps, maxBps };
+      if (p.maxAttempts === undefined) o.maxAttempts = Math.min(10, Math.max(o.maxAttempts, Math.ceil((maxBps - o.slippageBps) / stepBps) + 1));
+    }
     return o;
   }
   private async put(o: Order): Promise<Order> {
     const have = this.orders.orders.orders.get(o.id); if (have) return have;   // same id twice never places a second order
     try { return await this.orders.place(o); } catch (e) { throw new SdkError('order_refused', (e as Error).message, 'Check the wallet balance (orders reserve it) and your plan limit.', 409); }
   }
-  /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or lower. */
-  async limitBuy(p: PriceOrderInput) { const o = this.orderBase(p, 'limit_buy'); this.trigger(o, p); return this.put(o); }
-  /** Sell `amount` tokens when the price reaches `priceE18` or higher. */
-  async limitSell(p: PriceOrderInput) { const o = this.orderBase(p, 'limit_sell'); this.trigger(o, p); return this.put(o); }
-  async takeProfit(p: PriceOrderInput) { const o = this.orderBase(p, 'take_profit'); this.trigger(o, p); return this.put(o); }
-  async stopLoss(p: PriceOrderInput) { const o = this.orderBase(p, 'stop_loss'); this.trigger(o, p); return this.put(o); }
+  /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or `priceUsd` or lower. */
+  async limitBuy(p: PriceOrderInput) { const o = this.orderBase(p, 'limit_buy'); await this.trigger(o, p); return this.put(o); }
+  /** Sell `amount` tokens when the price reaches `priceE18` (or `priceUsd`) or higher. */
+  async limitSell(p: PriceOrderInput) { const o = this.orderBase(p, 'limit_sell'); await this.trigger(o, p); return this.put(o); }
+  async takeProfit(p: PriceOrderInput) { const o = this.orderBase(p, 'take_profit'); await this.trigger(o, p); return this.put(o); }
+  async stopLoss(p: PriceOrderInput) { const o = this.orderBase(p, 'stop_loss'); await this.trigger(o, p); return this.put(o); }
   /** Sell when the price has fallen `trailBps` from the highest price seen since the order was placed. */
   async trailingStop(p: Omit<PriceOrderInput, 'priceE18'> & { trailBps: number }) { const o = this.orderBase(p, 'trailing_stop'); o.trailBps = int(p.trailBps, 'trailBps', 1, 9_999); return this.put(o); }
   /** Take profit and/or stop loss (and/or trailing stop) on ONE position: when one fires the others are cancelled and the tokens are reserved once. */
-  async bracket(p: Omit<PriceOrderInput, 'priceE18'> & { takeProfitE18?: Amount; stopLossE18?: Amount; trailBps?: number }): Promise<Order[]> {
+  async bracket(p: Omit<PriceOrderInput, 'priceE18' | 'priceUsd'> & { takeProfitE18?: Amount; stopLossE18?: Amount; takeProfitUsd?: string; stopLossUsd?: string; trailBps?: number }): Promise<Order[]> {
     const legs: Order[] = []; const gid = p.id ? idOf(p.id) : `g-${randomUUID()}`;
-    if (p.takeProfitE18 === undefined && p.stopLossE18 === undefined && p.trailBps === undefined) throw new SdkError('bad_request', 'a bracket needs takeProfitE18, stopLossE18 or trailBps');
-    if (p.takeProfitE18 !== undefined) { const o = this.orderBase(p, 'take_profit', `${gid}:tp`); o.triggerPriceE18 = amount(p.takeProfitE18, 'takeProfitE18'); o.ocoGroup = gid; legs.push(o); }
-    if (p.stopLossE18 !== undefined) { const o = this.orderBase(p, 'stop_loss', `${gid}:sl`); o.triggerPriceE18 = amount(p.stopLossE18, 'stopLossE18'); o.ocoGroup = gid; legs.push(o); }
+    if (p.takeProfitE18 === undefined && p.stopLossE18 === undefined && p.takeProfitUsd === undefined && p.stopLossUsd === undefined && p.trailBps === undefined) throw new SdkError('bad_request', 'a bracket needs takeProfitE18/takeProfitUsd, stopLossE18/stopLossUsd or trailBps');
+    if (p.takeProfitE18 !== undefined && p.takeProfitUsd !== undefined) throw new SdkError('bad_request', 'send takeProfitE18 or takeProfitUsd, not both');
+    if (p.stopLossE18 !== undefined && p.stopLossUsd !== undefined) throw new SdkError('bad_request', 'send stopLossE18 or stopLossUsd, not both');
+    const leg = async (kind: 'take_profit' | 'stop_loss', e18: Amount | undefined, usd: string | undefined, suffix: string) => {
+      if (e18 === undefined && usd === undefined) return; const o = this.orderBase(p, kind, `${gid}:${suffix}`); o.ocoGroup = gid;
+      if (usd !== undefined) { o.usdPrice = usdText(usd, kind === 'take_profit' ? 'takeProfitUsd' : 'stopLossUsd'); o.triggerPriceE18 = await this.usdE18(o.token, o.usdPrice); }
+      else o.triggerPriceE18 = amount(e18, kind === 'take_profit' ? 'takeProfitE18' : 'stopLossE18');
+      legs.push(o);
+    };
+    await leg('take_profit', p.takeProfitE18, p.takeProfitUsd, 'tp'); await leg('stop_loss', p.stopLossE18, p.stopLossUsd, 'sl');
     if (p.trailBps !== undefined) { const o = this.orderBase(p, 'trailing_stop', `${gid}:tr`); o.trailBps = int(p.trailBps, 'trailBps', 1, 9_999); o.ocoGroup = gid; legs.push(o); }
     const tp = legs.find(l => l.kind === 'take_profit')?.triggerPriceE18, sl = legs.find(l => l.kind === 'stop_loss')?.triggerPriceE18;
     if (tp !== undefined && sl !== undefined && sl >= tp) throw new SdkError('bad_request', 'the stop loss price must be below the take profit price');
     const out: Order[] = []; try { for (const l of legs) out.push(await this.put(l)); } catch (e) { for (const o of out) this.orders.cancel(o.id); throw e; }
     return out;
   }
-  private trigger(o: Order, p: PriceOrderInput) {
+  private async trigger(o: Order, p: PriceOrderInput) {
+    if (p.priceUsd !== undefined) {
+      if (p.priceE18 !== undefined || p.marketCap) throw new SdkError('bad_request', 'send one of priceE18, priceUsd or marketCap');
+      o.usdPrice = usdText(p.priceUsd, 'priceUsd'); o.triggerPriceE18 = await this.usdE18(o.token, o.usdPrice); return;
+    }
     if (!p.marketCap) { o.triggerPriceE18 = amount(p.priceE18, 'priceE18'); return; }
     if (p.priceE18 !== undefined) throw new SdkError('bad_request', 'send priceE18 or marketCap, not both');
     o.mcap = { targetE18: amount(p.marketCap.target, 'marketCap.target'), basis: p.marketCap.basis ?? 'circulating', supply: { source: p.marketCap.supplySource, circulating: p.marketCap.circulating === undefined ? undefined : amount(p.marketCap.circulating, 'circulating'), total: p.marketCap.total === undefined ? undefined : amount(p.marketCap.total, 'total') } as SupplyInfo };
+  }
+  /** Change an active order's trigger: `priceE18` (quote units per token x1e18, the trigger is then fixed in the quote token) or `priceUsd` (fixed in USD, needs TraderConfig.usd).
+   *  Keeps its reservation, attempts and place in a bracket. */
+  async editOrder(orderId: string, p: { priceE18?: Amount; priceUsd?: string }) {
+    const id = idOf(orderId); const o = this.orders.orders.orders.get(id); if (!o) throw new SdkError('not_found', `no order ${orderId}`, undefined, 404);
+    if ((p.priceE18 === undefined) === (p.priceUsd === undefined)) throw new SdkError('bad_request', 'send priceE18 or priceUsd (exactly one)');
+    const before = o.usdPrice; let e18: bigint, usd: string | undefined;
+    if (p.priceUsd !== undefined) { usd = usdText(p.priceUsd, 'priceUsd'); e18 = await this.usdE18(o.token, usd); } else e18 = amount(p.priceE18, 'priceE18');
+    o.usdPrice = usd;   // set before retrigger so its checkpoint saves it; put back if the edit is refused
+    try { return this.orders.retrigger(id, e18); } catch (e) { o.usdPrice = before; if (e instanceof SdkError) throw e; throw new SdkError('bad_request', (e as Error).message, undefined, 409); }
+  }
+  /** Quote-token trigger (x1e18, raw units) for a USD price per whole token, at the current quote/USD price. Refuses when that price is missing or stale. */
+  private async usdE18(token: string, usd: string): Promise<bigint> {
+    const f = this.c.usd; if (!f) throw new SdkError('bad_request', 'USD triggers need a USD price feed: pass TraderConfig.usd');
+    const q = await f.quoteUsd(); const now = (this.c.clockMs ?? Date.now)();
+    if (!q || !(q.price > 0) || now - q.at > (f.maxAgeMs ?? 120_000)) throw new SdkError('unavailable', 'no fresh quote-token USD price, so a USD trigger cannot be set now', 'Try again shortly, or set the trigger in the quote token (priceE18).', 503);
+    return usdToE18(usd, q.price, f.quoteDecimals, await f.tokenDecimals(token));
+  }
+  /** Re-derive the quote-token trigger of every active USD order from a fresh quote/USD price. A stale or missing price moves nothing.
+   *  Bracket legs move in the order that keeps take profit above stop loss throughout (falling triggers: stop loss first; rising: take profit first). */
+  async syncUsdTriggers(): Promise<number> {
+    const f = this.c.usd; if (!f) return 0;
+    const live = [...this.orders.orders.orders.values()].filter(o => o.status === 'active' && o.usdPrice !== undefined); if (!live.length) return 0;
+    const q = await f.quoteUsd(); const now = (this.c.clockMs ?? Date.now)(); if (!q || !(q.price > 0) || now - q.at > (f.maxAgeMs ?? 120_000)) return 0;
+    const ups: { o: Order; e18: bigint }[] = []; for (const o of live) ups.push({ o, e18: usdToE18(o.usdPrice!, q.price, f.quoteDecimals, await f.tokenDecimals(o.token)) });
+    const rank = (u: { o: Order; e18: bigint }) => (u.e18 < (u.o.triggerPriceE18 ?? 0n)) === (u.o.kind === 'stop_loss') ? 0 : 1;
+    let moved = 0; for (const u of ups.sort((a, b) => rank(a) - rank(b))) if (u.e18 !== u.o.triggerPriceE18 && u.o.status === 'active') { try { this.orders.retrigger(u.o.id, u.e18); moved++; } catch (e) { this.emit({ type: 'error', where: `usd ${u.o.id}`, message: (e as Error).message }); } }
+    return moved;
   }
   cancelOrder(orderId: string) { const o = this.orders.orders.orders.get(idOf(orderId)); if (!o) throw new SdkError('not_found', `no order ${orderId}`, undefined, 404); this.orders.cancel(orderId); return this.orders.orders.orders.get(orderId)!; }
   getOrder(orderId: string) { return this.orders.orders.orders.get(orderId); }
@@ -255,6 +325,7 @@ export class Trader {
     try {
       await this.c.advanceChain?.();
       const run = async (where: string, f: () => Promise<unknown>) => { try { await f(); } catch (e) { this.emit({ type: 'error', where, message: (e as Error).message }); } };
+      await run('usd triggers', () => this.syncUsdTriggers());
       await run('orders', () => this.orders.tick());
       for (const [k, b] of this.bulks) if (!b.summary().done && !(this.paused && this.sides.get(`bulk:${k}`) !== 'sell')) await run(`bulk ${k}`, () => b.tick());
       for (const [k, t] of this.twaps) if (!t.summary().done && !(this.paused && this.sides.get(`twap:${k}`) === 'buy')) await run(`twap ${k}`, () => t.tick());
@@ -288,7 +359,12 @@ export interface PriceOrderInput {
   /** Instead of a price: trigger at a market cap (quote units). Needs the supply; with no supply the order is disabled with a reason, never guessed. */
   marketCap?: { target: Amount; basis?: 'circulating' | 'fdv'; circulating?: Amount; total?: Amount; supplySource: string };
   slippageBps?: number; ttlS?: number; maxDeviationBps?: number; maxAttempts?: number; maxQuoteAgeMs?: number; minLiquidity?: Amount;
+  /** Opt-in slippage chase: a failed fill retries with stepBps more slippage each time, up to maxBps. */
+  chase?: ChaseInput;
+  /** Instead of priceE18: a trigger fixed in USD per whole token, as a decimal string ("0.0000024"). Needs TraderConfig.usd. */
+  priceUsd?: string;
 }
+export interface ChaseInput { stepBps: number; maxBps: number }
 export interface BulkInput {
   id?: string; token: string; slippageBps?: number;
   /** Explicit amount per wallet, or `wallets` + `total` for an equal split. */

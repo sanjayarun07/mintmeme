@@ -31,11 +31,12 @@ export class TradeGuard {
   /** Check the limits and issue a one-time ticket. A buy counts its SOL against the daily cap when the ticket is CONFIRMED, not when it is prepared. Sells spend no SOL. */
   prepare(t: TicketInput): Ticket {
     if (this.killed) throw new GuardError('the kill switch is on: no new trades', 423);
-    if (t.slippageBps < 0 || t.slippageBps > this.limits.maxSlippageBps) throw new GuardError(`slippage ${t.slippageBps} bps is above the limit of ${this.limits.maxSlippageBps} bps`);
+    const sol = (l: bigint) => `${Number(l) / 1e9} SOL`;   // messages reach the user: SOL and percent, never lamports or bps
+    if (t.slippageBps < 0 || t.slippageBps > this.limits.maxSlippageBps) throw new GuardError(`slippage ${t.slippageBps / 100}% is above the limit of ${this.limits.maxSlippageBps / 100}%`);
     if (t.side === 'buy') {
       if (t.lamports <= 0n) throw new GuardError('the amount must be above zero');
-      if (t.lamports > this.limits.maxTradeLamports) throw new GuardError(`${t.lamports} lamports is above the per-trade limit of ${this.limits.maxTradeLamports}`);
-      if (this.spentToday() + t.lamports > this.limits.dailyCapLamports) throw new GuardError(`this would pass the daily cap of ${this.limits.dailyCapLamports} lamports (already spent today: ${this.spentToday()})`);
+      if (t.lamports > this.limits.maxTradeLamports) throw new GuardError(`${sol(t.lamports)} is above the per-trade limit of ${sol(this.limits.maxTradeLamports)}`);
+      if (this.spentToday() + t.lamports > this.limits.dailyCapLamports) throw new GuardError(`this would pass the daily cap of ${sol(this.limits.dailyCapLamports)} (already spent today: ${sol(this.spentToday())})`);
     } else if (!(t.pctBps && t.pctBps > 0 && t.pctBps <= 10_000)) throw new GuardError('a sell needs a percentage between 1 and 10000 basis points');
     for (const [id, x] of this.tickets) if (x.used || x.expiresAt < this.now()) this.tickets.delete(id);
     const ticket: Ticket = { ...t, id: randomUUID(), expiresAt: this.now() + this.limits.ticketTtlMs, used: false }; this.tickets.set(ticket.id, ticket); return ticket;

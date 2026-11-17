@@ -64,7 +64,7 @@ const secret=h=>`<span class="secret">${h}</span>`;
 /** Tie a form error to the field it is about: mark it invalid, point it at the message box, move focus to it, and clear the mark as soon as the user edits it. */
 function invalid(el,box){if(!el)return;el.setAttribute('aria-invalid','true');if(box&&box.id)el.setAttribute('aria-describedby',box.id);el.addEventListener('input',()=>{el.removeAttribute('aria-invalid');el.removeAttribute('aria-describedby')},{once:true});el.focus()}
 function toast(level,title,body){const t=document.createElement('div');t.className='toast '+level;t.innerHTML=`<b>${esc(title)}</b><span>${esc(body)}</span>`;t.onclick=()=>t.remove();$('#toasts').append(t);setTimeout(()=>t.remove(),level==='error'?12000:7000)}
-const IC={ok:'✓',warn:'!',error:'✕',info:'i',plain:'i'};
+const IC={ok:'✓',success:'✓',warn:'!',error:'✕',info:'i',plain:'i'};
 const notice=(lvl,title,body='')=>`<div class="notice ${lvl}" role="${lvl==='error'?'alert':'note'}"><span class="ic" aria-hidden="true">${IC[lvl]}</span><div>${title?`<b>${title}</b>`:''}${body}</div></div>`;
 const skeleton=n=>Array.from({length:n},()=>'<div class="skel" style="height:54px;margin-bottom:10px"></div>').join('');
 const realTag=(v,pad)=>pad&&LAUNCHPADS[pad]?`<span class="sample" title="Real token launched on ${LAUNCHPADS[pad].name}. Read-only: trading is off. ${esc(LAUNCHPADS[pad].rule)}">${LAUNCHPADS[pad].name} · read-only</span>`:`<span class="sample" style="${v?'':'color:var(--warn,#e0a030)'}" title="${v?'Real market data. The pool was confirmed on-chain by this app. Read-only: trading is off.':'Real market data, but this pool could not be confirmed as an official pool. Read-only.'}">${v?'Real · read-only':'Real · unverified pool'}</span>`;

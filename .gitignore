@@ -10,3 +10,5 @@ node_modules/
 test-ledger/
 .state/
 apps/web/privy.bundle.js
+# production server deploy: API key hashes stay local
+deploy/server/keys.txt

@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Original multichain spot-memecoin trading platform (local simulation vertical slice)",
   "scripts": {
-    "test": "node --experimental-transform-types --no-warnings --test \"packages/core/test/*.test.ts\" \"apps/telegram/*.test.ts\" \"apps/scraper/*.test.ts\" \"packages/evm/test/*.test.ts\" \"packages/live/test/*.test.ts\" \"packages/sol/test/*.test.ts\" \"packages/sdk/test/*.test.ts\" \"apps/web/test/*.test.ts\"",
+    "test": "node --experimental-transform-types --no-warnings --test \"packages/core/test/*.test.ts\" \"apps/telegram/*.test.ts\" \"apps/scraper/*.test.ts\" \"packages/evm/test/*.test.ts\" \"packages/live/test/*.test.ts\" \"packages/sol/test/*.test.ts\" \"packages/sdk/test/*.test.ts\" \"apps/web/test/*.test.ts\" \"apps/server/*.test.ts\"",
     "bench": "node --experimental-transform-types --no-warnings bench/bench.ts",
     "verify:local": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/localrun.ts",
     "verify:fork": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/forkrun.ts",
@@ -46,6 +46,8 @@
     "build:privy": "cd apps/privy && npm install && npm run build",
     "build:sdk": "cd packages/sdk && node scripts/build.mjs",
     "pack:sdk": "npm run build:sdk && cd packages/sdk && npm pack",
+    "server": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/server/main.ts",
+    "server:key": "node --experimental-transform-types --no-warnings apps/server/keys.ts",
     "api": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/api/start.ts",
     "web:markets": "REAL_MARKETS=1 node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/web/server.ts",
     "web:fork": "TERMINAL_MODE=fork node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/web/server.ts",

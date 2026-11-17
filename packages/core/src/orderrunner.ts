@@ -41,6 +41,7 @@ export class OrderRunner {
     this.backend.write(JSON.stringify({ v: 1, orders: this.orders.snapshot(), held: this.reservations.snapshot(), outbox: this.outbox, inflight: [...this.inflight] }, rep));
   }
   cancel(id: string) { this.orders.cancel(id); this.checkpoint(); }
+  retrigger(id: string, priceE18: bigint) { const o = this.orders.retrigger(id, priceE18); this.checkpoint(); return o; }
   private async sync(wallet: string, token: string) {
     if (!this.d.chain.balanceOf) throw new Error('this chain cannot report balances; orders need balances to reserve against');
     this.bal.set(`${wallet}:${token}`, BigInt(await this.d.chain.balanceOf(wallet, token)));

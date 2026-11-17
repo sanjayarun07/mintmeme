@@ -30,9 +30,11 @@ export class MemeClient {
   takeProfit(p: PriceOrderInput) { return this.req('POST', '/v1/orders/take-profit', p); }
   stopLoss(p: PriceOrderInput) { return this.req('POST', '/v1/orders/stop-loss', p); }
   trailingStop(p: Omit<PriceOrderInput, 'priceE18'> & { trailBps: number }) { return this.req('POST', '/v1/orders/trailing-stop', p); }
-  bracket(p: Omit<PriceOrderInput, 'priceE18'> & { takeProfitE18?: Amount; stopLossE18?: Amount; trailBps?: number }) { return this.req('POST', '/v1/orders/bracket', p); }
+  bracket(p: Omit<PriceOrderInput, 'priceE18' | 'priceUsd'> & { takeProfitE18?: Amount; stopLossE18?: Amount; takeProfitUsd?: string; stopLossUsd?: string; trailBps?: number }) { return this.req('POST', '/v1/orders/bracket', p); }
   orders(q: { status?: string; token?: string } = {}) { return this.req('GET', '/v1/orders' + qs(q)); }
   order(id: string) { return this.req('GET', `/v1/orders/${enc(id)}`); }
+  /** Move an active order's trigger: priceE18 (quote token) or priceUsd (dollars). */
+  editOrder(id: string, p: { priceE18?: Amount; priceUsd?: string }) { return this.req('PATCH', `/v1/orders/${enc(id)}`, p); }
   cancelOrder(id: string) { return this.req('DELETE', `/v1/orders/${enc(id)}`); }
   bulkBuy(p: BulkInput) { return this.req('POST', '/v1/bulk/buy', p); }
   bulkSell(p: BulkInput & { pctBps?: number }) { return this.req('POST', '/v1/bulk/sell', p); }

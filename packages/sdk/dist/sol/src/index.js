@@ -8,3 +8,7 @@ export * from './leaderwatch.js';
 export * from './launchwatch.js';
 export * from './mintrisk.js';
 export * from './pump.js';
+export * from './search.js';
+export * from './submitter.js';
+export * from './stream.js';
+export * from './remotesigner.js';

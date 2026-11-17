@@ -44,6 +44,7 @@ export class OrderRunner {
         this.backend.write(JSON.stringify({ v: 1, orders: this.orders.snapshot(), held: this.reservations.snapshot(), outbox: this.outbox, inflight: [...this.inflight] }, rep));
     }
     cancel(id) { this.orders.cancel(id); this.checkpoint(); }
+    retrigger(id, priceE18) { const o = this.orders.retrigger(id, priceE18); this.checkpoint(); return o; }
     async sync(wallet, token) {
         if (!this.d.chain.balanceOf)
             throw new Error('this chain cannot report balances; orders need balances to reserve against');
@@ -82,7 +83,15 @@ export class OrderRunner {
         }
         this.skipped.delete(o.id);
         const { v } = best;
-        return { priceE18: v.spotPriceE18(o.token, o.quoteToken), ts: this.lastVenueRefreshMs, liquidity: best.liq, executableOut: od => { const s = od.kind !== 'limit_buy'; try {
+        // A one-direction venue (Jupiter) only reports a spot price the way it was built: when the token->quote price is unavailable, invert the quote->token one.
+        const spot = () => { try {
+            return v.spotPriceE18(o.token, o.quoteToken);
+        }
+        catch {
+            const inv = v.spotPriceE18(o.quoteToken, o.token);
+            return inv > 0n ? 10n ** 36n / inv : 0n;
+        } };
+        return { priceE18: spot(), ts: this.lastVenueRefreshMs, liquidity: best.liq, executableOut: od => { const s = od.kind !== 'limit_buy'; try {
                 return v.quote(s ? od.token : od.quoteToken, s ? od.quoteToken : od.token, od.amount).amountOut;
             }
             catch {

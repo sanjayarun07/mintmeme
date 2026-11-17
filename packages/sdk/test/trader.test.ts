@@ -128,3 +128,43 @@ test('state survives a restart: orders persisted, re-placing the same id is a no
   const b = new (await import('../src/trader.ts')).Trader({ engine: a.engine, chain: a.chain, userId: 'u1', venues: ['uniswap-v2'], persistDir: dir }); assert.equal(b.getOrder('p1')!.status, 'active');
   await b.limitBuy({ id: 'p1', walletId: 'w1', token: T, amount: 10_000n, priceE18: 1n }); assert.equal(b.listOrders().length, 1);
 });
+
+test('slippage chase: validated and capped, given enough attempts to reach its cap, and carried onto both bracket legs', async () => {
+  const { trader, chain } = createSimTrader(); await trader.buy({ walletId: 'w1', token: T, amount: 50_000n, key: 'seed' }); const p0 = px(chain) * 3n;
+  const o = await trader.limitSell({ id: 'ch1', walletId: 'w1', token: T, amount: 1_000n, priceE18: p0, slippageBps: 100, chase: { stepBps: 100, maxBps: 500 } });
+  assert.deepEqual(o.chase, { stepBps: 100, maxBps: 500 }); assert.equal(o.maxAttempts, 5, '1% then 2,3,4,5%');
+  await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceE18: p0, slippageBps: 300, chase: { stepBps: 100, maxBps: 300 } }), /maximum slippage above/);
+  await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceE18: p0, chase: { stepBps: 5, maxBps: 500 } }), SdkError);
+  const plain = await trader.limitSell({ id: 'ch2', walletId: 'w1', token: T, amount: 1_000n, priceE18: p0 }); assert.equal(plain.chase, undefined); assert.equal(plain.maxAttempts, 3);
+  const legs = await trader.bracket({ id: 'chb', walletId: 'w1', token: T, amount: 1_000n, takeProfitE18: p0 * 2n, stopLossE18: p0 / 2n, slippageBps: 200, chase: { stepBps: 100, maxBps: 400 } });
+  assert.ok(legs.length === 2 && legs.every(l => l.chase?.maxBps === 400));
+});
+
+test('USD triggers: fixed in dollars, re-derived from the quote price each tick, never moved by a stale price, persisted on the order, and editable either way', async () => {
+  let rate = 2, at = 0; const feed = { quoteUsd: () => ({ price: rate, at }), quoteDecimals: 18, tokenDecimals: () => 18, maxAgeMs: 1_000 };
+  let ms = 0; const { trader, chain } = createSimTrader({ usd: feed, clockMs: () => ms }); await trader.buy({ walletId: 'w1', token: T, amount: 50_000n, key: 'seed' });
+  const usdNow = Number(px(chain)) / 1e18 * rate;   // the token's USD price right now
+  const o = await trader.limitSell({ id: 'u1', walletId: 'w1', token: T, amount: 1_000n, priceUsd: (usdNow * 3).toFixed(12) });
+  assert.equal(o.usdPrice, (usdNow * 3).toFixed(12)); const e0 = o.triggerPriceE18!;
+  rate = 4; at = ms; await trader.tick();
+  assert.ok(o.triggerPriceE18! * 2n - e0 < 10n && e0 - o.triggerPriceE18! * 2n < 10n, 'the quote price doubled, so the quote-token trigger halves');
+  const e1 = o.triggerPriceE18!; rate = 1; ms = 5_000; await trader.tick();
+  assert.equal(o.triggerPriceE18, e1, 'a price older than maxAgeMs moves nothing');
+  ms = 6_000; at = 6_000; rate = 1; await trader.tick(); assert.ok(o.triggerPriceE18! > e1);
+  await trader.editOrder('u1', { priceE18: e0 }); assert.equal(o.usdPrice, undefined, 'a quote-token edit makes it fixed in the quote token again');
+  await trader.editOrder('u1', { priceUsd: '5' }); assert.equal(o.usdPrice, '5');
+  await assert.rejects(trader.editOrder('u1', { priceUsd: '1e-7' }), /decimal string/);
+  await assert.rejects(trader.editOrder('u1', {}), /exactly one/);
+  at = -10_000; await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceUsd: '1' }), /no fresh/);
+  const plain = createSimTrader().trader; await assert.rejects(plain.limitBuy({ walletId: 'w1', token: T, amount: 1_000n, priceUsd: '1' }), /USD price feed/);
+});
+
+test('USD bracket legs are placed in dollars and keep take profit above stop loss as the quote price swings', async () => {
+  let rate = 2; const ms = 0; const feed = { quoteUsd: () => ({ price: rate, at: ms }), quoteDecimals: 18, tokenDecimals: () => 18 };
+  const { trader, chain } = createSimTrader({ usd: feed, clockMs: () => ms }); await trader.buy({ walletId: 'w1', token: T, amount: 50_000n, key: 'seed' });
+  const usdNow = Number(px(chain)) / 1e18 * rate;
+  const legs = await trader.bracket({ id: 'ub', walletId: 'w1', token: T, amount: 1_000n, takeProfitUsd: (usdNow * 4).toFixed(12), stopLossUsd: (usdNow / 4).toFixed(12) });
+  assert.ok(legs.every(l => l.usdPrice));
+  // the token's USD price is spot x rate: rates between 0.5 and 8 (base 2) keep it between the stop loss (1/4) and take profit (4x), so nothing fires while both legs move
+  for (const r of [1, 6, 0.7, 7.5]) { rate = r; await trader.tick(); const [tp, sl] = legs.map(l => trader.getOrder(l.id)!); assert.ok(tp.triggerPriceE18! > sl.triggerPriceE18!, `rate ${r}`); assert.equal(tp.status, 'active'); }
+});

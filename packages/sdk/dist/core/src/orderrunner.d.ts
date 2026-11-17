@@ -34,6 +34,7 @@ export declare class OrderRunner {
     /** Atomically write all order state. No-op without persistPath. A write failure propagates: callers stop BEFORE acting (fail closed). */
     checkpoint(): void;
     cancel(id: string): void;
+    retrigger(id: string, priceE18: bigint): Order;
     private sync;
     /** Reserve against the CURRENT on-chain balance, then place. */
     place(o: Order): Promise<Order>;

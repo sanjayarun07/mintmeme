@@ -25,7 +25,8 @@ export interface CurveState {
     complete: boolean;
     creator: string;
     mayhem?: boolean;
-    cashback?: boolean;
+    cashback?: boolean; /** The token the curve is priced in (bytes 83..115 of newer accounts). All zeros means native SOL; undefined means the account is too short to carry the field. */
+    quoteMint?: string;
     size: number;
 }
 /** BondingCurve: 8-byte discriminator, then u64 x5 (virtual token, virtual sol, real token, real sol, total supply), bool complete, pubkey creator, bool mayhem, bool cashback (the last two exist on newer accounts). */

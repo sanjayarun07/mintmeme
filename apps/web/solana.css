@@ -1,0 +1,139 @@
+/* Standalone Solana page (/solana). Builds on the styles.css tokens (graphite surfaces, hairline borders). Layout: header with search and wallet status, a real-funds bar,
+ * the token workspace in the main column, wallet, safety and holdings in the side column. */
+body.solpage{display:block;min-height:100vh;background:var(--bg);color:var(--ink);font-feature-settings:"tnum" 1,"cv11" 1}
+.muted{color:var(--muted)}.small{font-size:12px}
+.num,.mono{font-variant-numeric:tabular-nums}
+.mono{font-family:var(--m);font-size:12.5px;letter-spacing:-.01em}
+.pad{padding:18px}
+
+/* ---------- header ---------- */
+.soltop{position:sticky;top:0;z-index:60;display:flex;align-items:center;gap:12px;padding:0 clamp(14px,2.4vw,28px);height:60px;border-bottom:1px solid var(--line);background:var(--bg)}
+.soltop .grow{flex:1}
+.brand{display:flex;align-items:center;gap:9px;font-size:15px;color:var(--ink);text-decoration:none;flex:none}
+.brand .sep{width:1px;height:18px;background:var(--line2)}.brand .where{color:var(--muted);font-weight:500}
+.topsearch{display:flex;align-items:center;gap:8px;flex:0 1 520px;min-width:0;height:38px;padding:0 5px 0 12px;border:1px solid var(--line2);border-radius:10px;background:var(--panel);transition:border-color .15s,box-shadow .15s}
+.topsearch:focus-within{border-color:var(--ink);box-shadow:0 0 0 3px color-mix(in srgb,var(--ink) 12%,transparent)}
+.topsearch>svg{color:var(--faint);flex:none}
+#searchslot{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+#searchslot input{border:0;background:transparent;min-height:34px;padding:0;box-shadow:none;font-size:14px}
+#searchslot input:focus{outline:none;border:0}
+#searchslot .btn{flex:none;min-height:28px}
+.wchip{display:flex;align-items:center;gap:9px;height:34px;padding:0 13px;border:1px solid var(--line2);border-radius:999px;font-size:12.5px;white-space:nowrap;background:var(--panel)}
+.wchip .sep{width:1px;height:14px;background:var(--line2)}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}.dot.on{background:var(--teal)}.dot.off{background:var(--faint)}.dot.bad{background:var(--dn)}
+.pill{display:inline-flex;align-items:center;gap:7px;min-height:28px;padding:0 11px;border:1px solid var(--line2);border-radius:999px;font-size:12px;color:var(--muted);white-space:nowrap}
+.pill i{width:7px;height:7px;border-radius:50%;background:var(--teal);display:inline-block}.pill[data-state=bad] i{background:var(--dn)}
+[hidden]{display:none!important}
+.realbar{position:sticky;top:60px;z-index:55;padding:8px clamp(14px,2.4vw,28px);font-size:12.5px;color:var(--amber);background:color-mix(in srgb,var(--amber) 14%,var(--bg));border-bottom:1px solid color-mix(in srgb,var(--amber) 30%,var(--bg));line-height:1.5}
+.realbar b{font-weight:650}
+
+/* ---------- layout ---------- */
+#main{max-width:1240px;margin:0 auto;padding:clamp(16px,2.6vw,30px) clamp(14px,2.4vw,28px) 40px;overflow:visible}
+.solgrid{display:grid;grid-template-columns:minmax(0,1fr) 372px;gap:22px;align-items:start}
+.solcol{display:flex;flex-direction:column;gap:16px;min-width:0}
+.solA{position:sticky;top:112px;max-height:calc(100vh - 128px);overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;padding-bottom:6px}
+.solgrid [style*="max-width"]{max-width:none!important}
+.solgrid .panel,.solgrid .panel *{overflow-wrap:anywhere}
+.solgrid table,.solgrid .tw *{overflow-wrap:normal}
+
+/* ---------- panels ---------- */
+.solgrid .panel{padding:16px 18px;border-radius:14px;background:var(--panel);border:1px solid var(--line)}
+.solgrid .panel.flush{padding:0;overflow:hidden}
+.solgrid .panel.pad{padding:18px}
+.solgrid .panel h2{margin:0;font-size:13.5px;font-weight:650;letter-spacing:.005em}
+.phead{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line)}
+.phead .muted{font-size:12px}
+.solgrid label{display:block;margin-bottom:5px;font-size:12px;color:var(--muted);font-weight:500}
+.solgrid input,.solgrid select{border-radius:9px}
+.solgrid .btn{border-radius:9px}
+.solgrid .faint{color:var(--muted)}
+.solgrid details>summary{cursor:pointer;font-weight:550;list-style:none;display:flex;align-items:center;gap:8px;padding:2px 0}
+.solgrid details>summary::-webkit-details-marker{display:none}
+.solgrid details>summary::before{content:"";width:6px;height:6px;border-right:2px solid var(--muted);border-bottom:2px solid var(--muted);transform:rotate(-45deg);transition:transform .15s;flex:none}
+.solgrid details[open]>summary::before{transform:rotate(45deg)}
+.solgrid details[open]>summary{margin-bottom:12px}
+
+/* ---------- welcome ---------- */
+.welcome{padding:34px clamp(18px,4vw,38px)}
+.welcome h1{margin:0 0 8px;font-size:clamp(24px,3.2vw,32px);line-height:1.12;letter-spacing:-.02em;font-weight:650}
+.welcome p{margin:0 0 18px;max-width:56ch;line-height:1.6}
+.welcome[hidden]{display:none}
+
+/* ---------- search results ---------- */
+.hit{display:grid;grid-template-columns:minmax(0,1.4fr) auto auto;gap:16px;align-items:center;width:100%;padding:13px 18px;border:0;border-bottom:1px solid var(--line);background:none;color:var(--ink);text-align:left;cursor:pointer;transition:background .12s}
+.hit:last-child{border-bottom:0}.hit:hover,.hit:focus-visible{background:var(--raise);outline:none}
+.hit .hn{display:flex;flex-direction:column;gap:1px;min-width:0}.hit .hn b{font-size:14px}
+.hit .num{text-align:right;font-weight:550}.hit small{font-weight:400}
+
+/* ---------- token header ---------- */
+.tokhead{display:flex;flex-direction:column;gap:14px}
+.th1{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.tsym{font-size:clamp(22px,3vw,28px)!important;letter-spacing:-.02em;line-height:1.1;font-weight:650!important}
+.addr{display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:100%}
+.addr .mono{padding:5px 9px;border:1px solid var(--line);border-radius:8px;background:var(--sunk);color:var(--muted);font-size:11.5px}
+.addr a.btn{text-decoration:none;color:var(--ink)}
+.tags{display:flex;gap:8px;flex-wrap:wrap}
+.tag{display:inline-flex;align-items:center;min-height:24px;padding:0 10px;border:1px solid var(--line2);border-radius:999px;font-size:12px;color:var(--muted)}
+.tag.good{color:var(--teal);border-color:color-mix(in srgb,var(--teal) 40%,transparent);background:var(--teal-soft)}
+.tag.bad{color:var(--dn);border-color:color-mix(in srgb,var(--dn) 40%,transparent);background:var(--coral-soft)}
+
+/* ---------- trade ticket ---------- */
+.ticket{padding:20px!important}
+#strade h2{font-size:15px;margin-bottom:6px}
+#octx .live{display:inline-flex;align-items:center;gap:5px;margin-left:6px;font-size:11.5px;color:var(--muted)}
+#octx .live i{width:6px;height:6px;border-radius:50%;background:var(--teal);display:inline-block}
+#octx{font-variant-numeric:tabular-nums;color:var(--muted);line-height:1.6;font-size:13.5px}
+#strade select,#strade input{min-height:42px;font-size:14px}
+#strade .btn.primary,#tgo{min-height:44px;font-weight:650}
+#tgo{width:100%}
+#tres .notice,#ssr .notice{margin-top:12px}
+.simbox summary{color:var(--muted)}
+
+/* ---------- tables ---------- */
+.solgrid table{font-size:13px}
+.solgrid th{padding:9px 18px;font-size:11.5px;color:var(--muted);font-weight:500;background:var(--sunk);border-bottom:1px solid var(--line)}
+.solgrid td{padding:11px 18px;border-bottom:1px solid var(--line)}
+.solgrid tbody tr:last-child td{border-bottom:0}
+.solgrid tbody tr:hover td{background:var(--raise)}
+.solgrid .r{text-align:right}
+.solgrid td a{color:var(--ink);text-decoration:underline;text-decoration-color:var(--line2);text-underline-offset:3px}
+.solgrid td a:hover{text-decoration-color:var(--ink)}
+.solgrid .notice{border-radius:11px;padding:11px 13px}
+
+/* ---------- side column ---------- */
+#sprivy{display:block!important;font-size:13px;line-height:1.55;padding:14px 16px!important}
+#sprivy>span{display:flex;flex-direction:column;align-items:flex-start;gap:5px}
+#sprivy .faint{display:block!important;color:var(--muted)}
+#sprivy .btn{margin-top:6px}
+#swal .panel{padding:16px 18px}
+#swal .row{gap:8px}#swal .btn{flex:1 1 auto}
+#swal .mono{font-size:12.5px}
+#shold:empty,#shist:empty{display:none}
+.nowrap{white-space:nowrap}
+.pos{color:var(--teal)}.neg{color:var(--dn)}
+.kind{display:inline-flex;align-items:center;min-height:22px;padding:0 9px;border-radius:999px;border:1px solid var(--line2);font-size:12px}
+.kind.k-buy{color:var(--teal);border-color:color-mix(in srgb,var(--teal) 40%,transparent);background:var(--teal-soft)}
+.kind.k-sell{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 40%,transparent);background:var(--amber-soft)}
+.kind.k-failed{color:var(--dn);border-color:color-mix(in srgb,var(--dn) 40%,transparent);background:var(--coral-soft)}
+#shold .tw{margin:0 -18px}
+#shold .faint{font-size:12px;line-height:1.5}
+
+/* ---------- footer ---------- */
+.solfoot{display:flex;gap:16px;justify-content:space-between;flex-wrap:wrap;max-width:1240px;margin:0 auto;padding:18px clamp(14px,2.4vw,28px) 34px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.solfoot a{color:var(--muted)}
+
+/* ---------- responsive ---------- */
+@media (max-width:1080px){
+  .solgrid{grid-template-columns:minmax(0,1fr)}
+  .solA{position:static;max-height:none;overflow:visible;order:-1}
+  .wchip .muted,.wchip .sep:last-of-type{display:none}
+}
+@media (max-width:760px){
+  .realbar{position:static}
+  .soltop{flex-wrap:wrap;height:auto;padding-top:10px;padding-bottom:10px;gap:8px}
+  .topsearch{order:5;flex:1 1 100%}
+  .soltop .grow{display:none}
+  .pill,.brand .where,.brand .sep{display:none}
+  .hit{grid-template-columns:1fr auto}.hit .mono{display:none}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}

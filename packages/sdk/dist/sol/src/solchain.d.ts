@@ -15,6 +15,7 @@ import type { ChainPort, SimTx, Receipt, Venue } from '../../core/src/index.ts';
 import type { SolRpc } from './raydium.ts';
 import type { SolSigner } from './signer.ts';
 import type { JupCfg } from './jupiterswap.ts';
+import type { TxSubmitter } from './submitter.ts';
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
 export declare class SolJsonRpcError extends Error {
     data?: any;
@@ -52,6 +53,8 @@ export interface SolChainConfig {
             refAmount: bigint;
         }[];
     };
+    /** How signed transactions are sent (default: the node's sendTransaction). A tip-paying submitter such as Jito adds its tip instruction to curve and Raydium transactions; Jupiter-built transactions are sent through the plain node instead (their instruction list is Jupiter's). */
+    submitter?: TxSubmitter;
 }
 export declare class SolanaChain implements ChainPort {
     private rpc;
@@ -67,6 +70,7 @@ export declare class SolanaChain implements ChainPort {
     private keys;
     private rent?;
     private cfg;
+    private tipped;
     /** Signatures this process sent recently. Solana has no mempool query, so a just-sent tx is not visible for a moment: report it as pending instead of absent (avoids pointless identical resends). */
     private sentAt;
     static VISIBILITY_GRACE_MS: number;
@@ -88,6 +92,15 @@ export declare class SolanaChain implements ChainPort {
     removeCurve(mint: string): void;
     private refreshPump;
     private pumpInstructions;
+    /** Make ANY token tradable: look for a live pump.fun bonding curve and for a Jupiter route, and track whichever exist. Read-only (quotes and account reads). The Router then picks the best quote among the venues.
+     *  Jupiter venues are priced from one reference quote each (buy `refLamports` of SOL, and sell back what that returned), so quotes for much larger sizes are an estimate and the real route is built again at trade time. */
+    addToken(mint: string, o?: {
+        refLamports?: bigint;
+    }): Promise<{
+        pump: boolean;
+        jupiter: boolean;
+        notes: string[];
+    }>;
     private refreshJupiter;
     private loadKeys;
     confirmedNonce(): Promise<number>;

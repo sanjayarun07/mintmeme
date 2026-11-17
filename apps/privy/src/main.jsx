@@ -3,6 +3,7 @@
  * signMessage / signTransaction hooks with wallet dialogs turned on, so the user sees and approves what is signed. This file never sees or sends a trade: it logs in, lists wallets and signs on request. */
 import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
 import { PrivyProvider, usePrivy, useLogin } from '@privy-io/react-auth';
 import { useWallets, useCreateWallet, useSignMessage, useSignTransaction, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 
@@ -59,7 +60,13 @@ function Panel({ onWallets }) {
           signTransaction: async (...ins) => {
             const out = [];
             for (const i of ins) {
-              const r = await st.current({ transaction: i.transaction, wallet: w, chain: 'solana:mainnet', options: { uiOptions: { ...UI } } });
+              console.log('[privy-sign] start', { bytes: i.transaction.length, wallet: w.address, version: i.transaction[65] });
+              const timer = setTimeout(() => console.warn('[privy-sign] still no answer after 15s: the Privy signing screen did not resolve'), 15000);
+              let r;
+              try { r = await st.current({ transaction: i.transaction, wallet: w, chain: 'solana:mainnet', options: { uiOptions: { ...UI, description: 'Trade on MINT', buttonText: 'Approve', isCancellable: true } } }); }
+              catch (e) { console.error('[privy-sign] error', e); throw e; }
+              finally { clearTimeout(timer); }
+              console.log('[privy-sign] done');
               let signed = r.signedTransaction;
               if (signed && signed.length === 64) { const tx = new Uint8Array(i.transaction); tx.set(signed, 1); signed = tx; }   // some wallets return only the 64-byte signature
               out.push({ signedTransaction: signed });
@@ -78,7 +85,7 @@ function Panel({ onWallets }) {
   const who = (user && user.email && user.email.address) || 'your Privy account';
   return (
     <span>
-      <span className="faint">Privy: {who} (build diag-5 buffer). </span>
+      <span className="faint">Signed in with Privy as {who}. </span>
       {wReady ? <span className="faint" style={{ display: 'block' }}>Privy has {wallets.length} Solana wallet{wallets.length === 1 ? '' : 's'}{wallets.map(w => ` · ${String(w.address).slice(0, 6)}…`).join('')}. </span> : null}
       {wReady && wallets.length === 0 ? (
         <span>
@@ -89,7 +96,6 @@ function Panel({ onWallets }) {
       {wReady && wallets.length > 0 ? <span className="faint">Choose it under "Sign in with your wallet" below. </span> : null}
       {err ? <span className="dn">{err} </span> : null}
       <button className="btn" onClick={() => logout()}>Log out of Privy</button>
-      {(window.__privyLog || []).length ? <pre className="faint" style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{window.__privyLog.join('\n')}</pre> : null}
     </span>
   );
 }
@@ -107,6 +113,8 @@ window.MintPrivy = {
           loginMethods: ['email', 'wallet'],
           externalWallets: { solana: { connectors: toSolanaWalletConnectors() } },
           embeddedWallets: { solana: { createOnLogin: 'users-without-wallets' }, showWalletUIs: true },
+          // Privy's approval screen reads fees and balances through this RPC and fails without it ("No RPC configuration found"). Display only: the server still builds and sends the trade. Goes through this terminal's read-only relay (/api/sol/rpc): the public endpoint answers browsers with 403.
+          solana: { rpcs: { 'solana:mainnet': { rpc: createSolanaRpc(location.origin + '/api/sol/rpc'), rpcSubscriptions: createSolanaRpcSubscriptions('wss://api.mainnet-beta.solana.com') } } },
         }}
       >
         <Panel onWallets={opts.onWallets} />

@@ -19,6 +19,10 @@ console.log(t.state);                   // "finalized"
 console.log(trader.positions());        // amounts are bigint in the SDK
 ```
 
+Price orders also take `chase` (widen slippage on each failed fill, capped), `priceUsd` (a trigger
+fixed in dollars, with a quote/USD feed in `TraderConfig.usd`), and can be moved with
+`editOrder(id, { priceE18 | priceUsd })` (`PATCH /v1/orders/:id`). See sections 6.1, 6.5 and 6.6 of the guide.
+
 Subpath imports: `memedesk-sdk/client` (HTTP client only), `/core`, `/evm`, `/sol`.
 Full guide: `dist/SDK_AND_API.md`.
 

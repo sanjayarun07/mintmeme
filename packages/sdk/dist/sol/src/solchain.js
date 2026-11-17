@@ -46,6 +46,7 @@ export class SolanaChain {
     keys = new Map();
     rent;
     cfg;
+    tipped = new Set();
     /** Signatures this process sent recently. Solana has no mempool query, so a just-sent tx is not visible for a moment: report it as pending instead of absent (avoids pointless identical resends). */
     sentAt = new Map();
     static VISIBILITY_GRACE_MS = 4000;
@@ -132,10 +133,10 @@ export class SolanaChain {
             const curveAddr = pumpAddresses(mint, mint, PROGRAMS.token).bondingCurve;
             const r = await this.rpcCall('getMultipleAccounts', [[curveAddr, mint], { encoding: 'base64', commitment: 'confirmed' }]);
             const [c, m] = r.value;
-            if (!c || !m) {
+            if (!c || !m || c.owner === PROGRAMS.system) {
                 this.state.venues.delete(`pump:${mint}`);
                 continue;
-            }
+            } // no curve for this mint (the address may hold plain lamports, owned by the system program)
             if (c.owner !== PUMP_PROGRAM)
                 throw new RpcError(`curve ${curveAddr} is owned by ${c.owner}, not the pump program`);
             const curve = decodeCurve(Buffer.from(c.data[0], 'base64'));
@@ -153,6 +154,51 @@ export class SolanaChain {
         if (tx.tokenIn === v.mint && tx.tokenOut === NATIVE)
             return [...budget, pumpSell(ctx, tx.amountIn, tx.minOut)];
         throw new Error(`pump.fun curve ${v.mint} trades only SOL for that token and back`);
+    }
+    /** Make ANY token tradable: look for a live pump.fun bonding curve and for a Jupiter route, and track whichever exist. Read-only (quotes and account reads). The Router then picks the best quote among the venues.
+     *  Jupiter venues are priced from one reference quote each (buy `refLamports` of SOL, and sell back what that returned), so quotes for much larger sizes are an estimate and the real route is built again at trade time. */
+    async addToken(mint, o = {}) {
+        const notes = [];
+        let pump = false, jupiter = false;
+        const had = (this.cfg.pump?.mints ?? []).includes(mint);
+        this.addCurve(mint);
+        try {
+            await this.refreshPump(this.block);
+            const v = this.state.venues.get(`pump:${mint}`);
+            pump = !!v;
+            if (v && !v.tradable) {
+                notes.push(`pump.fun curve found but not tradable here: ${v.tradableReason ?? 'graduated'}`);
+                pump = false;
+            }
+            else if (!v)
+                notes.push('no pump.fun curve for this mint');
+        }
+        catch (e) {
+            notes.push(`pump.fun check failed: ${e.message}`);
+        }
+        if (!pump && !had)
+            this.removeCurve(mint);
+        const j = this.cfg.jupiter;
+        if (!j)
+            notes.push('Jupiter routing is not configured on this chain');
+        else
+            try {
+                const ref = o.refLamports ?? 50000000n, q = await fetchJupiterQuote({ inputMint: this.cfg.wsol, outputMint: mint, amount: ref, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
+                if (q.outAmount > 0n) {
+                    const add = (inMint, outMint, refAmount) => { if (!j.pairs.some(p => p.inMint === inMint && p.outMint === outMint))
+                        j.pairs.push({ inMint, outMint, refAmount }); };
+                    add(this.cfg.wsol, mint, ref);
+                    add(mint, this.cfg.wsol, q.outAmount);
+                    await this.refreshJupiter();
+                    jupiter = this.state.venues.has(`jup:${this.cfg.wsol.slice(0, 6)}>${mint.slice(0, 6)}`);
+                }
+                else
+                    notes.push('Jupiter found no route');
+            }
+            catch (e) {
+                notes.push(`no Jupiter route: ${e.message}`);
+            }
+        return { pump, jupiter, notes };
     }
     async refreshJupiter() {
         const j = this.cfg.jupiter;
@@ -334,12 +380,16 @@ export class SolanaChain {
         const jv = this.jupVenue(tx);
         if (jv) {
             const { message } = await this.buildJupiter(tx, jv);
-            const sig = this.signer.sign(tx.wallet, message);
+            const sig = await this.signer.sign(tx.wallet, message);
             return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) };
         }
-        const ixs = this.instructions(tx);
+        const ixs = this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined;
+        if (extra)
+            ixs.push(extra);
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-        const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = this.signer.sign(tx.wallet, message);
+        const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = await this.signer.sign(tx.wallet, message);
+        if (extra)
+            this.tipped.add(base58(sig));
         return { raw: Buffer.from(wireTx(message, [sig])).toString('base64'), hash: base58(sig) };
     }
     async submit(tx) {
@@ -347,7 +397,8 @@ export class SolanaChain {
             throw new Error('transaction was not prepared (no raw bytes)');
         this.sentAt.set(tx.hash, Date.now());
         try {
-            const h = await this.rpcCall('sendTransaction', [tx.raw, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 0 }]);
+            const sub = this.cfg.submitter, viaSub = sub && (!sub.extraInstruction || this.tipped.has(tx.hash));
+            const h = viaSub ? await sub.send(tx.raw, tx.hash) : await this.rpcCall('sendTransaction', [tx.raw, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 0 }]);
             if (h !== tx.hash)
                 throw new Error(`node returned signature ${h} but we computed ${tx.hash}: refusing to track a different transaction`);
             return h;

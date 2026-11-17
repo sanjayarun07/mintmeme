@@ -47,7 +47,7 @@ async function main() {
     const n2 = sm.authNonce({ address: addr }), li = await sm.authVerify({ address: addr, signature: b64(wallet.sign(addr, new TextEncoder().encode(n2.message))) }); const LS = { __session: (li as any).__setSession as string };
     check('L2 signing the one-time message connects that address without any private key reaching the server', li.connected && li.address === addr && !!LS.__session && n1.message !== n2.message);
     check('L3 a request without the session cookie value is refused as not signed in', await refused(() => sm.prepare({ mint, side: 'buy', sol: '0.01', slippagePct: 3 }), /sign in again/));
-    const browser = async (mode: 'approve' | 'decline' | 'tamper') => { for (let i = 0; i < 200; i++) { const items = (sm.pendingSigns(LS) as any).items; if (items.length) { const it = items[0], msg = Uint8Array.from(Buffer.from(it.message, 'base64')); if (mode === 'decline') { sm.rejectSign({ ...LS, id: it.id }); return 'declined'; } if (mode === 'tamper') { let bad: string | undefined; try { sm.submitSign({ ...LS, id: it.id, signature: b64(wallet.sign(addr, new Uint8Array([...msg, 1]))) }); } catch (e) { bad = (e as Error).message; } sm.submitSign({ ...LS, id: it.id, signature: b64(wallet.sign(addr, msg)) }); return bad ?? 'accepted-bad'; } sm.submitSign({ ...LS, id: it.id, signature: b64(wallet.sign(addr, msg)) }); return 'signed'; } await new Promise(r => setTimeout(r, 100)); } return 'none'; };
+    const browser = async (mode: 'approve' | 'decline' | 'tamper', S = LS) => { for (let i = 0; i < 200; i++) { const items = (sm.pendingSigns(S) as any).items; if (items.length) { const it = items[0], msg = Uint8Array.from(Buffer.from(it.message, 'base64')); if (mode === 'decline') { sm.rejectSign({ ...S, id: it.id }); return 'declined'; } if (mode === 'tamper') { let bad: string | undefined; try { sm.submitSign({ ...S, id: it.id, signature: b64(wallet.sign(addr, new Uint8Array([...msg, 1]))) }); } catch (e) { bad = (e as Error).message; } sm.submitSign({ ...S, id: it.id, signature: b64(wallet.sign(addr, msg)) }); return bad ?? 'accepted-bad'; } sm.submitSign({ ...S, id: it.id, signature: b64(wallet.sign(addr, msg)) }); return 'signed'; } await new Promise(r => setTimeout(r, 100)); } return 'none'; };
     await sm.setLimits({ ...LS, maxTradeSol: '0.05', dailyCapSol: '0.2', maxSlippagePct: '5' });
     const lt = async () => (await rpc.call<any>('getTokenAccountsByOwner', [addr, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]).catch(() => ({ value: [] }))).value.reduce((x: bigint, a: any) => x + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
     const lp = await sm.prepare({ ...LS, mint, side: 'buy', sol: '0.02', slippagePct: 5 }); const bp = browser('approve'), lr = await sm.confirm({ ...LS, ticketId: lp.ticketId, ack: true });
@@ -84,6 +84,17 @@ async function main() {
     const h2 = await hold(), tw = await sm.createOrder({ ...K, ack: true, type: 'twap', side: 'buy', mint, sol: '0.02', slices: 2, intervalMin: 0.2 }) as any;
     check('O9 a TWAP buy of 2 slices spaced 12 seconds apart fills both slices and the wallet receives tokens', await until(async () => ((await ords()).twaps.find((t: any) => t.id === tw.twap.id)?.filled ?? 0) >= 2, 90_000) && (await hold()) > h2, JSON.stringify((await ords()).twaps).slice(0, 200));
     check('O10 a TWAP whose slices exceed the per-trade limit is refused', await refused(() => sm.createOrder({ ...K, ack: true, type: 'twap', side: 'buy', mint, sol: '0.2', slices: 2, intervalMin: 1 }), /per-trade limit/));
+    // ---- editing a trigger, and triggers fixed in USD ----
+    const ed = await sm.createOrder({ ...K, ack: true, type: 'limit_sell', mint, pct: 5, price: px * 6 }) as any; await sleep(4000);
+    const ed1 = await sm.editOrder({ ...K, id: ed.order.id, price: String(px * 8) }) as any;
+    check('O11 editing an active order moves its trigger and it stays active; an edit to a trailing stop is refused', ed1.ok && Math.abs(ed1.order.triggerPriceSol / (px * 8) - 1) < 1e-6 && (await ords()).orders.find((o: any) => o.id === ed.order.id)?.status === 'active' && await refused(() => sm.editOrder({ ...K, id: tr.order.id, price: String(px) }), /trailing stop/), JSON.stringify(ed1.order).slice(0, 200));
+    const hE = await hold(); await sm.editOrder({ ...K, id: ed.order.id, price: String(px * 0.5) });
+    check('O12 an order edited to a trigger the market already meets fires at the new price and the wallet sells', await until(async () => (await ords()).orders.find((o: any) => o.id === ed.order.id)?.status === 'fired') && await until(async () => (await hold()) < hE), JSON.stringify((await ords()).orders.find((o: any) => o.id === ed.order.id)).slice(0, 200));
+    const su = await sm.solUsd();
+    if (su) {
+      const hU = await hold(), ub = await sm.createOrder({ ...K, ack: true, type: 'limit_buy', mint, sol: '0.01', price: String(px * 1e-6), priceUsd: String(px * su * 1.5) }) as any;
+      check('O13 a limit buy set in USD stores the dollar trigger, re-prices its SOL trigger from the live SOL price, and fires', ub.order.triggerUsd > 0 && await until(async () => (await ords()).orders.find((o: any) => o.id === ub.order.id)?.status === 'fired') && await until(async () => (await hold()) > hU), JSON.stringify((await ords()).orders.find((o: any) => o.id === ub.order.id)).slice(0, 220));
+    } else check('O13 a limit buy set in USD (skipped: no SOL/USD price reachable from this machine)', false, 'no SOL/USD price');
     await sm.disconnect(K);
 
     // ---- trading key: a server-held throwaway wallet so orders fire with no browser open. Local validator, fake SOL. ----
@@ -93,13 +104,31 @@ async function main() {
     const ki = sm.tradingKeyCreate({ hours: 24 }) as any, kj = JSON.parse(readFileSync(kf, 'utf8')), kp = Uint8Array.from(kj.keypair as number[]);
     check('K2 creating a key saves a Solana CLI keypair file readable only by the owner, and the response never contains the key', ki.exists && (statSync(kf).mode & 0o777) === 0o600 && kp.length === 64 && base58(kp.slice(32)) === ki.address && !JSON.stringify(ki).includes(String(kj.keypair[0]) + ',' + String(kj.keypair[1])), JSON.stringify(ki).slice(0, 160));
     check('K3 a second create is refused so a funded key is never overwritten', await refused(async () => { sm.tradingKeyCreate({}); }, /already exists/));
+    // ---- funding the key from the browser wallet (the "Fund trading key" button), exactly as the page does it ----
+    const bal = async (a: string) => BigInt((await rpc.call<any>('getBalance', [a, { commitment: 'confirmed' }])).value);
+    const nf = sm.authNonce({ address: addr }), lf = await sm.authVerify({ address: addr, signature: b64(wallet.sign(addr, new TextEncoder().encode(nf.message))) }); const FS = { __session: (lf as any).__setSession as string };
+    check('F1 funding without the acknowledgement is refused and nothing is asked of the wallet', await refused(() => sm.fundTradingKey({ ...FS, sol: '0.03' }), /confirmation box/) && (sm.pendingSigns(FS) as any).items.length === 0);
+    check('F2 funding above 0.05 SOL in one go is refused', await refused(() => sm.fundTradingKey({ ...FS, sol: '0.06', ack: true }), /at most 0.05/));
+    const kb0 = await bal(ki.address), fsig = browser('approve', FS), fr = await sm.fundTradingKey({ ...FS, sol: '0.03', ack: true }) as any;
+    check('F3 funding 0.03 SOL asks the wallet to sign, lands, and the key holds exactly 0.03 SOL more', (await fsig) === 'signed' && fr.ok && fr.to === ki.address && fr.from === addr && (await bal(ki.address)) - kb0 === 30_000_000n, JSON.stringify(fr).slice(0, 200));
+    check('F4 a wallet that declines the funding sends nothing', await (async () => { const before = await bal(ki.address), d = browser('decline', FS); const ok = await refused(() => sm.fundTradingKey({ ...FS, sol: '0.01', ack: true }), /declined/); return ok && (await d) === 'declined' && (await bal(ki.address)) === before; })());
+    check('F5 the funding wallet is found on chain as a funder of the key', (await sm.keyFunders()).includes(addr));
+    await sm.disconnect(FS);
     const ku = await sm.tradingKeyUse() as any, KS = { __session: ku.__setSession as string };
+    check('F6 the key cannot fund itself', await refused(() => sm.fundTradingKey({ ...KS, sol: '0.01', ack: true }), /signed-in wallet|cannot fund itself/));
     check('K4 using it connects that address as a key signer and lowers the limits to the key ceilings', ku.connected && ku.address === ki.address && ku.signer === 'key' && ku.tradingKey.active && ku.limits.dailyCapLamports === '250000000', JSON.stringify(ku.limits));
     check('K5 limits above the trading-key ceilings are refused', await refused(async () => { sm.setLimits({ ...KS, maxTradeSol: '0.06', dailyCapSol: '0.1', maxSlippagePct: '5' }); }, /cannot exceed/));
     await air(ki.address, 0.3); await sm.killSwitch(false, KS).catch(() => {});
     const holdK = async () => (await rpc.call<any>('getTokenAccountsByOwner', [ki.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]).catch(() => ({ value: [] }))).value.reduce((x: bigint, a: any) => x + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n);
     const kh0 = await holdK(), kord = await sm.createOrder({ ...KS, ack: true, type: 'limit_buy', mint, sol: '0.01', price: px * 1.5 }) as any;
     check('K6 with the trading key a limit buy fires by itself, with no browser and no wallet approval, and the key receives tokens', await until(async () => (await sm.listOrders(KS) as any).orders.find((o: any) => o.id === kord.order.id)?.status === 'fired') && await until(async () => (await holdK()) > kh0), JSON.stringify((await sm.listOrders(KS) as any).orders.find((o: any) => o.id === kord.order.id)).slice(0, 200));
+    // ---- returning the key's SOL ("Return SOL to your wallet") ----
+    const stranger = new DevSolSigner().add(randomBytes(32));
+    check('R1 returning SOL to a wallet that never funded the key is refused', await refused(() => sm.tradingKeyReturn({ ...KS, to: stranger, ack: true }), /funded this key/) && (await bal(stranger)) === 0n);
+    check('R2 returning without the acknowledgement is refused', await refused(() => sm.tradingKeyReturn({ ...KS, to: addr }), /confirmation box/));
+    const wb0 = await bal(addr), kbr = await bal(ki.address), rr = await sm.tradingKeyReturn({ ...KS, to: addr, ack: true }) as any;
+    check('R3 returning sends all of the key\'s SOL less the 0.000005 SOL fee to the funding wallet, signed by the key with no browser', rr.ok && (await bal(ki.address)) === 0n && (await bal(addr)) - wb0 === kbr - 5_000n, JSON.stringify(rr).slice(0, 200));
+    check('R4 with no SOL left, a second return is refused', await refused(() => sm.tradingKeyReturn({ ...KS, to: addr, ack: true }), /no SOL/));
     (sm as any).keyExpiry = Date.now() - 1; check('K7 when the key expires the server disconnects it by itself', await until(async () => !(await sm.status()).connected, 15_000));
     const kj2 = JSON.parse(readFileSync(kf, 'utf8')); kj2.expiresAt = Date.now() - 1000; writeFileSync(kf, JSON.stringify(kj2), { mode: 0o600 });
     check('K8 an expired key cannot be used', await refused(() => sm.tradingKeyUse(), /expired/));

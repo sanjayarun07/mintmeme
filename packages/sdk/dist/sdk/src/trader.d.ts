@@ -26,6 +26,24 @@ export interface TraderConfig {
         maxQuoteAgeMs?: number;
         minLiquidity?: bigint;
     };
+    /** Enables triggers fixed in US dollars (priceUsd / takeProfitUsd / stopLossUsd). The engine compares prices in the quote token, so each tick the Trader re-derives the quote-token
+     *  trigger from `quoteUsd()`. A price older than maxAgeMs (default 120 s) never moves a trigger: the order keeps its last quote-token trigger until a fresh price arrives. */
+    usd?: UsdFeed;
+}
+export interface UsdFeed {
+    /** USD per WHOLE quote token (e.g. SOL/USD) and when it was observed (ms). Return null when unknown. */
+    quoteUsd: () => {
+        price: number;
+        at: number;
+    } | null | Promise<{
+        price: number;
+        at: number;
+    } | null>;
+    /** Decimals of the quote token (9 for SOL, 18 for ETH). */
+    quoteDecimals: number;
+    /** Decimals of a token, to convert a per-whole-token price into raw units. */
+    tokenDecimals: (token: string) => number | Promise<number>;
+    maxAgeMs?: number;
 }
 export interface TradeView {
     key: string;
@@ -103,6 +121,8 @@ export type TraderEvent = {
     where: string;
     message: string;
 };
+/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. Integer maths after one rounding of the rate to 1e-9 USD. */
+export declare function usdToE18(usd: string, quoteUsd: number, quoteDecimals: number, tokenDecimals: number): bigint;
 export declare class Trader {
     private c;
     readonly orders: OrderRunner;
@@ -187,9 +207,9 @@ export declare class Trader {
     private record;
     private orderBase;
     private put;
-    /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or lower. */
+    /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or `priceUsd` or lower. */
     limitBuy(p: PriceOrderInput): Promise<Order>;
-    /** Sell `amount` tokens when the price reaches `priceE18` or higher. */
+    /** Sell `amount` tokens when the price reaches `priceE18` (or `priceUsd`) or higher. */
     limitSell(p: PriceOrderInput): Promise<Order>;
     takeProfit(p: PriceOrderInput): Promise<Order>;
     stopLoss(p: PriceOrderInput): Promise<Order>;
@@ -198,12 +218,25 @@ export declare class Trader {
         trailBps: number;
     }): Promise<Order>;
     /** Take profit and/or stop loss (and/or trailing stop) on ONE position: when one fires the others are cancelled and the tokens are reserved once. */
-    bracket(p: Omit<PriceOrderInput, 'priceE18'> & {
+    bracket(p: Omit<PriceOrderInput, 'priceE18' | 'priceUsd'> & {
         takeProfitE18?: Amount;
         stopLossE18?: Amount;
+        takeProfitUsd?: string;
+        stopLossUsd?: string;
         trailBps?: number;
     }): Promise<Order[]>;
     private trigger;
+    /** Change an active order's trigger: `priceE18` (quote units per token x1e18, the trigger is then fixed in the quote token) or `priceUsd` (fixed in USD, needs TraderConfig.usd).
+     *  Keeps its reservation, attempts and place in a bracket. */
+    editOrder(orderId: string, p: {
+        priceE18?: Amount;
+        priceUsd?: string;
+    }): Promise<Order>;
+    /** Quote-token trigger (x1e18, raw units) for a USD price per whole token, at the current quote/USD price. Refuses when that price is missing or stale. */
+    private usdE18;
+    /** Re-derive the quote-token trigger of every active USD order from a fresh quote/USD price. A stale or missing price moves nothing.
+     *  Bracket legs move in the order that keeps take profit above stop loss throughout (falling triggers: stop loss first; rising: take profit first). */
+    syncUsdTriggers(): Promise<number>;
     cancelOrder(orderId: string): Order;
     getOrder(orderId: string): Order | undefined;
     listOrders(opts?: {
@@ -227,6 +260,7 @@ export declare class Trader {
     bulkStatus(bid: string): BulkSummary;
     /** Trade `total` in `slices` equal parts, one every `intervalS` seconds from ONE wallet. A slice that cannot go in its window is skipped and reported, never made up later. */
     twap(p: TwapInput): Promise<TwapSummary>;
+    listTwaps(): TwapSummary[];
     twapStatus(tid: string): TwapSummary;
     cancelTwap(tid: string): TwapSummary;
     /** Start sniping new launches with a bounded budget. You supply the launch source (an EVM log scanner, the Solana launch stream, or a test double). Exits become price orders. */
@@ -309,6 +343,14 @@ export interface PriceOrderInput {
     maxAttempts?: number;
     maxQuoteAgeMs?: number;
     minLiquidity?: Amount;
+    /** Opt-in slippage chase: a failed fill retries with stepBps more slippage each time, up to maxBps. */
+    chase?: ChaseInput;
+    /** Instead of priceE18: a trigger fixed in USD per whole token, as a decimal string ("0.0000024"). Needs TraderConfig.usd. */
+    priceUsd?: string;
+}
+export interface ChaseInput {
+    stepBps: number;
+    maxBps: number;
 }
 export interface BulkInput {
     id?: string;

@@ -138,8 +138,10 @@ async function getJson(url, c) {
             await new Promise(r => setTimeout(r, 2200 * (a + 1)));
             continue;
         }
-        if (!res.ok)
-            throw new Error(`Jupiter request failed: HTTP ${res.status}`);
+        if (!res.ok) {
+            const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240);
+            throw new Error(`Jupiter request failed: HTTP ${res.status}${body ? ' (' + body + ')' : ''}`);
+        }
         return res.json();
     }
     throw new Error(`Jupiter rate limited us (${last}); try again later or set an API key`);

@@ -9,7 +9,8 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { SdkError, ID_RE, plain, toJson } from '../../packages/sdk/src/wire.ts';
 import type { Trader } from '../../packages/sdk/src/trader.ts';
 
-export interface ApiKey { key: string; userId: string; scope?: 'read' | 'trade'; label?: string }
+/** `key` is the secret; a production server can give `keyHash` (hex SHA-256 of the secret) instead, so the plain key never sits in its config. */
+export interface ApiKey { key?: string; keyHash?: string; userId: string; scope?: 'read' | 'trade'; label?: string }
 export interface ApiOptions {
   keys: ApiKey[]; traderFor: (userId: string) => Trader | undefined;
   /** Rate limit per key: requests per second sustained and burst. Default 20 and 40. */
@@ -39,11 +40,12 @@ function routes(o: ApiOptions): Route[] {
     { method: 'POST', path: '/v1/trades/:key/advance', scope: 'trade', summary: 'Drive a trade that is waiting on the chain one more step. Safe to repeat', run: c => c.t.advance(mine(c.userId, c.params.key, 'trade')) },
     { method: 'POST', path: '/v1/wallets/:id/cancel-stuck', scope: 'trade', summary: 'Replace a stuck transaction nonce with a no-op so later trades are not blocked', body: 'force? (boolean)', run: c => c.t.cancelStuck(c.params.id, { force: c.body?.force === true }) },
     ...([['limit-buy', 'limitBuy', 'Buy when the price falls to priceE18 or lower'], ['limit-sell', 'limitSell', 'Sell when the price rises to priceE18 or higher'], ['take-profit', 'takeProfit', 'Sell at a profit target'], ['stop-loss', 'stopLoss', 'Sell if the price falls to priceE18']] as const).map(([p, m, s]): Route =>
-      ({ method: 'POST', path: `/v1/orders/${p}`, scope: 'trade', summary: s, body: 'id?, walletId, token, amount (buy: quote budget; sell: tokens), priceE18 (string) OR marketCap {target, circulating|total, supplySource}, slippageBps?, ttlS?, maxDeviationBps?, maxAttempts?', run: c => (c.t as any)[m](scoped(c)) })),
+      ({ method: 'POST', path: `/v1/orders/${p}`, scope: 'trade', summary: s, body: 'id?, walletId, token, amount (buy: quote budget; sell: tokens), priceE18 (string) OR priceUsd (decimal string, needs a USD feed) OR marketCap {target, circulating|total, supplySource}, slippageBps?, chase? {stepBps, maxBps}, ttlS?, maxDeviationBps?, maxAttempts?', run: c => (c.t as any)[m](scoped(c)) })),
     { method: 'POST', path: '/v1/orders/trailing-stop', scope: 'trade', summary: 'Sell when the price falls trailBps from its peak since placement', body: 'id?, walletId, token, amount, trailBps (1..9999), slippageBps?, ttlS?', run: c => c.t.trailingStop(scoped(c) as any) },
-    { method: 'POST', path: '/v1/orders/bracket', scope: 'trade', summary: 'Take profit and/or stop loss and/or trailing stop on one position; when one fires the others are cancelled', body: 'id?, walletId, token, amount, takeProfitE18?, stopLossE18?, trailBps?', run: c => c.t.bracket(scoped(c) as any) },
+    { method: 'POST', path: '/v1/orders/bracket', scope: 'trade', summary: 'Take profit and/or stop loss and/or trailing stop on one position; when one fires the others are cancelled', body: 'id?, walletId, token, amount, takeProfitE18? OR takeProfitUsd?, stopLossE18? OR stopLossUsd?, trailBps?, slippageBps?, chase? {stepBps, maxBps}', run: c => c.t.bracket(scoped(c) as any) },
     { method: 'GET', path: '/v1/orders', scope: 'read', summary: 'Your orders (query: status, token)', run: c => c.t.listOrders({ status: (c.query.get('status') ?? undefined) as any, token: c.query.get('token') ?? undefined }) },
     { method: 'GET', path: '/v1/orders/:id', scope: 'read', summary: 'One order with the reason it has not fired yet', run: c => { const ord = found(c.t.getOrder(mine(c.userId, c.params.id, 'order')), 'order', c.params.id); return { ...ord, detail: c.t.orderStatus(ord.id) }; } },
+    { method: 'PATCH', path: '/v1/orders/:id', scope: 'trade', summary: 'Move an active order\'s trigger. Keeps its reserved balance and bracket link. priceUsd fixes it in dollars, priceE18 in the quote token', body: 'priceE18 (string) OR priceUsd (decimal string)', run: c => c.t.editOrder(mine(c.userId, c.params.id, 'order'), { priceE18: c.body?.priceE18, priceUsd: c.body?.priceUsd }) },
     { method: 'DELETE', path: '/v1/orders/:id', scope: 'trade', summary: 'Cancel an active order and release its reserved balance', run: c => c.t.cancelOrder(mine(c.userId, c.params.id, 'order')) },
     { method: 'POST', path: '/v1/bulk/buy', scope: 'trade', summary: 'Buy one token from up to 10 wallets at once. Not atomic: the report says which legs landed', body: 'id?, token, legs [{walletId, amount}] OR wallets [..] + total, slippageBps?, maxTotal?, maxImpactBps?, onFailure?, mode?, perTick?', run: c => c.t.bulkBuy(scoped(c) as any) },
     { method: 'POST', path: '/v1/bulk/sell', scope: 'trade', summary: 'Sell one token from up to 10 wallets: exact legs, equal split, or a percentage of each balance', body: 'id?, token, legs OR wallets+total OR wallets+pctBps, slippageBps?, ...', run: c => c.t.bulkSell(scoped(c) as any) },
@@ -68,14 +70,16 @@ export function openapi(rs: Route[]) {
   const paths: Record<string, any> = {};
   for (const r of rs) (paths[r.path.replace(/:(\w+)/g, '{$1}')] ??= {})[r.method.toLowerCase()] = { summary: r.summary, description: r.body ? `Body: ${r.body}. Amounts and prices are decimal strings of raw base units.` : undefined, security: [{ bearer: [] }], 'x-scope': r.scope,
     parameters: [...(r.path.match(/:(\w+)/g) ?? []).map(p => ({ name: p.slice(1), in: 'path', required: true, schema: { type: 'string' } })), ...(r.path.endsWith('/buy') || r.path.endsWith('/sell') ? [{ name: 'Idempotency-Key', in: 'header', required: false, schema: { type: 'string' } }] : [])],
-    requestBody: r.method === 'POST' || r.method === 'DELETE' ? { content: { 'application/json': { schema: { type: 'object' } } } } : undefined, responses: { 200: { description: 'OK' }, 400: { description: 'Invalid request: the body says what to send instead' }, 401: { description: 'Missing or unknown API key' }, 403: { description: 'Key is read-only' }, 404: { description: 'Not found (also for ids that belong to another user)' }, 429: { description: 'Rate limit' } } };
+    requestBody: r.method === 'POST' || r.method === 'PATCH' || r.method === 'DELETE' ? { content: { 'application/json': { schema: { type: 'object' } } } } : undefined, responses: { 200: { description: 'OK' }, 400: { description: 'Invalid request: the body says what to send instead' }, 401: { description: 'Missing or unknown API key' }, 403: { description: 'Key is read-only' }, 404: { description: 'Not found (also for ids that belong to another user)' }, 429: { description: 'Rate limit' } } };
   paths['/v1/events'] = { get: { summary: 'Server-sent events: trade, order, bulk, twap, snipe, alert and error events for your account', security: [{ bearer: [] }], responses: { 200: { description: 'text/event-stream' } } } };
   return { openapi: '3.0.3', info: { title: 'Meme execution API', version: '1.0.0', description: 'Whole-engine trading API. Amounts are raw base units as decimal strings. Practice or real depends on the chain the server is wired to.' }, components: { securitySchemes: { bearer: { type: 'http', scheme: 'bearer' } } }, paths };
 }
 
 export function createApi(o: ApiOptions) {
   const now = o.now ?? Date.now, rate = o.rate ?? { perSecond: 20, burst: 40 };
-  const keys = o.keys.map(k => { if (!k.key || k.key.length < 16) throw new Error('API keys must be at least 16 characters'); return { h: sha(k.key), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; });
+  const keys = o.keys.map(k => {
+    if (k.keyHash !== undefined) { if (!/^[0-9a-f]{64}$/i.test(k.keyHash)) throw new Error('keyHash must be 64 hex characters (SHA-256)'); return { h: Buffer.from(k.keyHash, 'hex'), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; }
+    if (!k.key || k.key.length < 16) throw new Error('API keys must be at least 16 characters'); return { h: sha(k.key), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; });
   const rs = routes(o), compiled = rs.map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
   const buckets = new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new Set<string>();
   const send = (res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(typeof body === 'string' ? body : toJson(body)); };
@@ -101,7 +105,7 @@ export function createApi(o: ApiOptions) {
       if (!hit) { const other = compiled.some(x => x.re.test(path)); return send(res, other ? 405 : 404, { error: { code: other ? 'method_not_allowed' : 'not_found', message: other ? `${req.method} is not allowed here.` : `No route ${path}.`, fix: 'See GET /v1/openapi.json for the list of routes.' } }); }
       if (hit.r.scope === 'trade' && k.scope === 'read') return send(res, 403, { error: { code: 'read_only_key', message: 'This API key is read-only.', fix: 'Use a key with the trade scope for this call.' } });
       const params = Object.fromEntries(Object.entries(hit.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
-      const body = req.method === 'POST' || req.method === 'DELETE' ? await readBody(req) : {};
+      const body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
       send(res, 200, plain(await hit.r.run({ t, userId: k.userId, body, params, query: url.searchParams, headers: req.headers })));
     } catch (e) { fail(res, e); }
   });

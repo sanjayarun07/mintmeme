@@ -98,7 +98,7 @@ async function getJson(url: string, c: JupCfg): Promise<any> {
   for (let a = 0; a < 4; a++) {   // keyless access is 0.5 requests/s: back off on 429 instead of hammering
     const res = await f(url, { headers: c.apiKey ? { 'x-api-key': c.apiKey } : {}, signal: AbortSignal.timeout(c.timeoutMs ?? 15_000) });
     if (res.status === 429) { last = 'HTTP 429'; await new Promise(r => setTimeout(r, 2200 * (a + 1))); continue; }
-    if (!res.ok) throw new Error(`Jupiter request failed: HTTP ${res.status}`);
+    if (!res.ok) { const body = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 240); throw new Error(`Jupiter request failed: HTTP ${res.status}${body ? ' (' + body + ')' : ''}`); }
     return res.json();
   }
   throw new Error(`Jupiter rate limited us (${last}); try again later or set an API key`);

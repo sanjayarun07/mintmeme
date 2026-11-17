@@ -19,6 +19,13 @@ export interface Order {
     trailBps?: number;
     ocoGroup?: string;
     expiresAt: number;
+    /** Opt-in slippage chase: each failed attempt retries with stepBps more slippage, never above maxBps. Without it, retries keep the original slippage. */
+    chase?: {
+        stepBps: number;
+        maxBps: number;
+    };
+    /** When set, the trigger is fixed in USD per whole token (decimal string) and triggerPriceE18 is re-derived from the live quote/USD price by the Trader. Persisted with the order. */
+    usdPrice?: string;
     maxQuoteAgeMs: number;
     minLiquidity: bigint;
     maxDeviationBps: number;
@@ -41,6 +48,8 @@ export interface Snapshot {
     liquidity: bigint;
     executableOut: (o: Order) => bigint;
 }
+/** Slippage for the order's next attempt: the original value, or with chase, original + attempts x step, capped at the chase maximum (and never below the original). */
+export declare function slippageFor(o: Pick<Order, 'slippageBps' | 'attempts' | 'chase'>): number;
 export declare class OrderManager {
     private res;
     private run;
@@ -67,6 +76,9 @@ export declare class OrderManager {
     }): void;
     place(o: Order): Order;
     cancel(id: string): void;
+    /** Move an active order's trigger price. The reservation, amount, attempts and OCO link are kept. A bracket's take profit must stay above its stop loss.
+     *  Trailing stops have no fixed trigger, and market-cap orders keep their cap target, so neither can be edited this way. */
+    retrigger(id: string, priceE18: bigint): Order;
     private owner;
     private maybeRelease;
     /** Evaluate against a fresh snapshot AND an executable quote; never trigger from a stale/illiquid/unexecutable price. */

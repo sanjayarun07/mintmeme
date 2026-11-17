@@ -86,3 +86,17 @@ test('rate limit answers 429 with a fix, and events stream order changes live', 
     assert.ok(!got.some(x => JSON.stringify(x).includes('bob.')), 'no cross-user events');
   } finally { await e.api.close(); }
 });
+
+test('over HTTP: chase is accepted on orders, PATCH moves a trigger (owner only), and USD triggers need a feed on the server', async () => {
+  const s = await boot();
+  try {
+    await s.alice.buy({ walletId: 'w1', token: T, amount: 50_000n, key: 'seed' });
+    const ch = await s.alice.limitSell({ id: 'ch', walletId: 'w1', token: T, amount: 1_000n, priceE18: (10n ** 30n).toString(), slippageBps: 100, chase: { stepBps: 100, maxBps: 400 } });
+    assert.deepEqual(ch.chase, { stepBps: 100, maxBps: 400 }); assert.equal(ch.maxAttempts, 4);
+    const ed = await s.alice.editOrder('alice.ch', { priceE18: (10n ** 31n).toString() }); assert.equal(ed.triggerPriceE18, (10n ** 31n).toString()); assert.equal(ed.status, 'active');
+    await assert.rejects(s.bob.editOrder('alice.ch', { priceE18: '5' }), (e: any) => e.status === 404, 'another user cannot move your trigger');
+    await assert.rejects(s.reader.editOrder('alice.ch', { priceE18: '5' }), (e: any) => e.status === 403, 'a read-only key cannot edit');
+    await assert.rejects(s.alice.editOrder('alice.ch', { priceUsd: '1' }), (e: any) => e.status === 400 && /USD price feed/.test(e.message));
+    const spec: any = await (await fetch(s.url + '/v1/openapi.json')).json(); assert.ok(spec.paths['/v1/orders/{id}'].patch, 'PATCH is in the OpenAPI document');
+  } finally { await s.api.close(); }
+});

@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { Engine, Router, Store, PolicySigner, NATIVE } from '../../packages/core/src/index.ts';
 import type { WalletPolicy } from '../../packages/core/src/index.ts';
 import { randomBytes } from 'node:crypto';
-import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestError, verifySignature, b58decode, looksLikeMint, mintFacts } from '../../packages/sol/src/index.ts';
+import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestError, verifySignature, b58decode, looksLikeMint, mintFacts, compileLegacy, systemTransfer, wireTx } from '../../packages/sol/src/index.ts';
 import type { SolSigner } from '../../packages/sol/src/index.ts';
 import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
 import { Trader } from '../../packages/sdk/src/trader.ts';
@@ -62,7 +62,7 @@ export class SolMainnet {
     const policy: WalletPolicy = { userId: 'u1', chains: ['sol-main'], allowedVenues: this.families, maxPerTx: { [NATIVE]: this.guard.limits.maxTradeLamports }, dailyLimit: { [NATIVE]: this.guard.limits.dailyCapLamports }, destinations: [], deviceSecret: 'local' };
     const store = Store.open(join(this.dir, `engine-${address.slice(0, 8)}.json`));
     const engine = new Engine({ store, chain, signer: new PolicySigner(new Map([[address, 'x']]), new Map([[address, policy]])), router: new Router(chain), platformFeeBps: 0 });
-    const trader = new Trader({ engine, chain, userId: 'u1', venues: this.families, persistDir: join(this.dir, `trader-${address.slice(0, 8)}`) });
+    const trader = new Trader({ engine, chain, userId: 'u1', venues: this.families, persistDir: join(this.dir, `trader-${address.slice(0, 8)}`), usd: this.usdFeed() });
     this.conn = { address, signer, chain, trader, policy, rpc }; this.session = randomBytes(24).toString('base64url');
     // Orders and TWAP slices are evaluated by this loop. While the kill switch is on nothing is evaluated, so nothing new fires. A wallet-signed order needs the browser open to approve each fire.
     this.ticker = setInterval(() => { void this.tickOnce(); }, 2000); (this.ticker as any).unref?.();
@@ -95,6 +95,58 @@ export class SolMainnet {
     return this.tradingKeyInfo();
   }
   /** Connect the saved trading key. Orders then fire on their own while the server runs, within the limits, until the key expires or the kill switch is turned on. */
+  /** Send a little SOL from the signed-in WALLET to the trading key, so the key can trade. This is the one place the terminal moves SOL that is not a swap, so it is deliberately narrow:
+   *  the destination is read from the trading key's own file and is never taken from the request; one funding is at most TRADING_KEY_CAPS.maxTradeLamports (0.05 SOL) and the key's
+   *  balance may never exceed TRADING_KEY_CAPS.maxBalanceLamports (0.5 SOL); it needs a connected wallet that signs in the browser (a key cannot fund itself), the kill switch off, and an
+   *  explicit ack. The transaction is built here, the wallet shows it and signs it, and the signature is verified against these exact bytes before anything is sent. */
+  async fundTradingKey(b: any) {
+    this.needSession(b); const c = this.need();
+    if (!this.remote) throw bad('Fund the trading key from a signed-in wallet. A trading key cannot fund itself.', 409);
+    if (this.guard.killed) throw bad('The kill switch is on. Turn it off to move SOL.', 403);
+    const k = this.readKey(); if (!k) throw bad('Create the trading key first.', 409);
+    if (k.expiresAt < Date.now()) throw bad('The trading key has expired. Move the file away and create a new one.', 409);
+    if (c.address === k.address) throw bad('The signed-in wallet is the trading key itself.', 409);
+    const lamports = this.units(b?.sol, 9, 'amount in SOL'), MIN = 1_000_000n, cap = TRADING_KEY_CAPS;
+    if (lamports < MIN) throw bad('The smallest funding is 0.001 SOL (a new account must hold at least about that much).');
+    if (lamports > cap.maxTradeLamports) throw bad(`One funding is at most ${Number(cap.maxTradeLamports) / 1e9} SOL.`);
+    if (b?.ack !== true) throw bad('Tick the confirmation box first.');
+    const bal = async (a: string) => BigInt((await c.rpc.call<any>('getBalance', [a, { commitment: 'confirmed' }])).value);
+    const keyBal = await bal(k.address); if (keyBal + lamports > cap.maxBalanceLamports) throw bad(`The trading key may hold at most ${Number(cap.maxBalanceLamports) / 1e9} SOL. It holds ${Number(keyBal) / 1e9} now.`);
+    if ((await bal(c.address)) < lamports + 10_000n) throw bad('The wallet does not hold enough SOL for this and the network fee.');
+    const t = await this.transfer(c, k.address, lamports);
+    return { ...t, keyBalanceSol: Number(await bal(k.address).catch(() => keyBal)) / 1e9 };
+  }
+  /** Build one System transfer from the connected signer, have it signed (by the browser wallet or the key), send it and wait for confirmation. Callers check every limit first. */
+  private async transfer(c: NonNullable<SolMainnet['conn']>, to: string, lamports: bigint) {
+    const bh: any = await c.rpc.call('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+    const message = compileLegacy(c.address, [systemTransfer(c.address, to, lamports)], b58decode(bh.value.blockhash));
+    let signature: Uint8Array; try { signature = await c.signer.sign(c.address, message); } catch (e) { if (e instanceof SignRequestError) throw bad(e.message, 409); throw e; }
+    const raw = Buffer.from(wireTx(message, [signature])).toString('base64');
+    let hash: string; try { hash = await c.rpc.call<string>('sendTransaction', [raw, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 3 }]); } catch (e) { throw bad('The network refused the transfer: ' + this.redact((e as Error).message).slice(0, 200), 502); }
+    let state = 'submitted'; for (let i = 0; i < 40; i++) { await new Promise(r => setTimeout(r, 1500)); const s: any = (await c.rpc.call<any>('getSignatureStatuses', [[hash], { searchTransactionHistory: true }])).value[0]; if (s?.err) { state = 'failed'; break; } if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') { state = s.confirmationStatus; break; } }
+    this.histCache = undefined;
+    return { ok: state !== 'failed', state, signature: hash, explorer: `https://solscan.io/tx/${hash}`, from: c.address, to, sol: Number(lamports) / 1e9 };
+  }
+  /** Wallets that sent SOL to the trading key, read from the chain (its last 50 transactions). Only these may receive SOL back from it, so the key can never pay a stranger. */
+  async keyFunders(): Promise<string[]> {
+    const k = this.readKey(); if (!k) return []; const c = this.need(); const out = new Set<string>();
+    const sigs: any[] = await c.rpc.call('getSignaturesForAddress', [k.address, { limit: 50, commitment: 'confirmed' }]);   // 'confirmed', not the default 'finalized': a funding made seconds ago must count
+    for (const s of sigs) { if (s.err) continue; const tx: any = await c.rpc.call('getTransaction', [s.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]).catch(() => null);
+      for (const ix of tx?.transaction?.message?.instructions ?? []) if (ix.program === 'system' && ix.parsed?.type === 'transfer' && ix.parsed.info?.destination === k.address && ix.parsed.info?.source !== k.address) out.add(String(ix.parsed.info.source)); }
+    return [...out];
+  }
+  /** Send all of the trading key's SOL (less the network fee) back to a wallet that funded it. Needs the key connected and an ack. Allowed with the kill switch on: taking money out is always safe.
+   *  Tokens the key holds are not moved here: sell them first. */
+  async tradingKeyReturn(b: any) {
+    this.needSession(b); const c = this.need(); const k = this.readKey();
+    if (!k || c.address !== k.address || this.remote) throw bad('Connect the trading key first (Use trading key). Only the key can send its own SOL.', 409);
+    if (b?.ack !== true) throw bad('Tick the confirmation box first.');
+    const to = String(b?.to ?? ''), funders = await this.keyFunders();
+    if (!funders.includes(to)) throw bad('SOL can only go back to a wallet that funded this key.', 403);
+    const FEE = 5_000n, bal = BigInt((await c.rpc.call<any>('getBalance', [k.address, { commitment: 'confirmed' }])).value);
+    if (bal <= FEE) throw bad('The trading key holds no SOL to return.', 409);
+    return this.transfer(c, to, bal - FEE);
+  }
   async tradingKeyUse() {
     const k = this.readKey(); if (!k) throw bad('create a trading key first', 404); if (k.expiresAt < Date.now()) throw bad('this trading key has expired. Create a new one (move the old file away first, after taking any funds out)', 410);
     const signer = new DevSolSigner(); if (signer.add(k.seed) !== k.address) throw bad('the saved trading key is damaged', 500);
@@ -140,8 +192,15 @@ export class SolMainnet {
 
 
   private async tickOnce() { const c = this.conn; if (c && this.keyExpiry && !this.remote && Date.now() > this.keyExpiry) { await this.drop(); return; }
-    if (!c || this.ticking || this.guard.killed) return; this.ticking = true; try { await c.chain.refresh('venues'); await c.trader.tick(); } catch { /* the next tick retries; a failed evaluation never trades */ } finally { this.ticking = false; } }
+    if (!c || this.ticking || this.guard.killed) return; this.ticking = true; try { this.openSellPolicy(c); await c.chain.refresh('venues'); await c.trader.tick(); } catch { /* the next tick retries; a failed evaluation never trades */ } finally { this.ticking = false; } }
   /** After a restart the engine reloads saved orders; make sure their tokens have venues again. */
+  /** The policy signer's per-tx and daily limits are written in SOL (the native token). A SELL spends the token being sold, which has no SOL-denominated entry, so the signer
+   *  refused every order-fired sell ("exceeds per-tx limit"; seen on mainnet 2026-11-17). Selling tokens you hold is capped by your balance, and the proceeds come back to your own wallet,
+   *  so a token being sold by one of your active sell-side orders gets the same open entry a confirmed market sell gets. BUYS are unchanged: they still count against the SOL limits. */
+  private openSellPolicy(c: { trader: Trader; policy: WalletPolicy }) {
+    const sells = new Set(['limit_sell', 'take_profit', 'stop_loss', 'trailing_stop']);   // a bracket is a take_profit plus a stop_loss
+    for (const o of c.trader.listOrders({ status: 'active' })) if (sells.has(o.kind)) { c.policy.maxPerTx[o.token] = BIG; c.policy.dailyLimit[o.token] = BIG; }
+  }
   private async reloadTokens() { const c = this.conn; if (!c) return; try { await c.chain.refresh('venues'); for (const m of new Set([...c.trader.listOrders({ status: 'active' }).map(o => o.token), ...c.trader.listTwaps().filter(t => !t.done && !t.cancelled).map(() => '')].filter(Boolean))) await c.chain.addToken(m); } catch { /* shown as "no venue" on the order until it works */ } }
   private async decimals(mint: string) { let d = this.decs.get(mint); if (d === undefined) { d = (await mintFacts(this.need().rpc, mint)).decimals ?? 0; this.decs.set(mint, d); } return d; }
   private async tokenBalance(mint: string) { const c = this.need(); const r = await c.rpc.call<any>('getTokenAccountsByOwner', [c.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]); return (r.value as any[]).reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); }
@@ -158,6 +217,48 @@ export class SolMainnet {
       const v = Number(q.outAmount) / 1e6; if (!(v > 0)) return null; this.usdCache = { v, t: Date.now() }; return v;
     } catch { return this.usdCache?.v ?? null; }
   }
+  private holdCache?: { key: string; t: number; out: any };
+  /** Every token the connected wallet holds (classic and Token-2022 accounts), with a read-only Jupiter quote into SOL for the value. Quotes are best effort: a token with no route shows its balance and no value. Cached 60 s. */
+  async holdings(b: any) {
+    this.needSession(b); const c = this.need();
+    if (this.holdCache && this.holdCache.key === c.address && Date.now() - this.holdCache.t < 60_000) return this.holdCache.out;
+    const by = new Map<string, { raw: bigint; dec: number }>();
+    for (const programId of ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']) {
+      const r = await c.rpc.call<any>('getTokenAccountsByOwner', [c.address, { programId }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
+      for (const a of r.value as any[]) { const i = a.account.data.parsed.info, amt = BigInt(i.tokenAmount.amount); if (amt <= 0n) continue; const cur = by.get(i.mint); by.set(i.mint, { raw: (cur?.raw ?? 0n) + amt, dec: i.tokenAmount.decimals }); }
+    }
+    const solUsd = await this.solUsd(), rows: any[] = [];
+    for (const [mint, h] of [...by].slice(0, 25)) {
+      let valueSol: number | null = null;
+      if (rows.length < 12) { try { const q = await fetchJupiterQuote({ inputMint: mint, outputMint: 'So11111111111111111111111111111111111111112', amount: h.raw, slippageBps: 50, timeoutMs: 6000 }); valueSol = Number(q.outAmount) / 1e9; } catch { /* no route: balance only */ } }
+      rows.push({ mint, decimals: h.dec, balanceRaw: h.raw.toString(), balanceTokens: Number(h.raw) / 10 ** h.dec, valueSol, valueUsd: valueSol != null && solUsd ? valueSol * solUsd : null });
+    }
+    rows.sort((x, y) => (y.valueSol ?? -1) - (x.valueSol ?? -1));
+    const out = { address: c.address, solUsd, tokens: rows, truncated: by.size > 25 }; this.holdCache = { key: c.address, t: Date.now(), out }; return out;
+  }
+  private histCache?: { key: string; t: number; out: any };
+  /** The connected wallet's recent transactions, read from the chain (read-only): what each one did to the SOL balance and to token balances. Cached 30 s. */
+  async history(b: any) {
+    this.needSession(b); const c = this.need(), me = c.address;
+    if (this.histCache && this.histCache.key === me && Date.now() - this.histCache.t < 30_000) return this.histCache.out;
+    const sigs: any[] = await c.rpc.call<any>('getSignaturesForAddress', [me, { limit: 20 }]), rows: any[] = [];
+    for (const s of sigs) {
+      let t: any = null; try { t = await c.rpc.call<any>('getTransaction', [s.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]); } catch { /* skip: shown without details */ }
+      const row: any = { signature: s.signature, time: s.blockTime ? s.blockTime * 1000 : null, ok: !s.err, kind: 'Transaction', solDelta: null, feeSol: null, tokens: [] };
+      if (t && t.meta) {
+        const keys: any[] = t.transaction.message.accountKeys, i = keys.findIndex(k => (k.pubkey ?? k) === me);
+        if (i >= 0) row.solDelta = (Number(t.meta.postBalances[i]) - Number(t.meta.preBalances[i])) / 1e9;
+        row.feeSol = Number(t.meta.fee) / 1e9;
+        const by = new Map<string, { pre: bigint; post: bigint; dec: number }>(), add = (list: any[], k: 'pre' | 'post') => { for (const x of list ?? []) if (x.owner === me) { const e = by.get(x.mint) ?? { pre: 0n, post: 0n, dec: x.uiTokenAmount.decimals }; e[k] += BigInt(x.uiTokenAmount.amount); by.set(x.mint, e); } };
+        add(t.meta.preTokenBalances, 'pre'); add(t.meta.postTokenBalances, 'post');
+        for (const [mint, e] of by) { const d = e.post - e.pre; if (d !== 0n) row.tokens.push({ mint, delta: Number(d) / 10 ** e.dec }); }
+        const sd = row.solDelta ?? 0, td = row.tokens.reduce((a: number, x: any) => a + x.delta, 0);
+        row.kind = !row.ok ? 'Failed' : row.tokens.length && td > 0 && sd < 0 ? 'Buy' : row.tokens.length && td < 0 && sd > 0 ? 'Sell' : row.tokens.length ? 'Token transfer' : sd > 0 ? 'SOL received' : sd < 0 ? 'SOL sent' : 'Transaction';
+      } else if (s.err) row.kind = 'Failed';
+      rows.push(row);
+    }
+    const out = { address: me, solUsd: await this.solUsd(), rows }; this.histCache = { key: me, t: Date.now(), out }; return out;
+  }
   /** Price, decimals and the wallet's balance for the order form. */
   async orderContext(b: any) {
     this.needSession(b); const c = this.need(), mint = String(b?.mint ?? '').trim(); if (!looksLikeMint(mint)) throw bad('that is not a Solana mint address');
@@ -166,7 +267,18 @@ export class SolMainnet {
   }
   private orderView(o: any, dec: number) {
     return { id: o.id, kind: o.kind, token: o.token, amount: o.amount.toString(), amountTokens: o.kind === 'limit_buy' ? null : Number(o.amount) / 10 ** dec, budgetSol: o.kind === 'limit_buy' ? Number(o.amount) / 1e9 : null,
-      triggerPriceSol: o.triggerPriceE18 !== undefined ? this.solPerToken(o.triggerPriceE18, dec) : null, trailPct: o.trailBps ? o.trailBps / 100 : null, status: o.status, reason: o.reason ?? null, attempts: o.attempts, oco: o.ocoGroup ?? null, expiresAt: o.expiresAt };
+      triggerPriceSol: o.triggerPriceE18 !== undefined ? this.solPerToken(o.triggerPriceE18, dec) : null, trailPct: o.trailBps ? o.trailBps / 100 : null, status: o.status, reason: o.reason ?? null, attempts: o.attempts, oco: o.ocoGroup ?? null, expiresAt: o.expiresAt,
+      triggerUsd: o.usdPrice !== undefined ? Number(o.usdPrice) : null, slippagePct: o.slippageBps / 100, chase: o.chase ? { stepPct: o.chase.stepBps / 100, maxPct: o.chase.maxBps / 100 } : null, maxAttempts: o.maxAttempts };
+  }
+  // ---- USD triggers come from the SDK (Trader `usd` feed + order.usdPrice): the dollar value is saved on the order itself and the SOL trigger is re-derived from SOL/USD each tick. ----
+  /** The SDK's quote/USD feed: SOL/USD with the time it was observed, so the Trader can refuse a stale rate. */
+  private usdFeed() { return { quoteUsd: async () => { const v = await this.solUsd(); return v && this.usdCache ? { price: v, at: this.usdCache.t } : null; }, quoteDecimals: 9, tokenDecimals: (mint: string) => this.decimals(mint), maxAgeMs: 120_000 }; }
+  /** A dollar price from the page as a plain decimal string (the SDK refuses exponents; JS prints prices below 1e-6 as "1e-7"). Undefined when absent. */
+  private usdStr(v: unknown): string | undefined {
+    if (v === undefined || v === null || v === '') return undefined; const s = String(v).trim();
+    if (/^\d+(\.\d{1,18})?$/.test(s)) return s;   // already plain, at most 18 decimals
+    const n = Number(s); if (!(n > 0) || !Number.isFinite(n)) throw bad('enter a dollar price above zero');
+    const out = n.toFixed(18).replace(/0+$/, '').replace(/\.$/, ''); if (!/[1-9]/.test(out)) throw bad('that dollar price is too small (below 1e-18)'); return out;   // exponent ("1e-7") or more than 18 decimals
   }
   async listOrders(b: any) {
     this.needSession(b); if (!this.conn) return { orders: [], twaps: [], killed: this.guard.killed, signer: null };
@@ -175,30 +287,43 @@ export class SolMainnet {
     return { orders, twaps, killed: this.guard.killed, signer: this.remote ? 'wallet' : 'key', solUsd: await this.solUsd() };
   }
   /** Place a standing order. It spends nothing now: it trades later, by itself, when its trigger is met, within the same limits as a market trade. */
+  /** When the page sends priceUsd (tpUsd / slUsd for a bracket), the trigger is fixed in dollars (see usdFeed); otherwise `price` is SOL per token. */
   async createOrder(b: any) {
     this.needSession(b); const c = this.need(); if (b?.ack !== true) throw bad('placing an order needs ack: true'); if (this.guard.killed) throw new GuardError('the kill switch is on: no new orders', 423);
     const mint = String(b?.mint ?? '').trim(), type = String(b?.type ?? ''); if (!looksLikeMint(mint)) throw bad('that is not a Solana mint address');
     const L = this.guard.limits, slippageBps = Math.round(Number(b?.slippagePct ?? L.maxSlippageBps / 100) * 100); if (!(slippageBps >= 0 && slippageBps <= L.maxSlippageBps)) throw bad(`slippage is above the limit of ${L.maxSlippageBps / 100}%`);
     if ((c.trader.listOrders({ status: 'active' }).length) >= 20) throw bad('too many active orders (20): cancel one first');
     try {
-      await c.chain.refresh('venues'); await c.chain.addToken(mint); const dec = await this.decimals(mint), base = { walletId: c.address, token: mint, slippageBps, ttlS: Math.max(60, Math.min(30, Number(b?.ttlDays ?? 7)) * 86_400) };
+      await c.chain.refresh('venues'); await c.chain.addToken(mint); const dec = await this.decimals(mint), base = { walletId: c.address, token: mint, slippageBps, ttlS: Math.max(60, Math.min(30, Number(b?.ttlDays ?? 7)) * 86_400),
+        // slippage chase (opt-in): +1% per failed attempt, capped at the wallet's maximum slippage, so a chase can never pass the limit you set
+        ...(b?.chase === true ? (slippageBps < L.maxSlippageBps ? { chase: { stepBps: 100, maxBps: L.maxSlippageBps } } : (() => { throw bad(`chase needs a starting slippage below your maximum of ${L.maxSlippageBps / 100}%`); })()) : {}) };
+      const trig = (usd: unknown, sol: unknown, what: string) => { const u = this.usdStr(usd); return u ? { priceUsd: u } : { priceE18: this.priceE18(sol, dec, what) }; };   // dollars when sent, else SOL
       const sellAmount = async () => { const bal = await this.tokenBalance(mint); const raw = b?.pct !== undefined && b?.pct !== '' ? bal * BigInt(Math.round(Number(b.pct) * 100)) / 10_000n : this.units(b?.tokens, dec, 'token amount'); if (raw <= 0n || raw > bal) throw bad(`the wallet holds ${Number(bal) / 10 ** dec} of this token`); return raw; };
-      if (type === 'limit_buy') { const lam = this.units(b?.sol, 9, 'amount in SOL'); if (lam > L.maxTradeLamports) throw bad(`${Number(lam) / 1e9} SOL is above the per-trade limit of ${Number(L.maxTradeLamports) / 1e9} SOL`); return { ok: true, order: this.orderView(await c.trader.limitBuy({ ...base, amount: lam, priceE18: this.priceE18(b?.price, dec, 'price') }), dec) }; }
-      if (type === 'limit_sell') return { ok: true, order: this.orderView(await c.trader.limitSell({ ...base, amount: await sellAmount(), priceE18: this.priceE18(b?.price, dec, 'price') }), dec) };
-      if (type === 'take_profit') return { ok: true, order: this.orderView(await c.trader.takeProfit({ ...base, amount: await sellAmount(), priceE18: this.priceE18(b?.price, dec, 'price') }), dec) };
-      if (type === 'stop_loss') return { ok: true, order: this.orderView(await c.trader.stopLoss({ ...base, amount: await sellAmount(), priceE18: this.priceE18(b?.price, dec, 'price') }), dec) };
+      if (type === 'limit_buy') { const lam = this.units(b?.sol, 9, 'amount in SOL'); if (lam > L.maxTradeLamports) throw bad(`${Number(lam) / 1e9} SOL is above the per-trade limit of ${Number(L.maxTradeLamports) / 1e9} SOL`); return { ok: true, order: this.orderView(await c.trader.limitBuy({ ...base, amount: lam, ...trig(b?.priceUsd, b?.price, 'price') }), dec) }; }
+      if (type === 'limit_sell') return { ok: true, order: this.orderView(await c.trader.limitSell({ ...base, amount: await sellAmount(), ...trig(b?.priceUsd, b?.price, 'price') }), dec) };
+      if (type === 'take_profit') return { ok: true, order: this.orderView(await c.trader.takeProfit({ ...base, amount: await sellAmount(), ...trig(b?.priceUsd, b?.price, 'price') }), dec) };
+      if (type === 'stop_loss') return { ok: true, order: this.orderView(await c.trader.stopLoss({ ...base, amount: await sellAmount(), ...trig(b?.priceUsd, b?.price, 'price') }), dec) };
       if (type === 'trailing_stop') { const bps = Math.round(Number(b?.trailPct) * 100); if (!(bps >= 1 && bps <= 9_999)) throw bad('the trail must be between 0.01% and 99.99%'); return { ok: true, order: this.orderView(await c.trader.trailingStop({ ...base, amount: await sellAmount(), trailBps: bps }), dec) }; }
-      if (type === 'bracket') { const os = await c.trader.bracket({ ...base, amount: await sellAmount(), takeProfitE18: b?.tpPrice ? this.priceE18(b.tpPrice, dec, 'take profit price') : undefined, stopLossE18: b?.slPrice ? this.priceE18(b.slPrice, dec, 'stop loss price') : undefined }); return { ok: true, orders: os.map(o => this.orderView(o, dec)) }; }
+      if (type === 'bracket') { const tpU = this.usdStr(b?.tpUsd), slU = this.usdStr(b?.slUsd);
+        const os = await c.trader.bracket({ ...base, amount: await sellAmount(), takeProfitUsd: tpU, stopLossUsd: slU, takeProfitE18: !tpU && b?.tpPrice ? this.priceE18(b.tpPrice, dec, 'take profit price') : undefined, stopLossE18: !slU && b?.slPrice ? this.priceE18(b.slPrice, dec, 'stop loss price') : undefined }); return { ok: true, orders: os.map(o => this.orderView(o, dec)) }; }
       if (type === 'twap') {
         const side = b?.side === 'sell' ? 'sell' : 'buy', slices = Math.round(Number(b?.slices)), intervalS = Math.round(Number(b?.intervalMin) * 60); if (!(slices >= 2 && slices <= 50)) throw bad('slices must be between 2 and 50'); if (!(intervalS >= 10)) throw bad('the interval must be at least 10 seconds');
         const total = side === 'buy' ? this.units(b?.sol, 9, 'total SOL') : await sellAmount();
         if (side === 'buy') { if (total / BigInt(slices) > L.maxTradeLamports) throw bad(`each slice would be above the per-trade limit of ${Number(L.maxTradeLamports) / 1e9} SOL`); if (total > L.dailyCapLamports) throw bad(`the total is above the daily cap of ${Number(L.dailyCapLamports) / 1e9} SOL`); }
+        if (side === 'sell') { c.policy.maxPerTx[mint] = BIG; c.policy.dailyLimit[mint] = BIG; }   // see openSellPolicy: sells spend the token, not SOL
         const t = await c.trader.twap({ walletId: c.address, token: mint, side, total, slices, intervalS, slippageBps }); return { ok: true, twap: { id: t.id, side: t.side, open: t.open, filled: t.filled, refused: t.refused ?? null } };
       }
       throw bad('unknown order type');
     } catch (e) { if (e instanceof GuardError) throw e; throw bad(this.redact((e as Error).message), (e as any).status ?? 502); }
   }
   cancelOrder(b: any) { this.needSession(b); const c = this.need(), id = String(b?.id ?? ''); if (b?.kind === 'twap') { c.trader.cancelTwap(id); return { ok: true }; } try { c.trader.cancelOrder(id); } catch (e) { throw bad((e as Error).message, 404); } return { ok: true }; }
+  /** Change the trigger price (SOL per token) of an active order. Nothing is signed or spent; the order keeps its tokens and its bracket partner. */
+  async editOrder(b: any) {
+    this.needSession(b); const c = this.need(), id = String(b?.id ?? ''); const o: any = c.trader.getOrder(id); if (!o) throw bad('no such order', 404);
+    const dec = await this.decimals(o.token), usd = this.usdStr(b?.priceUsd); let u: any;   // dollars: fixed in USD from now on; SOL: fixed in SOL again
+    try { u = await c.trader.editOrder(id, usd ? { priceUsd: usd } : { priceE18: this.priceE18(b?.price, dec, 'price') }); } catch (e) { throw bad((e as Error).message, (e as any).status === 503 ? 503 : 409); }
+    return { ok: true, order: this.orderView(u, dec) };
+  }
   private need() { if (!this.conn) throw bad('connect a wallet first', 409); return this.conn; }
   /** Step 1: check limits, find the best route, quote, and simulate a buy. Nothing is signed or sent. */
   async prepare(b: any) {

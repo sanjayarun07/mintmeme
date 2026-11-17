@@ -16,6 +16,6 @@ export function createSimTrader(o = {}) {
     const clockMs = o.clockMs ?? (() => (ms += 1));
     // The practice chain has no clock: blocks are mined on demand so trades confirm, but TIME only moves when YOU move it (chain.time += seconds), which keeps TWAP and order expiry deterministic.
     const advanceChain = () => { const t = chain.time; chain.mine(4); chain.time = t; };
-    const trader = new Trader({ engine, chain, userId, venues: ['uniswap-v2'], clockMs, persistDir: o.persistDir, advanceChain });
+    const trader = new Trader({ engine, chain, userId, venues: ['uniswap-v2'], clockMs, persistDir: o.persistDir, advanceChain, usd: o.usd });
     return { trader, chain, engine, policies, signer };
 }

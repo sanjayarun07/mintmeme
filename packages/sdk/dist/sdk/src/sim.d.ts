@@ -3,6 +3,7 @@
 import { SimChain, PolicySigner, Engine } from '../../core/src/index.ts';
 import type { WalletPolicy } from '../../core/src/index.ts';
 import { Trader } from './trader.ts';
+import type { UsdFeed } from './trader.ts';
 export declare const PRACTICE_TOKEN = "0xMEME";
 export declare function createSimTrader(o?: {
     userId?: string;
@@ -12,6 +13,7 @@ export declare function createSimTrader(o?: {
     platformFeeBps?: number;
     clockMs?: () => number;
     persistDir?: string;
+    usd?: UsdFeed;
 }): {
     trader: Trader;
     chain: SimChain;

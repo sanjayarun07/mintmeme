@@ -9,6 +9,23 @@ import { NATIVE, rep, rev, fileBackend, OrderRunner, BulkRunner, TwapRunner, Sni
 import { SdkError, amount, int, id as idOf } from './wire.js';
 const TERMINAL = new Set(['finalized', 'failed', 'expired']);
 const E18 = 10n ** 18n;
+/** A USD price per whole token as a plain decimal string ("0.0000024"): no exponent, above zero, at most 18 decimals. */
+function usdText(v, what) {
+    const s = typeof v === 'number' ? (Number.isFinite(v) && v > 0 ? v.toFixed(18).replace(/0+$/, '').replace(/\.$/, '') : '') : String(v ?? '').trim();
+    if (!/^\d+(\.\d{1,18})?$/.test(s) || !/[1-9]/.test(s))
+        throw new SdkError('bad_amount', `${what} must be a USD price above zero as a decimal string, e.g. "0.0000024"`);
+    return s;
+}
+/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. Integer maths after one rounding of the rate to 1e-9 USD. */
+export function usdToE18(usd, quoteUsd, quoteDecimals, tokenDecimals) {
+    const rate = BigInt(Math.round(quoteUsd * 1e9));
+    if (rate <= 0n)
+        throw new SdkError('unavailable', 'the quote-token USD price is not usable', undefined, 503);
+    const [w, f = ''] = usd.split('.');
+    const usd18 = BigInt(w + f.padEnd(18, '0'));
+    const quotePerToken18 = usd18 * 10n ** 9n / rate; // whole quote per whole token, x1e18
+    return quotePerToken18 * 10n ** BigInt(quoteDecimals) / 10n ** BigInt(tokenDecimals);
+}
 export class Trader {
     c;
     orders;
@@ -175,6 +192,14 @@ export class Trader {
             maxAttempts: p.maxAttempts === undefined ? d.maxAttempts : int(p.maxAttempts, 'maxAttempts', 1, 10), slippageBps: this.slip(p.slippageBps), venues: this.c.venues, status: 'active', attempts: 0 };
         if (o.token === o.quoteToken)
             throw new SdkError('bad_request', 'token and quote token are the same');
+        if (p.chase) { // slippage chase: validated, capped, and given enough attempts to reach its cap (at most 10)
+            const stepBps = int(p.chase.stepBps, 'chase.stepBps', 10, 1_000), maxBps = int(p.chase.maxBps, 'chase.maxBps', 0, 5_000);
+            if (maxBps <= o.slippageBps)
+                throw new SdkError('bad_request', `chase needs a maximum slippage above the starting ${o.slippageBps / 100}%`);
+            o.chase = { stepBps, maxBps };
+            if (p.maxAttempts === undefined)
+                o.maxAttempts = Math.min(10, Math.max(o.maxAttempts, Math.ceil((maxBps - o.slippageBps) / stepBps) + 1));
+        }
         return o;
     }
     async put(o) {
@@ -188,32 +213,39 @@ export class Trader {
             throw new SdkError('order_refused', e.message, 'Check the wallet balance (orders reserve it) and your plan limit.', 409);
         }
     }
-    /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or lower. */
-    async limitBuy(p) { const o = this.orderBase(p, 'limit_buy'); this.trigger(o, p); return this.put(o); }
-    /** Sell `amount` tokens when the price reaches `priceE18` or higher. */
-    async limitSell(p) { const o = this.orderBase(p, 'limit_sell'); this.trigger(o, p); return this.put(o); }
-    async takeProfit(p) { const o = this.orderBase(p, 'take_profit'); this.trigger(o, p); return this.put(o); }
-    async stopLoss(p) { const o = this.orderBase(p, 'stop_loss'); this.trigger(o, p); return this.put(o); }
+    /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or `priceUsd` or lower. */
+    async limitBuy(p) { const o = this.orderBase(p, 'limit_buy'); await this.trigger(o, p); return this.put(o); }
+    /** Sell `amount` tokens when the price reaches `priceE18` (or `priceUsd`) or higher. */
+    async limitSell(p) { const o = this.orderBase(p, 'limit_sell'); await this.trigger(o, p); return this.put(o); }
+    async takeProfit(p) { const o = this.orderBase(p, 'take_profit'); await this.trigger(o, p); return this.put(o); }
+    async stopLoss(p) { const o = this.orderBase(p, 'stop_loss'); await this.trigger(o, p); return this.put(o); }
     /** Sell when the price has fallen `trailBps` from the highest price seen since the order was placed. */
     async trailingStop(p) { const o = this.orderBase(p, 'trailing_stop'); o.trailBps = int(p.trailBps, 'trailBps', 1, 9_999); return this.put(o); }
     /** Take profit and/or stop loss (and/or trailing stop) on ONE position: when one fires the others are cancelled and the tokens are reserved once. */
     async bracket(p) {
         const legs = [];
         const gid = p.id ? idOf(p.id) : `g-${randomUUID()}`;
-        if (p.takeProfitE18 === undefined && p.stopLossE18 === undefined && p.trailBps === undefined)
-            throw new SdkError('bad_request', 'a bracket needs takeProfitE18, stopLossE18 or trailBps');
-        if (p.takeProfitE18 !== undefined) {
-            const o = this.orderBase(p, 'take_profit', `${gid}:tp`);
-            o.triggerPriceE18 = amount(p.takeProfitE18, 'takeProfitE18');
+        if (p.takeProfitE18 === undefined && p.stopLossE18 === undefined && p.takeProfitUsd === undefined && p.stopLossUsd === undefined && p.trailBps === undefined)
+            throw new SdkError('bad_request', 'a bracket needs takeProfitE18/takeProfitUsd, stopLossE18/stopLossUsd or trailBps');
+        if (p.takeProfitE18 !== undefined && p.takeProfitUsd !== undefined)
+            throw new SdkError('bad_request', 'send takeProfitE18 or takeProfitUsd, not both');
+        if (p.stopLossE18 !== undefined && p.stopLossUsd !== undefined)
+            throw new SdkError('bad_request', 'send stopLossE18 or stopLossUsd, not both');
+        const leg = async (kind, e18, usd, suffix) => {
+            if (e18 === undefined && usd === undefined)
+                return;
+            const o = this.orderBase(p, kind, `${gid}:${suffix}`);
             o.ocoGroup = gid;
+            if (usd !== undefined) {
+                o.usdPrice = usdText(usd, kind === 'take_profit' ? 'takeProfitUsd' : 'stopLossUsd');
+                o.triggerPriceE18 = await this.usdE18(o.token, o.usdPrice);
+            }
+            else
+                o.triggerPriceE18 = amount(e18, kind === 'take_profit' ? 'takeProfitE18' : 'stopLossE18');
             legs.push(o);
-        }
-        if (p.stopLossE18 !== undefined) {
-            const o = this.orderBase(p, 'stop_loss', `${gid}:sl`);
-            o.triggerPriceE18 = amount(p.stopLossE18, 'stopLossE18');
-            o.ocoGroup = gid;
-            legs.push(o);
-        }
+        };
+        await leg('take_profit', p.takeProfitE18, p.takeProfitUsd, 'tp');
+        await leg('stop_loss', p.stopLossE18, p.stopLossUsd, 'sl');
         if (p.trailBps !== undefined) {
             const o = this.orderBase(p, 'trailing_stop', `${gid}:tr`);
             o.trailBps = int(p.trailBps, 'trailBps', 1, 9_999);
@@ -235,7 +267,14 @@ export class Trader {
         }
         return out;
     }
-    trigger(o, p) {
+    async trigger(o, p) {
+        if (p.priceUsd !== undefined) {
+            if (p.priceE18 !== undefined || p.marketCap)
+                throw new SdkError('bad_request', 'send one of priceE18, priceUsd or marketCap');
+            o.usdPrice = usdText(p.priceUsd, 'priceUsd');
+            o.triggerPriceE18 = await this.usdE18(o.token, o.usdPrice);
+            return;
+        }
         if (!p.marketCap) {
             o.triggerPriceE18 = amount(p.priceE18, 'priceE18');
             return;
@@ -243,6 +282,75 @@ export class Trader {
         if (p.priceE18 !== undefined)
             throw new SdkError('bad_request', 'send priceE18 or marketCap, not both');
         o.mcap = { targetE18: amount(p.marketCap.target, 'marketCap.target'), basis: p.marketCap.basis ?? 'circulating', supply: { source: p.marketCap.supplySource, circulating: p.marketCap.circulating === undefined ? undefined : amount(p.marketCap.circulating, 'circulating'), total: p.marketCap.total === undefined ? undefined : amount(p.marketCap.total, 'total') } };
+    }
+    /** Change an active order's trigger: `priceE18` (quote units per token x1e18, the trigger is then fixed in the quote token) or `priceUsd` (fixed in USD, needs TraderConfig.usd).
+     *  Keeps its reservation, attempts and place in a bracket. */
+    async editOrder(orderId, p) {
+        const id = idOf(orderId);
+        const o = this.orders.orders.orders.get(id);
+        if (!o)
+            throw new SdkError('not_found', `no order ${orderId}`, undefined, 404);
+        if ((p.priceE18 === undefined) === (p.priceUsd === undefined))
+            throw new SdkError('bad_request', 'send priceE18 or priceUsd (exactly one)');
+        const before = o.usdPrice;
+        let e18, usd;
+        if (p.priceUsd !== undefined) {
+            usd = usdText(p.priceUsd, 'priceUsd');
+            e18 = await this.usdE18(o.token, usd);
+        }
+        else
+            e18 = amount(p.priceE18, 'priceE18');
+        o.usdPrice = usd; // set before retrigger so its checkpoint saves it; put back if the edit is refused
+        try {
+            return this.orders.retrigger(id, e18);
+        }
+        catch (e) {
+            o.usdPrice = before;
+            if (e instanceof SdkError)
+                throw e;
+            throw new SdkError('bad_request', e.message, undefined, 409);
+        }
+    }
+    /** Quote-token trigger (x1e18, raw units) for a USD price per whole token, at the current quote/USD price. Refuses when that price is missing or stale. */
+    async usdE18(token, usd) {
+        const f = this.c.usd;
+        if (!f)
+            throw new SdkError('bad_request', 'USD triggers need a USD price feed: pass TraderConfig.usd');
+        const q = await f.quoteUsd();
+        const now = (this.c.clockMs ?? Date.now)();
+        if (!q || !(q.price > 0) || now - q.at > (f.maxAgeMs ?? 120_000))
+            throw new SdkError('unavailable', 'no fresh quote-token USD price, so a USD trigger cannot be set now', 'Try again shortly, or set the trigger in the quote token (priceE18).', 503);
+        return usdToE18(usd, q.price, f.quoteDecimals, await f.tokenDecimals(token));
+    }
+    /** Re-derive the quote-token trigger of every active USD order from a fresh quote/USD price. A stale or missing price moves nothing.
+     *  Bracket legs move in the order that keeps take profit above stop loss throughout (falling triggers: stop loss first; rising: take profit first). */
+    async syncUsdTriggers() {
+        const f = this.c.usd;
+        if (!f)
+            return 0;
+        const live = [...this.orders.orders.orders.values()].filter(o => o.status === 'active' && o.usdPrice !== undefined);
+        if (!live.length)
+            return 0;
+        const q = await f.quoteUsd();
+        const now = (this.c.clockMs ?? Date.now)();
+        if (!q || !(q.price > 0) || now - q.at > (f.maxAgeMs ?? 120_000))
+            return 0;
+        const ups = [];
+        for (const o of live)
+            ups.push({ o, e18: usdToE18(o.usdPrice, q.price, f.quoteDecimals, await f.tokenDecimals(o.token)) });
+        const rank = (u) => (u.e18 < (u.o.triggerPriceE18 ?? 0n)) === (u.o.kind === 'stop_loss') ? 0 : 1;
+        let moved = 0;
+        for (const u of ups.sort((a, b) => rank(a) - rank(b)))
+            if (u.e18 !== u.o.triggerPriceE18 && u.o.status === 'active') {
+                try {
+                    this.orders.retrigger(u.o.id, u.e18);
+                    moved++;
+                }
+                catch (e) {
+                    this.emit({ type: 'error', where: `usd ${u.o.id}`, message: e.message });
+                }
+            }
+        return moved;
     }
     cancelOrder(orderId) { const o = this.orders.orders.orders.get(idOf(orderId)); if (!o)
         throw new SdkError('not_found', `no order ${orderId}`, undefined, 404); this.orders.cancel(orderId); return this.orders.orders.orders.get(orderId); }
@@ -330,6 +438,7 @@ export class Trader {
         this.diff();
         return run.summary();
     }
+    listTwaps() { return [...this.twaps.values()].map(r => r.summary()); }
     twapStatus(tid) { const r = this.twaps.get(tid); if (!r)
         throw new SdkError('not_found', `no twap order ${tid}`, undefined, 404); return r.summary(); }
     cancelTwap(tid) { const r = this.twaps.get(tid); if (!r)
@@ -381,7 +490,13 @@ export class Trader {
         if (v.status !== 'active' || !v.spotPriceE18 || !v.supports(token, this.quoteToken) || !(this.c.venues.includes(v.id) || this.c.venues.includes(v.family)))
             continue;
         try {
-            const q = v.quote(this.quoteToken, token, 10n ** 6n);
+            let q;
+            try {
+                q = v.quote(this.quoteToken, token, 10n ** 6n);
+            }
+            catch {
+                q = v.quote(token, this.quoteToken, 10n ** 6n);
+            } /* a one-direction venue (Jupiter) only quotes the way it was built */
             if (q.liquidity > liq) {
                 liq = q.liquidity;
                 best = v.spotPriceE18(token, this.quoteToken);
@@ -412,6 +527,7 @@ export class Trader {
             catch (e) {
                 this.emit({ type: 'error', where, message: e.message });
             } };
+            await run('usd triggers', () => this.syncUsdTriggers());
             await run('orders', () => this.orders.tick());
             for (const [k, b] of this.bulks)
                 if (!b.summary().done && !(this.paused && this.sides.get(`bulk:${k}`) !== 'sell'))

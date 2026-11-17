@@ -216,7 +216,9 @@ Orders are **not** resting on-chain orders. They are watched by the engine and b
    - the price condition is met;
    - the **executable output** is at least `amount x triggerPrice x (1 - maxDeviationBps/10000)`. This stops an order from firing on a thin or manipulated price it could not actually get.
 4. Mark it `fired` (write-ahead checkpoint), put the intent in an outbox, hand it to the engine under key `order:<id>:a<n>`.
-5. Report the result back: finalized releases the reservation; failure retries with the same limits until `maxAttempts` (default 3), then `failed`.
+5. Report the result back: finalized releases the reservation; failure retries with the same limits until `maxAttempts` (default 3), then `failed`. With **chase** (6.5) each retry adds slippage up to a cap; without it, slippage never widens.
+
+Before step 3, orders with a **USD trigger** (6.6) get their quote-token trigger re-derived from the current quote/USD price.
 
 The order **reserves** its balance when placed (buys reserve the quote budget, sells reserve the tokens), so two strategies cannot spend the same funds. Placing fails with `order_refused` if the unreserved balance is too small.
 
@@ -237,7 +239,9 @@ The order **reserves** its balance when placed (buys reserve the quote budget, s
 - Triggers use the pool's **spot** price. Heavy trades or thin liquidity can make the executed price worse than spot; that is what the executable-output check and slippage are for.
 - If a venue cannot report a spot price or cannot quote the order's size, the order is **not evaluated** and `orderStatus(id).notEvaluated` says why. It never guesses.
 - **Market-cap triggers:** you give a target market cap and the supply; the order converts it to a price once at placement. With no known supply the order is `disabled` with the reason.
-- Orders survive restarts if the Trader has a `persistDir`. In-flight trades are always recoverable from the engine store.
+- Orders survive restarts if the Trader has a `persistDir` (or a `state` backend such as Redis). In-flight trades are always recoverable from the engine store. Chase settings and USD triggers are fields of the order, so they are saved and restored with it.
+
+**Editing a trigger.** `editOrder(id, { priceE18 })` or `{ priceUsd }` (HTTP: `PATCH /v1/orders/:id`) moves an **active** order's trigger in place: the reserved balance, attempts and bracket link are kept, nothing is signed. Refused for a non-active order, a trailing stop (no fixed price, cancel and re-place), a market-cap order, a price of zero, and a bracket edit that would put the take profit at or below its stop loss (or the stop loss at or above its take profit). A `priceE18` edit makes the trigger fixed in the quote token again; a `priceUsd` edit makes it fixed in dollars.
 
 ### 6.3 Bulk buy and bulk sell
 
@@ -259,7 +263,29 @@ Trades `total` in `slices` equal parts (2 to 100), one every `intervalS` seconds
 - `jitterPct` (0 to 50) moves each slice by up to that percent of half an interval, fixed per order id so the schedule is reproducible.
 - A TWAP spreads **timing**. It does **not** guarantee an average price. `avgPriceE18` in the status is what was actually achieved.
 
-### 6.5 Sniping and copy trading
+### 6.5 Slippage chase (opt-in, price orders)
+
+`chase: { stepBps, maxBps }` on any price order or bracket. When a fired order's swap fails (typically a revert because the price moved past the slippage between quote and landing), the next attempt uses `slippageBps + attempts x stepBps`, never above `maxBps` and never below the original. Example `slippageBps: 300, chase: { stepBps: 100, maxBps: 500 }`: attempts at 3%, 4%, 5%, 5%. When `maxAttempts` is not given, it is raised so the chase can reach its cap (at most 10). Validation: `stepBps` 10 to 1000, `maxBps` above `slippageBps` and at most 5000.
+
+What it does **not** do: it is not an order-book chase (there is no book on an AMM; a triggered order already takes the pool price). It does not retry a trigger that is no longer met: each retry happens on a later tick only if the condition still holds. TWAP slices do not chase: a slice that cannot go in its window is skipped, as before. Each attempt has its own idempotency key (`order:<id>:a<n>`).
+
+### 6.6 USD triggers (opt-in, needs a price feed)
+
+Prices are compared in the quote token, so a trigger typed in dollars would drift as the quote token (SOL, ETH) moves. Give the Trader a feed and send `priceUsd` (or `takeProfitUsd` / `stopLossUsd` on a bracket) as a **decimal string** of USD per whole token:
+
+```js
+new Trader({ ...config, usd: {
+  quoteUsd: async () => ({ price: 73.5, at: Date.now() }),   // USD per whole quote token, and when it was observed
+  quoteDecimals: 9,                                         // SOL 9, ETH 18
+  tokenDecimals: mint => decimalsOf(mint),
+  maxAgeMs: 120_000,                                        // default
+} });
+await trader.limitSell({ walletId, token, amount, priceUsd: '0.0000024' });
+```
+
+The order stores `usdPrice` and, on every tick, its quote-token trigger is re-derived at the current rate, so it fires when the token's **dollar** price reaches the number. A rate older than `maxAgeMs` moves nothing (the order keeps its last quote-token trigger) and placing or editing a USD trigger is refused with `503 unavailable`. Bracket legs move in the order that keeps take profit above stop loss throughout. Exponent strings (`"1e-7"`) are refused: send `"0.0000001"`. Without a feed, a USD trigger is refused with a message that names `TraderConfig.usd`. The practice server (`apps/api/start.ts`) does not configure a feed.
+
+### 6.7 Sniping and copy trading
 
 - **Sniping** reacts only to **mined** launch events and current pool state. It is always after the launch transaction: no mempool inspection, no front-running. Before buying, the real buy is dry-run; a revert such as "trading not enabled" is waited out, never bypassed. Bounded by `maxSpend` (total per launch), `maxAttempts`, `delayBlocks`, `minLiquidity`, `maxTaxBps`, optional `maxValuation`. Exits (`exit.takeProfitBps`, `stopLossBps`, `trailingStopBps`) become price orders. On a networked chain only the buy is dry-run: honeypots and sell tax are **not** detected before buying; the report states this.
 - **Copy trading** mirrors a leader's confirmed swaps with caps (per leader, per token, daily), cooldown, max positions, exit modes (`proportional`, `full-on-exit`, `full-on-any-sell`, `ignore`), `trackOnly`, buy checks (market cap, liquidity, tax), duplicate-buy and price-impact guards. Attribution is exact: it only sells what it bought for that leader. A reorged leader trade flags the position `orphaned`; it does not sell automatically.
@@ -291,11 +317,13 @@ All amounts are **raw base units as decimal strings** (wei, lamports, token unit
 |---|---|---|
 | `id` | random | Your order id. Same id again returns the existing order. |
 | `walletId`, `token`, `amount` | required | Buy: quote budget. Sell: token amount. |
-| `priceE18` | required unless `marketCap` | Trigger price. |
+| `priceE18` | one of `priceE18` / `priceUsd` / `marketCap` | Trigger price, fixed in the quote token. |
+| `priceUsd` | none | Trigger fixed in USD per whole token, decimal string. Needs `TraderConfig.usd` (6.6). |
 | `marketCap` | none | `{ target, basis: 'circulating'/'fdv', circulating, total, supplySource }` instead of a price. |
 | `trailBps` | required for trailing | 1 to 9999. |
-| `takeProfitE18`, `stopLossE18`, `trailBps` | bracket: at least one | Stop loss must be below take profit. |
+| `takeProfitE18` or `takeProfitUsd`, `stopLossE18` or `stopLossUsd`, `trailBps` | bracket: at least one | Stop loss must be below take profit. |
 | `slippageBps` | 300 | Applied when it fires. |
+| `chase` | none | `{ stepBps, maxBps }`: widen slippage on each failed attempt, capped (6.5). |
 | `ttlS` | 604800 (7 days) | Expiry, 60 to 31 536 000. |
 | `maxDeviationBps` | 1500 | How far below the trigger the executable output may be. 0 to 10000. |
 | `maxAttempts` | 3 | Retries after a failed execution, 1 to 10. |
@@ -354,7 +382,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 | `GET /v1/trades`, `/v1/trades/:key`; `POST /v1/trades/:key/advance` | List, inspect, push a waiting trade |
 | `POST /v1/wallets/:id/cancel-stuck` | Replace a stuck nonce with a no-op |
 | `POST /v1/orders/{limit-buy,limit-sell,take-profit,stop-loss,trailing-stop,bracket}` | Place orders |
-| `GET /v1/orders`, `/v1/orders/:id`; `DELETE /v1/orders/:id` | List, inspect, cancel |
+| `GET /v1/orders`, `/v1/orders/:id`; `PATCH /v1/orders/:id`; `DELETE /v1/orders/:id` | List, inspect, move the trigger (`priceE18` or `priceUsd`), cancel |
 | `POST /v1/bulk/buy`, `/sell`; `GET /v1/bulk/:id` | Bulk |
 | `POST /v1/twap`; `GET`, `DELETE /v1/twap/:id` | TWAP |
 | `POST /v1/alerts`; `DELETE /v1/alerts/:id` | Price alerts |

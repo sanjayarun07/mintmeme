@@ -7,6 +7,7 @@ const FEE_CONFIG_SEED2 = Uint8Array.from([1, 86, 224, 246, 147, 102, 90, 207, 68
 const enc = (s) => new TextEncoder().encode(s);
 const pda = (seeds, program = PUMP_PROGRAM) => findProgramAddress(seeds, program).address;
 const same = (d, o, want) => want.every((b, i) => d[o + i] === b);
+const SYSTEM_ZERO = '11111111111111111111111111111111', WSOL_MINT = 'So11111111111111111111111111111111111111112';
 /** BondingCurve: 8-byte discriminator, then u64 x5 (virtual token, virtual sol, real token, real sol, total supply), bool complete, pubkey creator, bool mayhem, bool cashback (the last two exist on newer accounts). */
 export function decodeCurve(d) {
     if (d.length < 81)
@@ -14,7 +15,7 @@ export function decodeCurve(d) {
     if (!same(d, 0, DISC.curve))
         throw new Error('account is not a pump.fun bonding curve (discriminator mismatch)');
     return { virtualToken: d.readBigUInt64LE(8), virtualSol: d.readBigUInt64LE(16), realToken: d.readBigUInt64LE(24), realSol: d.readBigUInt64LE(32), totalSupply: d.readBigUInt64LE(40), complete: d[48] === 1,
-        creator: base58(d.subarray(49, 81)), mayhem: d.length > 81 ? d[81] === 1 : undefined, cashback: d.length > 82 ? d[82] === 1 : undefined, size: d.length };
+        creator: base58(d.subarray(49, 81)), mayhem: d.length > 81 ? d[81] === 1 : undefined, cashback: d.length > 82 ? d[82] === 1 : undefined, quoteMint: d.length >= 115 ? base58(d.subarray(83, 115)) : undefined, size: d.length };
 }
 /** Global: discriminator, bool initialized, pubkey authority, pubkey fee_recipient, 4 x u64 reserves, u64 fee_basis_points, pubkey withdraw_authority, bool, u64 pool_migration_fee, u64 creator_fee_basis_points, 7 x pubkey fee_recipients. */
 export function decodeGlobal(d) {
@@ -167,6 +168,9 @@ export function untradableReason(curve, mintOwner) {
         return 'mayhem-mode coin: its instructions need accounts this adapter has not verified';
     if (curve.cashback)
         return 'cashback coin: selling needs extra accounts this adapter has not verified';
+    // A curve priced in another token (not SOL) is bought with different accounts: sending a SOL buy to it fails with pump program error 6063 (UnsupportedQuoteMint). All zeros or wrapped SOL means SOL.
+    if (curve.quoteMint !== undefined && curve.quoteMint !== SYSTEM_ZERO && curve.quoteMint !== WSOL_MINT)
+        return `curve is priced in ${curve.quoteMint}, not SOL: this adapter only trades SOL curves (a SOL buy would fail with pump error 6063, UnsupportedQuoteMint)`;
     if (mintOwner !== PROGRAMS.token && mintOwner !== TOKEN_2022)
         return `mint is owned by ${mintOwner}, not the SPL Token or Token-2022 program`;
     if (curve.mayhem === undefined || curve.cashback === undefined)

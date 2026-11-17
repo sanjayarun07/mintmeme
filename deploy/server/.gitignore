@@ -1,0 +1,4 @@
+
+# production server deploy: secrets stay local
+deploy/server/keys.txt
+!deploy/server/.env.example

@@ -43,6 +43,8 @@ export class MemeClient {
     bracket(p) { return this.req('POST', '/v1/orders/bracket', p); }
     orders(q = {}) { return this.req('GET', '/v1/orders' + qs(q)); }
     order(id) { return this.req('GET', `/v1/orders/${enc(id)}`); }
+    /** Move an active order's trigger: priceE18 (quote token) or priceUsd (dollars). */
+    editOrder(id, p) { return this.req('PATCH', `/v1/orders/${enc(id)}`, p); }
     cancelOrder(id) { return this.req('DELETE', `/v1/orders/${enc(id)}`); }
     bulkBuy(p) { return this.req('POST', '/v1/bulk/buy', p); }
     bulkSell(p) { return this.req('POST', '/v1/bulk/sell', p); }

@@ -8,6 +8,10 @@ export interface Order {
   amount: bigint;                       // sell: token amount; buy: quote-token budget
   triggerPriceE18?: bigint;             // quote units per token, 1e18 fixed-point
   trailBps?: number; ocoGroup?: string; expiresAt: number;
+  /** Opt-in slippage chase: each failed attempt retries with stepBps more slippage, never above maxBps. Without it, retries keep the original slippage. */
+  chase?: { stepBps: number; maxBps: number };
+  /** When set, the trigger is fixed in USD per whole token (decimal string) and triggerPriceE18 is re-derived from the live quote/USD price by the Trader. Persisted with the order. */
+  usdPrice?: string;
   maxQuoteAgeMs: number; minLiquidity: bigint; maxDeviationBps: number; maxAttempts: number; slippageBps: number;
   venues: string[];
   mcap?: { targetE18: bigint; basis: 'circulating' | 'fdv'; supply: SupplyInfo };   // converted to price trigger at placement
@@ -15,6 +19,11 @@ export interface Order {
 }
 export interface Snapshot { priceE18: bigint; ts: number; liquidity: bigint; executableOut: (o: Order) => bigint }
 const E18 = 10n ** 18n;
+/** Slippage for the order's next attempt: the original value, or with chase, original + attempts x step, capped at the chase maximum (and never below the original). */
+export function slippageFor(o: Pick<Order, 'slippageBps' | 'attempts' | 'chase'>): number {
+  if (!o.chase) return o.slippageBps;
+  return Math.max(o.slippageBps, Math.min(o.slippageBps + o.attempts * o.chase.stepBps, o.chase.maxBps));
+}
 
 export class OrderManager {
   orders = new Map<string, Order>();
@@ -40,6 +49,21 @@ export class OrderManager {
     o.status = 'active'; o.attempts = 0; this.orders.set(o.id, o); return o;
   }
   cancel(id: string) { const o = this.orders.get(id); if (!o || o.status !== 'active') return; o.status = 'cancelled'; this.maybeRelease(o); }
+  /** Move an active order's trigger price. The reservation, amount, attempts and OCO link are kept. A bracket's take profit must stay above its stop loss.
+   *  Trailing stops have no fixed trigger, and market-cap orders keep their cap target, so neither can be edited this way. */
+  retrigger(id: string, priceE18: bigint) {
+    const o = this.orders.get(id); if (!o) throw new Error(`no order ${id}`);
+    if (o.status !== 'active') throw new Error(`only an active order can be edited (this one is ${o.status})`);
+    if (o.kind === 'trailing_stop') throw new Error('a trailing stop has no fixed trigger price: cancel it and place a new one');
+    if (o.mcap) throw new Error('this order triggers on market cap: cancel it and place a new one');
+    if (priceE18 <= 0n) throw new Error('the trigger price must be above zero');
+    if (o.ocoGroup) for (const s of this.orders.values()) {
+      if (s === o || s.ocoGroup !== o.ocoGroup || s.status !== 'active' || s.triggerPriceE18 === undefined) continue;
+      if (o.kind === 'take_profit' && s.kind === 'stop_loss' && priceE18 <= s.triggerPriceE18) throw new Error('the take profit must stay above the stop loss of the same bracket');
+      if (o.kind === 'stop_loss' && s.kind === 'take_profit' && priceE18 >= s.triggerPriceE18) throw new Error('the stop loss must stay below the take profit of the same bracket');
+    }
+    o.triggerPriceE18 = priceE18; o.reason = 'trigger price edited'; return o;
+  }
   private owner(o: Order) { return o.ocoGroup ? `oco:${o.ocoGroup}` : `order:${o.id}`; }
   private maybeRelease(o: Order) {
     const live = [...this.orders.values()].some(x => x !== o && x.status === 'active' && this.owner(x) === this.owner(o));
@@ -85,7 +109,7 @@ export class OrderManager {
       const sell = o.kind !== 'limit_buy';
       this.run({ idempotencyKey: `order:${o.id}:a${o.attempts}`, userId: o.userId, walletId: o.walletId, chain: o.chain,
         tokenIn: sell ? o.token : o.quoteToken, tokenOut: sell ? o.quoteToken : o.token, amountIn: o.amount, minOut: 0n,
-        slippageBps: o.slippageBps, deadline: this.now() + 120, maxFeeBps: 200, venues: o.venues, origin: 'order' });
+        slippageBps: slippageFor(o), deadline: this.now() + 120, maxFeeBps: 200, venues: o.venues, origin: 'order' });
     }
     return fired;
   }
@@ -95,6 +119,6 @@ export class OrderManager {
     if (ok) { this.res.release(this.owner(o), o.walletId, key); return; }
     o.attempts++;
     if (o.attempts >= o.maxAttempts) { o.status = 'failed'; this.res.release(this.owner(o), o.walletId, key); if (o.ocoGroup) this.claimed.delete(o.ocoGroup); }
-    else { o.status = 'active'; if (o.ocoGroup) this.claimed.delete(o.ocoGroup); }   // same limits, no slippage widening
+    else { o.status = 'active'; if (o.ocoGroup) this.claimed.delete(o.ocoGroup); }   // same limits; slippage widens on the next attempt only if the order opted into chase (see slippageFor)
   }
 }

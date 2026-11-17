@@ -219,7 +219,9 @@ export class Engine {
                     }
                     return false;
                 }
-                const rc = (await chain.receipt(r.tx.hash));
+                const rc = await chain.receipt(r.tx.hash);
+                if (!rc)
+                    return false; // the node found the transaction but cannot give its receipt yet: look again on the next step, never guess
                 if (r.state === 'submitted') {
                     this.go(r, 'observed', 'included');
                     return true;

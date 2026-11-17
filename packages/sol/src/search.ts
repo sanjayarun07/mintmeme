@@ -39,9 +39,9 @@ export async function searchSolTokens(query: string, o: SearchOptions = {}): Pro
   return { hits, errors };
 }
 
-export interface MintFacts { mint: string; exists: boolean; tokenProgram?: string; decimals?: number; supply?: bigint; mintAuthority?: string | null; freezeAuthority?: string | null; warnings: string[] }
+export interface MintSearchFacts { mint: string; exists: boolean; tokenProgram?: string; decimals?: number; supply?: bigint; mintAuthority?: string | null; freezeAuthority?: string | null; warnings: string[] }
 /** On-chain facts for a mint, read with getAccountInfo (SPL and Token-2022 layouts: supply at 36, decimals at 44, authorities as optional keys). Warnings are plain statements, not a safety verdict. */
-export async function mintFacts(rpc: { call<T = any>(m: string, p?: unknown[]): Promise<T> }, mint: string): Promise<MintFacts> {
+export async function mintFacts(rpc: { call<T = any>(m: string, p?: unknown[]): Promise<T> }, mint: string): Promise<MintSearchFacts> {
   const r: any = await rpc.call('getAccountInfo', [mint, { encoding: 'base64', commitment: 'confirmed' }]); const warnings: string[] = [];
   if (!r?.value) return { mint, exists: false, warnings: ['no account with this address exists on this cluster'] };
   const d = Buffer.from(r.value.data[0], 'base64'), owner = String(r.value.owner), classic = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', t22 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';

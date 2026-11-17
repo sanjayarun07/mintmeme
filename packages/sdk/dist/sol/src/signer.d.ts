@@ -1,5 +1,5 @@
 export interface SolSigner {
-    sign(wallet: string, message: Uint8Array): Uint8Array;
+    sign(wallet: string, message: Uint8Array): Uint8Array | Promise<Uint8Array>;
 }
 export declare class DevSolSigner implements SolSigner {
     private keys;

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MINT Solana</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<script>document.write('<link rel="stylesheet" href="/styles.css?v='+Date.now()+'"><link rel="stylesheet" href="/solana.css?v='+Date.now()+'">')</script>
+</head>
+<body class="solpage">
+<a class="skip" href="#main">Skip to content</a>
+<header class="soltop">
+  <a class="brand" href="/solana" aria-label="MINT Solana home"><svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 18 9 6M10 18l6-12M17 18l4-8" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" fill="none"/></svg><b>MINT</b><span class="sep"></span><span class="where">Solana</span></a>
+  <form class="topsearch" id="topsearch" role="search" onsubmit="return false">
+    <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2" fill="none"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <span id="searchslot"></span>
+  </form>
+  <div class="grow"></div>
+  <div class="wchip" id="wchip" aria-live="polite"><span class="dot off"></span><span>Connecting…</span></div>
+  <button class="btn sm" id="killbtn" hidden>Pause trading</button>
+  <span class="pill" id="netpill" data-state="ok"><i></i><span>Terminal connected</span></span>
+  <button class="btn sm ghost" id="themebtn" aria-label="Switch light or dark theme">Theme</button>
+</header>
+<div class="realbar" role="note"><b>Mainnet · real funds.</b> Trades on this page spend real SOL from the wallet you connect. Quotes and simulations are read-only. Every trade needs your confirmation.</div>
+<main id="main" tabindex="-1">
+  <div id="view"></div>
+</main>
+<footer class="solfoot"><span>Prices and routes come from Jupiter quotes and on-chain reads. Search results are third-party data.</span><a href="/">Practice terminal</a></footer>
+<dialog id="dlg"></dialog>
+<div id="toasts" aria-live="polite"></div>
+<script>for(const f of ['solcore','views3','views4','solpro','solboot'])document.write('<script src="/'+f+'.js?v='+Date.now()+'"><\/script>')</script>
+</body>
+</html>

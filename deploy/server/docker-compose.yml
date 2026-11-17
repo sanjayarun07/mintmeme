@@ -1,0 +1,41 @@
+# A local, three-node cluster: Redis (AOF on, password), three identical execution nodes, nginx in front.
+#   cd deploy/server && cp .env.example .env   (set REDIS_PASSWORD), put key lines in ./keys.txt (npm run server:key -- <user>), then:
+#   docker compose up --build
+# The load balancer listens on 127.0.0.1:8080 in plain HTTP. In production terminate TLS at your load balancer (see nginx.conf and docs/PRODUCTION_SERVER.md).
+services:
+  redis:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}"]
+    volumes: ["redis-data:/data"]
+    healthcheck: { test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"], interval: 5s, timeout: 3s, retries: 10 }
+    environment: { REDIS_PASSWORD: "${REDIS_PASSWORD}" }
+
+  node1: &node
+    build: { context: ../.., dockerfile: deploy/server/Dockerfile }
+    environment: &env
+      REDIS_URL: "redis://:${REDIS_PASSWORD}@redis:6379"
+      NODE_PUBLIC_URL: "http://node1:3500"
+      API_KEYS_FILE: /run/memedesk/keys.txt
+      NAMESPACE: memedesk
+      MODE: practice
+      LEASE_TTL_MS: "15000"
+      MAX_USERS_PER_NODE: "500"
+    volumes: ["${KEYS_FILE:-./keys.txt}:/run/memedesk/keys.txt:ro"]
+    depends_on: { redis: { condition: service_healthy } }
+    stop_grace_period: 30s
+    restart: unless-stopped
+  node2:
+    <<: *node
+    environment: { <<: *env, NODE_PUBLIC_URL: "http://node2:3500" }
+  node3:
+    <<: *node
+    environment: { <<: *env, NODE_PUBLIC_URL: "http://node3:3500" }
+
+  lb:
+    image: nginx:1.27-alpine
+    volumes: ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    ports: ["127.0.0.1:${LB_PORT:-8080}:8080"]
+    depends_on: [node1, node2, node3]
+
+volumes:
+  redis-data:
