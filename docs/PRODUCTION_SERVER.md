@@ -111,6 +111,8 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `RATE_PER_SECOND`, `RATE_BURST` | 20, 40 | Per key, **per node**. |
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
 | `SOLANA_SAMPLE_URL` | none | Serve the `/solana` test page from a running terminal (`apps/web`), to this machine only. |
+| `MAX_USERS_PER_APP` | 10000 | End users one app key may create (each is a separate account; section 4.6 of SDK_AND_API.md). |
+| `WEBHOOKS_ALLOW_HTTP` | false | Local testing only: allow http and private hosts as webhook targets. |
 | `MODE` | practice | `practice` (fake funds) or `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`). |
 
 **API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it
@@ -139,7 +141,9 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
   Server-held hot keys in files are not production custody.
 - **No Postgres.** Redis is the only store and the single source of truth. Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.
-- **Rate limits are per node**, not cluster-wide.
+- **Rate limits are per node**, not cluster-wide. With app keys the limit is per end user.
+- **Webhooks are best effort:** retried in memory (2 s, 10 s, 60 s) by the node that runs the end user; lost if that node stops before delivery. Every registered end user is
+  claimed by the sweep like any user, so many idle end users cost node capacity (MAX_USERS_PER_NODE) even without orders.
 - **Redis calls are synchronous** (they block the node's event loop for each call: sub-millisecond on a LAN). Very large user counts per node need measuring.
 - **Key rotation** means editing `API_KEYS_FILE` on every node and rolling them. No key management API.
 - **TLS** is the load balancer's job; the nodes speak plain HTTP on the private network.

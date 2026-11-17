@@ -18,6 +18,8 @@ import { SyncRedis } from '../../packages/core/src/index.ts';
 import type { Backend } from '../../packages/core/src/index.ts';
 import type { Trader } from '../../packages/sdk/src/trader.ts';
 import { UserLease, ownerOf, ownersOf, usersKey } from './lease.ts';
+import { Webhooks, appRoutes, appUsersKey } from './webhooks.ts';
+import type { WebhookOptions } from './webhooks.ts';
 
 /** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
 export interface Account { trader: Trader; stop?: () => void; prepare?: (body: any, path: string) => Promise<any> }
@@ -39,6 +41,10 @@ export interface NodeOptions {
    *  forwarding them there, ONLY to requests from this machine that also name this machine (loopback peer AND loopback Host, so a DNS-rebinding page cannot use it).
    *  That terminal is a single-user, real-funds wallet session: it must never be reachable through the public load balancer. */
   solanaSampleUrl?: string;
+  /** Webhooks for app keys (webhooks.ts): retry timing, http for local tests. */
+  webhooks?: WebhookOptions;
+  /** The most end users one app key may create. Default 10,000. */
+  maxUsersPerApp?: number;
 }
 /** The files and calls of the /solana page (apps/web/solana.html and the scripts it loads). */
 const SOLANA_SAMPLE = new Set(['/solana', '/solana.html', '/solana.css', '/styles.css', '/solcore.js', '/views3.js', '/views4.js', '/solpro.js', '/solboot.js', '/privy.bundle.js']);
@@ -70,10 +76,20 @@ export async function createNode(o: NodeOptions) {
     const x = owned.get(user); if (!x) throw new Error(`${user} is not owned by this node`);
     stopAcct(x.acct); api.endStreams(user); const acct = await o.makeAccount(user, n => x.lease.backend(n)); await acct.trader.resume();
     if (owned.get(user) !== x) { stopAcct(acct); throw new Error('ownership changed while reloading'); }
-    acct.trader.start(1000); acct.trader.on(e => { if (e.type === 'error' && /lease for .* lost/.test(e.message)) drop(user, 'lost'); }); x.acct = acct;
+    acct.trader.start(1000); acct.trader.on(e => { if (e.type === 'error' && /lease for .* lost/.test(e.message)) drop(user, 'lost'); }); x.acct = acct; wire(user, acct.trader);
   };
+  const hooks = new Webhooks(r, o.namespace, { log, ...o.webhooks });
+  /** An app's end users become accounts the first time they call: registered so the sweep keeps their orders watched, up to maxUsersPerApp per app. */
+  const registered = new Set<string>(), perApp = o.maxUsersPerApp ?? 10_000;
+  const register = (user: string): { code: string; message: string; fix: string } | undefined => {
+    const app = user.slice(0, user.indexOf(':')), k = appUsersKey(o.namespace, app);
+    if (!r.cmd('SISMEMBER', k, user)) { if (Number(r.cmd('SCARD', k)) >= perApp) return { code: 'app_user_limit', message: `this app already has ${perApp} users`, fix: 'Ask the operator to raise MAX_USERS_PER_APP.' }; r.cmd('SADD', k, user); r.cmd('SADD', usersKey(o.namespace), user); }
+    registered.add(user); return undefined;
+  };
+  /** Every event of an app's end user goes to the app's webhook (if it set one). Internal error events are not sent. */
+  const wire = (user: string, t: Trader) => t.on(e => { if (e.type !== 'error') void hooks.emit(user, e.type, e); });
   const extra = o.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? (n: string) => x.lease.backend(n) : undefined; }, reload });
-  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: extra, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path) });
+  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: extra, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path), appRoutes: appRoutes(hooks, r, o.namespace) });
 
   /** Take the user's lease and start its Trader from the state in Redis. Concurrent claims for one user share one attempt. */
   const claim = (user: string): Promise<boolean> => {
@@ -88,6 +104,7 @@ export async function createNode(o: NodeOptions) {
         // the awaits above may outlast the TTL or a drain: only keep the user if the lease is still ours and we are not shutting down
         if (draining || !lease.renew()) throw new Error(draining ? 'node is draining' : 'lease expired while starting');
         acct.trader.start(1000);
+        wire(user, acct.trader);
         acct.trader.on(e => { if (e.type === 'error' && /lease for .* lost/.test(e.message)) drop(user, 'lost'); });
         owned.set(user, { lease, acct }); m.claims++; log(`owns ${user} (${owned.size} users)`); return true;
       } catch (e) { stopAcct(acct); lease.release(); log(`could not start ${user}: ${(e as Error).message}`); return false; }
@@ -148,6 +165,7 @@ export async function createNode(o: NodeOptions) {
     '# TYPE memedesk_claims_total counter', `memedesk_claims_total ${m.claims}`,
     '# TYPE memedesk_leases_lost_total counter', `memedesk_leases_lost_total ${m.leasesLost}`,
     '# TYPE memedesk_capacity_refusals_total counter', `memedesk_capacity_refusals_total ${m.refusedNoCapacity}`,
+    '# TYPE memedesk_webhooks_total counter', `memedesk_webhooks_total{result="delivered"} ${hooks.stats.delivered}`, `memedesk_webhooks_total{result="retried"} ${hooks.stats.retried}`, `memedesk_webhooks_total{result="failed"} ${hooks.stats.failed}`,
     '# TYPE memedesk_draining gauge', `memedesk_draining ${draining ? 1 : 0}`, ''].join('\n');
     eld.reset(); return out;
   };
@@ -169,6 +187,7 @@ export async function createNode(o: NodeOptions) {
       m.requests++;
       const user = api.userOf(req);
       if (!user || path === '/v1/health' || path === '/v1/openapi.json') return void api.server.emit('request', req, res);   // unknown keys get the API's own 401
+      if (!registered.has(user) && user.includes(':')) { const refuse = register(user); if (refuse) return json(res, 403, { error: refuse }); }
       if (owned.has(user)) return serveLocal(req, res);
       const owner = ownerOf(r, o.namespace, user);
       if (owner && owner !== o.publicUrl) { if (req.headers[HOP]) return json(res, 503, { error: { code: 'routing_loop', message: 'Ownership is moving between nodes.', fix: 'Retry in a few seconds.' } }, { 'retry-after': '2' }); return toOwner(req, res, owner); }
@@ -184,8 +203,8 @@ export async function createNode(o: NodeOptions) {
     server, owned, metrics: m, sweep, claim,
     listen: (port: number, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))),
     /** Graceful shutdown: stop claiming (after claims in progress settle), stop every Trader, release every lease (others take over at once), close HTTP and Redis. */
-    async drain() { await stopServing(); for (const u of [...owned.keys()]) drop(u, 'released'); await closeHttp(); await api.close().catch(() => {}); r.close(); log('drained'); },
+    async drain() { await stopServing(); hooks.stop(); for (const u of [...owned.keys()]) drop(u, 'released'); await closeHttp(); await api.close().catch(() => {}); r.close(); log('drained'); },
     /** Test hook: stop renewing and serving WITHOUT releasing (what a crashed or frozen node looks like to the others). */
-    async crash() { await stopServing(); for (const x of owned.values()) stopAcct(x.acct); owned.clear(); await closeHttp(); r.close(); },
+    async crash() { await stopServing(); hooks.stop(); for (const x of owned.values()) stopAcct(x.acct); owned.clear(); await closeHttp(); r.close(); },
   };
 }

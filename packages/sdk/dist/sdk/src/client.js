@@ -11,7 +11,7 @@ export class MemeClient {
     async req(method, path, body, headers = {}) {
         const f = this.o.fetch ?? fetch, ctl = new AbortController(), t = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 30_000);
         try {
-            const r = await f(this.o.baseUrl.replace(/\/$/, '') + path, { method, signal: ctl.signal, headers: { authorization: `Bearer ${this.o.apiKey}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : toJson(body) });
+            const r = await f(this.o.baseUrl.replace(/\/$/, '') + path, { method, signal: ctl.signal, headers: { authorization: `Bearer ${this.o.apiKey}`, ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : toJson(body) });
             const j = await r.json().catch(() => ({}));
             if (!r.ok)
                 throw new SdkError(j?.error?.code ?? 'http_' + r.status, j?.error?.message ?? `request failed with ${r.status}`, j?.error?.fix, r.status);
@@ -26,6 +26,15 @@ export class MemeClient {
             clearTimeout(t);
         }
     }
+    /** With an app key: the same client acting for another end user. */
+    forUser(userId) { return new MemeClient({ ...this.o, userId }); }
+    // ── app keys only: the app's webhook (signed POSTs of every end user's events) and its end users ──
+    appWebhook() { return this.req('GET', '/v1/app/webhook'); }
+    /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
+    setAppWebhook(url, secret) { return this.req('PUT', '/v1/app/webhook', secret ? { url, secret } : { url }); }
+    deleteAppWebhook() { return this.req('DELETE', '/v1/app/webhook'); }
+    testAppWebhook() { return this.req('POST', '/v1/app/webhook/test', {}); }
+    appUsers() { return this.req('GET', '/v1/app/users'); }
     overview() { return this.req('GET', '/v1/overview'); }
     // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
     /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
@@ -38,6 +47,9 @@ export class MemeClient {
     linkStart(address) { return this.req('POST', '/v1/wallet/link/start', { address }); }
     linkFinish(address, signatureBase64) { return this.req('POST', '/v1/wallet/link/finish', { address, signature: signatureBase64 }); }
     unlink() { return this.req('DELETE', '/v1/wallet'); }
+    /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */
+    settings() { return this.req('GET', '/v1/settings'); }
+    updateSettings(p) { return this.req('PATCH', '/v1/settings', p); }
     quote(p) { return this.req('POST', '/v1/quote', p); }
     /** `key` becomes the Idempotency-Key: retrying the same key never trades twice. */
     buy(p) { const { key, ...b } = p; return this.req('POST', '/v1/trades/buy', b, key ? { 'idempotency-key': key } : {}); }
@@ -99,3 +111,12 @@ export class MemeClient {
 }
 const enc = encodeURIComponent;
 const qs = (q) => { const p = Object.entries(q).filter(([, v]) => v !== undefined).map(([k, v]) => `${enc(k)}=${enc(String(v))}`).join('&'); return p ? '?' + p : ''; };
+/** For an app's webhook endpoint: true when `signatureHeader` (x-memedesk-signature) matches the RAW request body for `secret` and is at most `toleranceS` old. */
+export async function verifyWebhook(secret, rawBody, signatureHeader, toleranceS = 300, nowS = Math.floor(Date.now() / 1000)) {
+    const m = /^t=(\d+),v1=([0-9a-f]{64})$/.exec(signatureHeader ?? '');
+    if (!m || Math.abs(nowS - Number(m[1])) > toleranceS)
+        return false;
+    const { createHmac, timingSafeEqual } = await import('node:crypto');
+    const want = createHmac('sha256', secret).update(`${m[1]}.${rawBody}`).digest();
+    return timingSafeEqual(want, Buffer.from(m[2], 'hex'));
+}

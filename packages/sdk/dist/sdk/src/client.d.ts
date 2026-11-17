@@ -1,7 +1,9 @@
 import type { Amount, PriceOrderInput, BulkInput, TwapInput, TraderEvent } from './trader.ts';
+/** `userId`: with an APP key, the end user every call acts for (sent as X-User-Id). Use `forUser` to get a client per end user. */
 export interface ClientOptions {
     baseUrl: string;
     apiKey: string;
+    userId?: string;
     fetch?: typeof fetch;
     timeoutMs?: number;
 }
@@ -10,6 +12,14 @@ export declare class MemeClient {
     private o;
     constructor(o: ClientOptions);
     private req;
+    /** With an app key: the same client acting for another end user. */
+    forUser(userId: string): MemeClient;
+    appWebhook(): Promise<any>;
+    /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
+    setAppWebhook(url: string, secret?: string): Promise<any>;
+    deleteAppWebhook(): Promise<any>;
+    testAppWebhook(): Promise<any>;
+    appUsers(): Promise<any>;
     overview(): Promise<any>;
     /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
     swap(p: {
@@ -19,7 +29,8 @@ export declare class MemeClient {
         tokens?: string;
         pct?: number;
         slippagePct?: number;
-        key?: string;
+        key?: string; /** this trade only: true = private (Jito), false = public; absent = your setting */
+        mevProtection?: boolean;
     }): Promise<any>;
     /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
      *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
@@ -41,12 +52,19 @@ export declare class MemeClient {
         };
         id?: string;
         ttlS?: number;
+        mevProtection?: boolean;
     }): Promise<any>;
     /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
     wallet(): Promise<any>;
     linkStart(address: string): Promise<any>;
     linkFinish(address: string, signatureBase64: string): Promise<any>;
     unlink(): Promise<any>;
+    /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */
+    settings(): Promise<any>;
+    updateSettings(p: {
+        mevProtection?: boolean;
+        maxTipSol?: string;
+    }): Promise<any>;
     quote(p: {
         side: 'buy' | 'sell';
         token: string;
@@ -137,4 +155,6 @@ export declare class MemeClient {
     /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
     events(on: (e: TraderEvent) => void, signal?: AbortSignal): Promise<void>;
 }
+/** For an app's webhook endpoint: true when `signatureHeader` (x-memedesk-signature) matches the RAW request body for `secret` and is at most `toleranceS` old. */
+export declare function verifyWebhook(secret: string, rawBody: string, signatureHeader: string, toleranceS?: number, nowS?: number): Promise<boolean>;
 export {};

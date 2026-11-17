@@ -7,6 +7,7 @@
  *    PORT=3500  HOST=127.0.0.1 (0.0.0.0 in a container)  NAMESPACE=memedesk  MODE=practice
  *    LEASE_TTL_MS=15000  MAX_USERS_PER_NODE=300  SWEEP_MS=2000  RATE_PER_SECOND=20  RATE_BURST=40  REDIS_REQUIRE_AOF=true
  *    SOLANA_SAMPLE_URL   optional, e.g. http://127.0.0.1:3000: serve the /solana test page (and its /api/sol/* calls) from that running terminal, to THIS machine only
+ *    MAX_USERS_PER_APP=10000   end users one app key may create;  WEBHOOKS_ALLOW_HTTP=true only for local testing (http and private hosts as webhook targets)
  *  MODE: `practice` (simulated chain, fake funds) or `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY). */
 import { readFileSync } from 'node:fs';
 import { createNode } from './node.ts';
@@ -24,7 +25,7 @@ export function parseKeyFile(text: string): ApiKey[] {
   text.split(/\r?\n/).forEach((line, i) => {
     const s = line.trim(); if (!s || s.startsWith('#')) return;
     const [keyHash, userId, scope = 'trade'] = s.split(':');
-    if (!/^[0-9a-f]{64}$/i.test(keyHash ?? '') || !userId || (scope !== 'trade' && scope !== 'read')) throw new Error(`API_KEYS_FILE line ${i + 1}: expected "sha256hex:userId[:read|trade]" (plain keys are not accepted here)`);
+    if (!/^[0-9a-f]{64}$/i.test(keyHash ?? '') || !userId || (scope !== 'trade' && scope !== 'read' && scope !== 'app')) throw new Error(`API_KEYS_FILE line ${i + 1}: expected "sha256hex:userId[:read|trade|app]" (plain keys are not accepted here)`);
     out.push({ keyHash, userId, scope });
   });
   if (!out.length) throw new Error('API_KEYS_FILE has no keys');
@@ -53,6 +54,7 @@ if (import.meta.main) {
     leaseTtlMs: int('LEASE_TTL_MS', 15_000, 3_000, 300_000), maxUsers: int('MAX_USERS_PER_NODE', 300, 1, 100_000), sweepMs: int('SWEEP_MS', 2000, 200, 60_000),
     rate: { perSecond: int('RATE_PER_SECOND', 20, 1, 10_000), burst: int('RATE_BURST', 40, 1, 20_000) }, requireAof: env.REDIS_REQUIRE_AOF !== 'false',
     solanaSampleUrl: env.SOLANA_SAMPLE_URL || undefined,
+    maxUsersPerApp: int('MAX_USERS_PER_APP', 10_000, 1, 10_000_000), webhooks: { allowHttp: env.WEBHOOKS_ALLOW_HTTP === 'true' },
   }).catch(e => fail((e as Error).message));
   if (env.SOLANA_SAMPLE_URL) console.log(`sample page: http://127.0.0.1:${env.PORT ?? 3500}/solana -> ${env.SOLANA_SAMPLE_URL} (this machine only; 404 for remote requests)`);
   const port = await node.listen(int('PORT', 3500, 1, 65_535), env.HOST ?? '127.0.0.1');

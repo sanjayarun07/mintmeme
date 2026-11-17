@@ -10,7 +10,9 @@ import { SdkError, ID_RE, plain, toJson } from '../../packages/sdk/src/wire.ts';
 import type { Trader } from '../../packages/sdk/src/trader.ts';
 
 /** `key` is the secret; a production server can give `keyHash` (hex SHA-256 of the secret) instead, so the plain key never sits in its config. */
-export interface ApiKey { key?: string; keyHash?: string; userId: string; scope?: 'read' | 'trade'; label?: string }
+/** `scope: 'app'`: one key for an app with many end users (`userId` is the app id; each request names its end user in X-User-Id). */
+export interface ApiKey { key?: string; keyHash?: string; userId: string; scope?: 'read' | 'trade' | 'app'; label?: string }
+const END_USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 export interface ApiOptions {
   keys: ApiKey[]; traderFor: (userId: string) => Trader | undefined;
   /** Rate limit per key: requests per second sustained and burst. Default 20 and 40. */
@@ -20,6 +22,8 @@ export interface ApiOptions {
   now?: () => number;
   /** Host-specific routes (the execution server's wallet linking in MODE=solana-mainnet). Same auth, scope and rate rules as the rest. */
   extraRoutes?: Route[];
+  /** Routes for app keys only, under /v1/app/ (webhook settings, the app's users). `userId` in their context is the app id; there is no Trader. */
+  appRoutes?: Route[];
   /** Runs before every route with the caller's body (a real chain learns the token here, or refuses early with an SdkError). */
   prepare?: (userId: string, body: any, path: string) => Promise<any> | any;
 }
@@ -92,19 +96,38 @@ export function createApi(o: ApiOptions) {
   const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, no) => { let n = 0; const ch: Buffer[] = []; req.on('data', d => { n += d.length; if (n > 256 * 1024) { no(new SdkError('too_large', 'request body is over 256 KB', undefined, 413)); req.destroy(); } else ch.push(d); }); req.on('end', () => { if (!n) return ok({}); try { const j = JSON.parse(Buffer.concat(ch).toString('utf8')); if (j === null || typeof j !== 'object' || Array.isArray(j)) throw 0; ok(j); } catch { no(new SdkError('bad_json', 'the body must be a JSON object', 'Send Content-Type: application/json with an object body.')); } }); req.on('error', no); });
   /** The key a request carries (Authorization: Bearer), or undefined. Hash comparison in constant time. */
   const keyOf = (req: http.IncomingMessage) => { const m = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')); if (!m) return undefined; const h = sha(m[1]); return keys.find(x => timingSafeEqual(x.h, h)); };
+  /** Who a request acts for. A user key: its user. An app key: the end user named in X-User-Id, as the account `<app>:<user>` (keys files cannot hold a colon in a user id,
+   *  so these never collide with plain users); on /v1/app/* the app itself. Each end user is a separate account with its own state, orders and isolation. */
+  const who = (req: http.IncomingMessage, k: { userId: string; scope: string }): { userId?: string; appId?: string; endUser?: string } | { error: true } => {
+    if (k.scope !== 'app') return { userId: k.userId };
+    if (new URL(req.url ?? '/', 'http://x').pathname.startsWith('/v1/app/')) return { appId: k.userId };
+    const u = req.headers['x-user-id']; if (typeof u !== 'string' || !END_USER_RE.test(u)) return { error: true };
+    return { userId: `${k.userId}:${u}`, appId: k.userId, endUser: u };
+  };
+  const appCompiled = (o.appRoutes ?? []).map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://x'), path = url.pathname;
       if (path === '/v1/health') return send(res, 200, { ok: true });
-      if (path === '/v1/openapi.json') return send(res, 200, openapi(rs));
+      if (path === '/v1/openapi.json') return send(res, 200, openapi([...rs, ...(o.appRoutes ?? [])]));
       const k = keyOf(req); if (!k) return send(res, 401, { error: { code: 'unauthorized', message: 'Missing or unknown API key.', fix: 'Send Authorization: Bearer <your key>.' } }, { 'www-authenticate': 'Bearer' });
-      const bk = k.h.toString('hex'), b = buckets.get(bk) ?? { tokens: rate.burst, at: now() }; b.tokens = Math.min(rate.burst, b.tokens + (now() - b.at) / 1000 * rate.perSecond); b.at = now(); buckets.set(bk, b);
+      const p = who(req, k);
+      if ('error' in p) return send(res, 400, { error: { code: 'missing_user', message: 'An app key acts for one of the app\'s end users: name them in the X-User-Id header.', fix: 'Send X-User-Id: <your user id> (1 to 64 letters, digits, dot, dash, underscore).' } });
+      const bk = k.h.toString('hex') + (p.endUser ? ':' + p.endUser : ''), b = buckets.get(bk) ?? { tokens: rate.burst, at: now() }; b.tokens = Math.min(rate.burst, b.tokens + (now() - b.at) / 1000 * rate.perSecond); b.at = now(); buckets.set(bk, b);   // app keys: one budget per end user
       if (b.tokens < 1) return send(res, 429, { error: { code: 'rate_limited', message: 'Too many requests.', fix: `Slow down to ${rate.perSecond} requests per second.` } }, { 'retry-after': '1' }); b.tokens -= 1;
-      const t = o.traderFor(k.userId); if (!t) throw new SdkError('no_account', 'no trading account is set up for this key', undefined, 403);
-      if (!wired.has(t)) { wired.add(t); t.on(e => { const sub = streams.get(k.userId); if (sub) for (const r of sub) r.write(`data: ${toJson(e)}\n\n`); }); }
+      if (path.startsWith('/v1/app/')) {   // app-level routes: the app itself, no end user and no trading account
+        if (k.scope !== 'app') return send(res, 403, { error: { code: 'not_an_app_key', message: 'Only an app key can manage app settings.', fix: 'Use your app key.' } });
+        const ah = appCompiled.find(x => x.r.method === req.method && x.re.test(path)); if (!ah) return send(res, 404, { error: { code: 'not_found', message: `No route ${req.method} ${path}.`, fix: 'See GET /v1/openapi.json for the list of routes.' } });
+        const params = Object.fromEntries(Object.entries(ah.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
+        const body = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
+        return send(res, 200, plain(await ah.r.run({ t: undefined as unknown as Trader, userId: p.appId!, body, params, query: url.searchParams, headers: req.headers })));
+      }
+      const uid = p.userId!;
+      const t = o.traderFor(uid); if (!t) throw new SdkError('no_account', 'no trading account is set up for this key', undefined, 403);
+      if (!wired.has(t)) { wired.add(t); t.on(e => { const sub = streams.get(uid); if (sub) for (const r of sub) r.write(`data: ${toJson(e)}\n\n`); }); }
       if (path === '/v1/events' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' }); res.write(': connected\n\n');
-        const set = streams.get(k.userId) ?? new Set(); set.add(res); streams.set(k.userId, set); const hb = setInterval(() => res.write(': hb\n\n'), 15_000); hb.unref?.();
+        const set = streams.get(uid) ?? new Set(); set.add(res); streams.set(uid, set); const hb = setInterval(() => res.write(': hb\n\n'), 15_000); hb.unref?.();
         req.on('close', () => { clearInterval(hb); set.delete(res); }); return;
       }
       const hit = compiled.find(x => x.r.method === req.method && x.re.test(path));
@@ -112,11 +135,11 @@ export function createApi(o: ApiOptions) {
       if (hit.r.scope === 'trade' && k.scope === 'read') return send(res, 403, { error: { code: 'read_only_key', message: 'This API key is read-only.', fix: 'Use a key with the trade scope for this call.' } });
       const params = Object.fromEntries(Object.entries(hit.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
       let body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
-      if (o.prepare && !(hit.r.path === '/v1/wallet' || hit.r.path.startsWith('/v1/wallet/link'))) body = (await o.prepare(k.userId, body, hit.r.path)) ?? body;   // linking must work while the account cannot trade yet; a host may return a rewritten body (plain units)
-      send(res, 200, plain(await hit.r.run({ t, userId: k.userId, body, params, query: url.searchParams, headers: req.headers })));
+      if (o.prepare && !(hit.r.path === '/v1/wallet' || hit.r.path.startsWith('/v1/wallet/link'))) body = (await o.prepare(uid, body, hit.r.path)) ?? body;   // linking must work while the account cannot trade yet; a host may return a rewritten body (plain units)
+      send(res, 200, plain(await hit.r.run({ t, userId: uid, body, params, query: url.searchParams, headers: req.headers })));
     } catch (e) { fail(res, e); }
   });
   /** End a user's open event streams (their account moved to another node or stopped here); clients reconnect and reach the new owner. */
   const endStreams = (userId: string) => { for (const r of streams.get(userId) ?? []) r.end(); streams.delete(userId); };
-  return { server, routes: rs, userOf: (req: http.IncomingMessage) => keyOf(req)?.userId, endStreams, listen: (port = 0, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))), close: () => { for (const s of streams.values()) for (const r of s) r.end(); return new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); }); } };
+  return { server, routes: rs, userOf: (req: http.IncomingMessage) => { const k = keyOf(req); if (!k) return undefined; const p = who(req, k); return 'error' in p ? undefined : p.userId; }, endStreams, listen: (port = 0, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))), close: () => { for (const s of streams.values()) for (const r of s) r.end(); return new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); }); } };
 }

@@ -190,10 +190,44 @@ await s.prepare(mint); await s.trader.limitBuy({ walletId: userWallet, token: mi
 s.trader.on(e => console.log(e));
 ```
 
+### 4.6 Apps: one key for many users, and webhooks
+
+An app with many users holds **one app key** (`npm run server:key -- <appId> app`, key file line `hash:<appId>:app`) and names the end user on every call in the
+`X-User-Id` header (1 to 64 letters, digits, dot, dash, underscore). Each end user is a separate account, `<appId>:<userId>`, with its own orders, trades, wallet link,
+settings, rate limit (per end user) and failover; one end user can never see another's. End users are created on their first call, up to `MAX_USERS_PER_APP`
+(default 10,000).
+
+```ts
+const app = new MemeClient({ baseUrl, apiKey: APP_KEY });
+const alice = app.forUser('alice');                        // or new MemeClient({ baseUrl, apiKey: APP_KEY, userId: 'alice' })
+await alice.swap({ side: 'buy', mint, sol: '0.01' });
+const { secret } = await app.setAppWebhook('https://api.yourapp.com/hooks/memedesk');   // the secret is shown once
+```
+
+**Webhooks:** every event of every end user (trade, order, bulk, TWAP, alert) is POSTed to the app's URL as
+`{ id, type, appId, userId, at, data }`, signed `x-memedesk-signature: t=<unix s>,v1=<hex HMAC-SHA256(secret, "<t>.<raw body>")>`, with `x-memedesk-event-id`
+(the same on retries: deduplicate on it). Verify with `verifyWebhook(secret, rawBody, header)` from the SDK (it also refuses deliveries older than 5 minutes).
+A non-2xx answer or timeout is retried after 2 s, 10 s and 60 s. Delivery is best effort while the node runs: retries still waiting when a node stops are lost, so
+treat webhooks as notifications and read state through the API. Only https URLs to public hosts are accepted. `POST /v1/app/webhook/test` sends a signed `ping`.
+
 **Priority fees** are on by default (`priority` option; `false` turns them off). Each transaction gets a compute-unit limit from a simulation (units used × 1.2, as
 Jupiter's compute-unit guide recommends; Jupiter's `/build` sets no limit, so the fee would otherwise be charged on up to 1.4M units) and a price from Solana's
 `getRecentPrioritizationFees` for the accounts the trade writes: the 75th percentile, at least 10,000 micro-lamports per unit, and never more than 0.0001 SOL in total per
 transaction. Tune with `priority: { percentile, minMicroLamports, maxLamports }`.
+
+**MEV protection** (off by default; each protected trade pays a small Jito tip). On, a trade is sent privately to Jito's block engine (`sendTransaction` with
+`bundleOnly=true`: never broadcast publicly by Jito, all-or-nothing, a failing trade pays no tip), with a tip from Jito's live tip floor (75th percentile, at least 1,000
+lamports, at most `maxTipLamports`, default 0.0001 SOL) and the `jitodontfront` flag that asks the block engine to keep it first in its bundle. Jito: this "may help reduce
+sandwich attacks but is not guaranteed". It works on Jupiter and pump.fun trades; your minimum output (slippage) still bounds the worst case.
+
+- **Per account:** `createSolanaTrader({ ..., mevProtection: true })`, or `{ enabled, maxTipLamports, tipPercentile, jito: { url /* region */, uuid } }`.
+  Over the API (server in `MODE=solana-mainnet`): `PATCH /v1/settings {"mevProtection": true, "maxTipSol": "0.0001"}` (`maxTipSol` at most 0.001), `GET /v1/settings`;
+  client: `api.updateSettings({ mevProtection: true })`.
+- **Per trade, overrides the account setting:** `mevProtection: true | false` on any trade or order: `api.swap({ side: 'buy', mint, sol: '0.01', mevProtection: true })`,
+  `api.placeOrder({ type: 'stop-loss', mint, pct: 100, priceUsd: '0.000002', mevProtection: true })`, or `trader.buy({ ..., mevProtection: true })`.
+  An order applies it to every fill attempt. TWAP and bulk follow the account setting.
+- **Limits:** Jito allows 1 request per second per IP by default; every block-engine call in one process is spaced to respect it, so many users on one node queue up
+  (a custom limit from Jito, passed as `jito.uuid`, lifts it). A rebroadcast after a skipped block can still expose a transaction (Jito: "uncled blocks").
 
 Defaults: Jupiter and pump.fun only, at most 0.05 SOL per buy and 0.25 SOL of buys per day (`caps` lowers or changes them), sells of held tokens not capped in SOL, SOL/USD
 from a Jupiter quote (`solUsd` replaces it). For many users in one process, share one `PrivyApi` and one `jupiterSolUsd()` across them.
@@ -214,20 +248,6 @@ HTTP request
 ```
 
 ### 5.2 The trade state machine
-
-**MEV protection** (off by default; each protected trade pays a small Jito tip). On, a trade is sent privately to Jito's block engine (`sendTransaction` with
-`bundleOnly=true`: never broadcast publicly by Jito, all-or-nothing, a failing trade pays no tip), with a tip from Jito's live tip floor (75th percentile, at least 1,000
-lamports, at most `maxTipLamports`, default 0.0001 SOL) and the `jitodontfront` flag that asks the block engine to keep it first in its bundle. Jito: this "may help reduce
-sandwich attacks but is not guaranteed". It works on Jupiter and pump.fun trades; your minimum output (slippage) still bounds the worst case.
-
-- **Per account:** `createSolanaTrader({ ..., mevProtection: true })`, or `{ enabled, maxTipLamports, tipPercentile, jito: { url /* region */, uuid } }`.
-  Over the API (server in `MODE=solana-mainnet`): `PATCH /v1/settings {"mevProtection": true, "maxTipSol": "0.0001"}` (`maxTipSol` at most 0.001), `GET /v1/settings`;
-  client: `api.updateSettings({ mevProtection: true })`.
-- **Per trade, overrides the account setting:** `mevProtection: true | false` on any trade or order: `api.swap({ side: 'buy', mint, sol: '0.01', mevProtection: true })`,
-  `api.placeOrder({ type: 'stop-loss', mint, pct: 100, priceUsd: '0.000002', mevProtection: true })`, or `trader.buy({ ..., mevProtection: true })`.
-  An order applies it to every fill attempt. TWAP and bulk follow the account setting.
-- **Limits:** Jito allows 1 request per second per IP by default; every block-engine call in one process is spaced to respect it, so many users on one node queue up
-  (a custom limit from Jito, passed as `jito.uuid`, lifts it). A rebroadcast after a skipped block can still expose a transaction (Jito: "uncled blocks").
 
 Every trade is a record that moves through these states. The record is written to storage **after every step**, and the signed transaction is stored **before** it is sent (write-ahead), so a crash at any point resumes instead of repeating.
 
@@ -477,6 +497,8 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 | `GET /v1/snipes`, `/v1/copies`; `POST` (host-configured) | Sniping and copy trading |
 | `GET /v1/events` | Live events |
 | `GET /v1/wallet`; `POST /v1/wallet/link/start`, `/v1/wallet/link/finish`; `DELETE /v1/wallet` | Execution server in `MODE=solana-mainnet` only: link the user's Privy wallet (section 4.5 A), see whether it may trade now, unlink. Errors: `bad_signature` 401, `not_delegated` 409, `link_expired` 410, `privy_unavailable` 503; trades on an account whose wallet is not active: `wallet_not_active` 409 |
+| `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false) and `maxTipSol` (default 0.0001, at most 0.001). Any trade or order also takes `mevProtection: true|false` for itself |
+| `GET`, `PUT`, `DELETE /v1/app/webhook`; `POST /v1/app/webhook/test`; `GET /v1/app/users` | App keys only (section 4.6): the app's signed webhook and its end users. With an app key every other route needs `X-User-Id` (`missing_user` 400 without it; `app_user_limit` 403 past MAX_USERS_PER_APP; `not_an_app_key` 403 for /v1/app with a user key) |
 
 ---
 
@@ -497,7 +519,6 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
    has been run on a local validator only.
 2. The **Trader and API layer** is verified on the practice chain, an **Ethereum** fork and a **Solana** local validator. Sniping and copy trading through the Trader were not part of those runs (their runners have their own fork and validator reports), and on Solana only the Raydium SOL/USDC pool was used, not Jupiter routes.
 3. **Custody:** Solana has a production-grade option in the SDK (`PrivySolSigner`: the user's own Privy wallet, server signing under a Privy policy), used by `/solana`.
-| `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false) and `maxTipSol` (default 0.0001, at most 0.001). Any trade or order also takes `mevProtection: true|false` for itself |
    The execution server uses it in `MODE=solana-mainnet` (verified on a local validator with two nodes and a Privy stand-in, not yet on mainnet). EVM has no real signer yet (ERC-4337 or Privy smart wallets are the plan, README → Custody plan).
 4. Only **Uniswap-V2-style pools** (Ethereum) and **Raydium AMM v4 / Jupiter routes** (Solana) are supported. No V3, CLMM, DLMM, stable pools or multi-hop routes.
 5. Triggers poll about once a second from pool **spot price**; there is no sub-second reaction, no private mempool and no MEV protection. Gas is not tuned (no fee bumping logic beyond replace-by-fee for cancels).

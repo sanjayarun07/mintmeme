@@ -71,5 +71,5 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
 22. The policy signer authorises with an in-process HMAC stand-in; it is not a security boundary. For Solana the signing key itself can be the user's Privy wallet
     (`PrivySolSigner`), where Privy enforces its own policy; the server's Privy app secret and authorization key are then the secrets to protect (`.env`, never committed).
     EVM has no real signer yet.
-23. API keys are SHA-256 hashes in a file, with no rotation API. The API and nodes speak plain HTTP; TLS belongs at the load balancer.
+23. API keys are SHA-256 hashes in a file, with no rotation API. App keys (one key, many end users named in X-User-Id) and signed webhooks exist; webhooks are best effort (in-memory retries). The API and nodes speak plain HTTP; TLS belongs at the load balancer.
 24. No legal, compliance or KYC analysis exists.
