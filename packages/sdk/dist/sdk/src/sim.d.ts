@@ -1,7 +1,7 @@
 /** A self-contained PRACTICE world for trying the SDK and API without any network: a simulated chain, fixture pools, two funded wallets and a policy signer.
  *  Not a real network and not real money. Production use passes its own Engine and ChainPort (for example EvmRpcChain) to `new Trader(...)`. */
 import { SimChain, PolicySigner, Engine } from '../../core/src/index.ts';
-import type { WalletPolicy } from '../../core/src/index.ts';
+import type { WalletPolicy, Backend } from '../../core/src/index.ts';
 import { Trader } from './trader.ts';
 import type { UsdFeed } from './trader.ts';
 export declare const PRACTICE_TOKEN = "0xMEME";
@@ -14,6 +14,7 @@ export declare function createSimTrader(o?: {
     clockMs?: () => number;
     persistDir?: string;
     usd?: UsdFeed;
+    state?: (name: string) => Backend;
 }): {
     trader: Trader;
     chain: SimChain;

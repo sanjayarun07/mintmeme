@@ -2,7 +2,7 @@
 
 Date: 2026-11-16. This document covers the TypeScript SDK (`packages/sdk`), the HTTP API (`apps/api`), what chains and platforms are supported **today**, what happens in the backend when you send an order, and every parameter that controls execution.
 
-**Read this first.** Everything here has been run on a **practice chain** (a simulator in this repo, fake funds). The SDK and the HTTP API have also been run end to end on a **local fork of Ethereum mainnet** (`npm run verify:trader-fork`, 14/14 checks) and on a **local Solana validator** with the mainnet SOL/USDC Raydium pool cloned (`npm run verify:trader-solana`, 13/13 checks); reports are in `docs/live-verification/`. Nothing has moved real money. See [Supported chains](#2-supported-chains) for the exact level of evidence per chain.
+**Read this first.** Everything here has been run on a **practice chain** (a simulator in this repo, fake funds). The SDK and the HTTP API have also been run end to end on a **local fork of Ethereum mainnet** (14/14 checks) and on a **local Solana validator** with the mainnet SOL/USDC Raydium pool cloned (13/13 checks); those harnesses and reports are in git tag `v0.1.0-full-platform`. The SDK itself has not moved real money; the `/solana` test UI, built on the same engine, has made small mainnet trades (see `KNOWN_LIMITATIONS.md`). See [Supported chains](#2-supported-chains) for the exact level of evidence per chain.
 
 ---
 
@@ -14,7 +14,7 @@ Date: 2026-11-16. This document covers the TypeScript SDK (`packages/sdk`), the 
 | **Trader (SDK)** | One TypeScript object exposing the whole engine: market buy/sell, limit buy/sell, take profit, stop loss, trailing stop, bracket, bulk buy/sell, TWAP, sniping, copy trading, price alerts, portfolio, pause. | `packages/sdk/src/trader.ts` |
 | **Client (SDK)** | The same method names over HTTP, for programs that do not run the engine themselves. | `packages/sdk/src/client.ts` |
 | **HTTP API** | JSON over HTTP with API keys, rate limits, an event stream and an OpenAPI document. | `apps/api` |
-| **Telegram bot, web terminal** | The two user interfaces that already existed; they sit on the same engine. | `apps/telegram`, `apps/web` |
+| **Execution server, Solana test UI** | A horizontally scalable cluster server for the API (`docs/PRODUCTION_SERVER.md`) and the `/solana` real-funds test page. Both sit on the same engine. | `apps/server`, `apps/web` |
 
 The SDK adds **no trading logic**. Every order, bulk leg, TWAP slice, snipe and copy trade becomes an ordinary engine *intent*, so the same safety rules apply to all of them (section 5).
 
@@ -70,7 +70,7 @@ Support means a **chain port** (`ChainPort`) implementation plus a **venue** (a 
 
 | Item | Status |
 |---|---|
-| **Runtime** | Node.js 22. Zero npm dependencies in the core, SDK and API (`indexer/` has its own dependencies and is optional). |
+| **Runtime** | Node.js 22. Zero npm dependencies in the core, SDK, API and server. |
 | **OS** | Developed and tested on macOS. Linux should work (no native code), but it has **not** been run there. Windows is untested. |
 | **Language** | TypeScript source, run directly with `node --experimental-transform-types`. There is no build step and no published npm package yet. |
 | **Interfaces** | TypeScript SDK (in process), HTTP/JSON API with an OpenAPI 3 document, server-sent events, Telegram bot, web terminal. |
@@ -125,7 +125,7 @@ await trader.buy({ walletId: 'w1', token: '0xMEME', amount: 10_000n });
 await trader.trailingStop({ walletId: 'w1', token: '0xMEME', amount: 4_000n, trailBps: 1000 });   // sell if price drops 10% from its peak
 ```
 
-To run against a **real or forked chain**, build the `Engine` the way `apps/web/livemode.ts` does (`EvmRpcChain` + signer + `PolicySigner`) and pass it to `new Trader({ engine, chain, userId, venues: ['uniswap-v2'], persistDir })`. The Trader has been run end to end over `EvmRpcChain` on a mainnet fork and over `SolanaChain` on a local validator (section 2).
+To run against a **real or forked chain**, build the `Engine` the way `apps/web/solmainnet.ts` does for Solana (`SolanaChain` + signer + `PolicySigner`; `EvmRpcChain` for EVM) and pass it to `new Trader({ engine, chain, userId, venues: ['uniswap-v2'], persistDir })`. The Trader has been run end to end over `EvmRpcChain` on a mainnet fork and over `SolanaChain` on a local validator (section 2).
 
 ---
 
@@ -179,7 +179,7 @@ A reverted transaction still costs gas, and the daily-limit charge is **kept** (
 
 The policy signer is a separate component the engine must pass through before any signature. Per wallet it enforces: allowed chains, allowed venues, **per-transaction cap and daily cap per token**, an **automation switch** (revoking it blocks every non-manual origin: orders, bulk, TWAP, snipe, copy), and for transfers a destination allowlist plus an out-of-band device confirmation. A wallet belongs to one user; another user's request for it is refused. Every decision is audited.
 
-> The signer in this repository is an in-process stand-in. A real deployment needs an HSM or MPC service behind the same interface. See [CUSTODY_AND_SIGNING.md](CUSTODY_AND_SIGNING.md).
+> The signer in this repository is an in-process stand-in. A real deployment needs an HSM or MPC service behind the same interface. See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) (Security).
 
 ### 5.5 Idempotency (why retrying is safe)
 
@@ -399,7 +399,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 - **No order can exceed the wallet policy.** A per-transaction cap, daily cap or revoked automation switch fails the trade with `signer policy: ...` no matter which feature sent it.
 - **Fail closed.** If a price, balance, supply or quote cannot be read, the engine waits or refuses; it does not guess.
 - **No mempool games.** There is no front-running, sandwiching or mempool inspection anywhere in the engine.
-- **Restart safety.** With `persistDir` (or `Store.open`), orders, bulk and TWAP state and the engine store are written atomically before each action. After a restart, re-create runners with the same ids and call `trader.resume()`: the same idempotency keys are reused, so nothing is sent twice. Killing the process mid-flight was tested with a real kill on a fork (`npm run verify:kill`).
+- **Restart safety.** With `persistDir` (or `Store.open`), orders, bulk and TWAP state and the engine store are written atomically before each action. After a restart, re-create runners with the same ids and call `trader.resume()`: the same idempotency keys are reused, so nothing is sent twice. Killing the process mid-flight was tested with a real kill on a fork (a SIGKILL test (harness in tag `v0.1.0-full-platform`)).
 
 ---
 
@@ -415,7 +415,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 8. Unaudited: the fee router contract, the whole codebase.
 9. The practice chain has no clock: its **time moves only when the host moves it** (the practice server advances it one second per second). TWAP and order expiry on it are therefore only as realistic as that clock.
 
-See also: [CAPABILITY_MATRIX.md](CAPABILITY_MATRIX.md), [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md), [ARCHITECTURE.md](ARCHITECTURE.md), [CUSTODY_AND_SIGNING.md](CUSTODY_AND_SIGNING.md).
+See also: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md), [PRODUCTION_SERVER.md](PRODUCTION_SERVER.md), [SOLANA_MAINNET_TEST_CHECKLIST.md](SOLANA_MAINNET_TEST_CHECKLIST.md). Earlier design and capability documents are in git tag `v0.1.0-full-platform`.
 
 
 ## Use the SDK outside this repo
