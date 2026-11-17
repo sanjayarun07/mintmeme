@@ -3,8 +3,28 @@
 A standalone, horizontally scalable server for the SDK. It runs the same HTTP API as `apps/api` (every route calls a `Trader` method; see `docs/SDK_AND_API.md`),
 but as a **cluster of identical nodes** that share one Redis. Add nodes to serve more users; lose a node and its users move to the others.
 
-Status: the cluster mechanics (ownership, routing, failover, durability of orders) are built and tested, including in Docker. The only built-in account mode is
-**practice** (simulated chain, fake funds). Real-chain accounts need a signer and key custody that this repository does not have; see "What is not done".
+Status: the cluster mechanics (ownership, routing, failover, durability of orders) are built and tested, including in Docker. Two account modes:
+**practice** (simulated chain, fake funds) and **solana-mainnet** (real funds: each user links their own Privy wallet and the owner node signs through Privy; see
+"Real Solana accounts" below). The real mode has been run on a local validator with two nodes and a Privy stand-in, not yet on mainnet.
+
+## Real Solana accounts (`MODE=solana-mainnet`)
+
+Each node needs, besides the usual settings: `PRIVY_APP_ID`, `PRIVY_APP_SECRET`, `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`, `PRIVY_SOLANA_POLICY_ID` (README → Custody
+plan) and `SOLANA_RPC_URL` (or `ALCHEMY_API_KEY`). A node refuses to start without them.
+
+- **Linking** (per API user, once): `POST /v1/wallet/link/start {address}` returns a one-time message; the user's Privy wallet signs it; `POST /v1/wallet/link/finish
+  {address, signature}`. The signature proves this API user controls the wallet, then the node asks Privy whether the wallet carries the server signer with the policy.
+  Only then is `{address, walletId}` saved under the user in Redis, through the user's lease. `GET /v1/wallet` shows it; `DELETE /v1/wallet` removes it.
+- **Signing:** the owner node runs `createSolanaTrader` (packages/sdk/src/solana.ts) over the user's Redis state. Trades go through `PolicySigner` (0.05 SOL per buy,
+  0.25 SOL per day, ledger in Redis) and then Privy, which applies the policy and signs. No node holds a private key.
+- **Every new owner asks Privy again** before anything is signed (failover, drain, restart). A revoked wallet comes up `active: false` and every trade is refused.
+  If Privy is unreachable, the claim fails and the next sweep retries it.
+- **Before each trade** the node learns the token (its venues) and reads the chain's clock and pools; each tick refreshes pools and learns the tokens of restored orders.
+
+Verified (`npm run verify:server-sol`, report in `docs/live-verification/`, 9 of 9): linking through one node; a market buy in plain units sent to the non-owner node, forwarded,
+signed by the Privy stand-in and landed; the same idempotency key not trading twice; the per-trade cap; a limit order surviving a crash of the owner node, the other node
+asking Privy again, the order edited there and firing by itself; a sell of half the holding in plain units; and a revoked signer failing with nothing sent. `apps/server/realmode.test.ts` covers linking, refusals
+and failover without a chain.
 
 ## How it works
 
@@ -87,7 +107,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `RATE_PER_SECOND`, `RATE_BURST` | 20, 40 | Per key, **per node**. |
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
 | `SOLANA_SAMPLE_URL` | none | Serve the `/solana` test page from a running terminal (`apps/web`), to this machine only. |
-| `MODE` | practice | Only `practice` is built in. |
+| `MODE` | practice | `practice` (fake funds) or `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`). |
 
 **API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it
 (`x-memedesk-node`), so forwarding is visible. The page holds no secrets; the key stays in the browser tab.
@@ -111,8 +131,8 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 ## What is not done (read before trusting it with money)
 
-- **No real-chain accounts.** `accounts.ts` builds practice accounts only. A real deployment needs a factory over `EvmRpcChain` / `SolanaChain` and a signer with real key
-  custody (HSM, KMS or MPC). Server-held hot keys in files are not production custody.
+- **Real accounts: Solana only, not yet on mainnet.** `MODE=solana-mainnet` (above) has been run on a local validator only. EVM still has no real signer.
+  Server-held hot keys in files are not production custody.
 - **No Postgres.** Redis is the only store and the single source of truth. Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.
 - **Rate limits are per node**, not cluster-wide.

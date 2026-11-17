@@ -18,6 +18,10 @@ export interface ApiOptions {
   /** Optional: how the host turns a JSON request into a launch or leader source. Without these, creating snipes and copy configs answers 501 with an explanation (listing still works). */
   makeSnipe?: (t: Trader, body: any) => Promise<unknown> | unknown; makeCopy?: (t: Trader, body: any) => Promise<unknown> | unknown;
   now?: () => number;
+  /** Host-specific routes (the execution server's wallet linking in MODE=solana-mainnet). Same auth, scope and rate rules as the rest. */
+  extraRoutes?: Route[];
+  /** Runs before every route with the caller's body (a real chain learns the token here, or refuses early with an SdkError). */
+  prepare?: (userId: string, body: any, path: string) => Promise<any> | any;
 }
 interface Ctx { t: Trader; userId: string; body: any; params: Record<string, string>; query: URLSearchParams; headers: http.IncomingHttpHeaders }
 export interface Route { method: string; path: string; scope: 'read' | 'trade'; summary: string; body?: string; run: (c: Ctx) => Promise<unknown> | unknown }
@@ -81,7 +85,7 @@ export function createApi(o: ApiOptions) {
   const keys = o.keys.map(k => {
     if (k.keyHash !== undefined) { if (!/^[0-9a-f]{64}$/i.test(k.keyHash)) throw new Error('keyHash must be 64 hex characters (SHA-256)'); return { h: Buffer.from(k.keyHash, 'hex'), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; }
     if (!k.key || k.key.length < 16) throw new Error('API keys must be at least 16 characters'); return { h: sha(k.key), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; });
-  const rs = routes(o), compiled = rs.map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
+  const rs = [...routes(o), ...(o.extraRoutes ?? [])], compiled = rs.map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
   const buckets = new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new WeakSet<Trader>();   // per Trader: a user re-created on this node gets its new Trader wired
   const send = (res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(typeof body === 'string' ? body : toJson(body)); };
   const fail = (res: http.ServerResponse, e: unknown) => { if (e instanceof SdkError) return send(res, e.status || 400, { error: e.toJSON() }); send(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the server log.' } }); console.error('[api] internal error:', (e as Error)?.message); };
@@ -107,7 +111,8 @@ export function createApi(o: ApiOptions) {
       if (!hit) { const other = compiled.some(x => x.re.test(path)); return send(res, other ? 405 : 404, { error: { code: other ? 'method_not_allowed' : 'not_found', message: other ? `${req.method} is not allowed here.` : `No route ${path}.`, fix: 'See GET /v1/openapi.json for the list of routes.' } }); }
       if (hit.r.scope === 'trade' && k.scope === 'read') return send(res, 403, { error: { code: 'read_only_key', message: 'This API key is read-only.', fix: 'Use a key with the trade scope for this call.' } });
       const params = Object.fromEntries(Object.entries(hit.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
-      const body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
+      let body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
+      if (o.prepare && !(hit.r.path === '/v1/wallet' || hit.r.path.startsWith('/v1/wallet/link'))) body = (await o.prepare(k.userId, body, hit.r.path)) ?? body;   // linking must work while the account cannot trade yet; a host may return a rewritten body (plain units)
       send(res, 200, plain(await hit.r.run({ t, userId: k.userId, body, params, query: url.searchParams, headers: req.headers })));
     } catch (e) { fail(res, e); }
   });

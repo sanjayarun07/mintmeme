@@ -82,4 +82,6 @@ export function createSolServer(o: { stateDir?: string } = {}) {
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 3000);
   createSolServer().listen(port, '127.0.0.1', () => console.log(`Solana test UI on http://localhost:${port}/solana (mainnet, real funds; this machine only, single user)`));
+  // automatic trading that was on before this restart resumes once Privy confirms the wallet still allows it
+  void solMain().then(m => m.resumeAutomatic()).then(r => { if (r !== 'none') console.log(`automatic trading after restart: ${r}`); }, e => console.error('[solana] resume failed:', (e as Error).message));
 }

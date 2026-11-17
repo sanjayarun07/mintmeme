@@ -540,7 +540,14 @@ export class Trader {
             return;
         this.busy = true;
         try {
-            await this.c.advanceChain?.();
+            // fresh chain state first: if it cannot be read, skip this pass (deciding on stale prices could fire an order wrongly); the next pass retries
+            try {
+                await this.c.advanceChain?.();
+            }
+            catch (e) {
+                this.emit({ type: 'error', where: 'chain', message: e.message });
+                return;
+            }
             const run = async (where, f) => { try {
                 await f();
             }

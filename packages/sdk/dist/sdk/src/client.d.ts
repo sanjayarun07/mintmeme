@@ -11,6 +11,42 @@ export declare class MemeClient {
     constructor(o: ClientOptions);
     private req;
     overview(): Promise<any>;
+    /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
+    swap(p: {
+        side: 'buy' | 'sell';
+        mint: string;
+        sol?: string;
+        tokens?: string;
+        pct?: number;
+        slippagePct?: number;
+        key?: string;
+    }): Promise<any>;
+    /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
+     *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
+    placeOrder(p: {
+        type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket';
+        mint: string;
+        sol?: string;
+        tokens?: string;
+        pct?: number;
+        priceUsd?: string | number;
+        price?: string;
+        trailPct?: number;
+        tpUsd?: string;
+        slUsd?: string;
+        slippagePct?: number;
+        chase?: {
+            stepBps: number;
+            maxBps: number;
+        };
+        id?: string;
+        ttlS?: number;
+    }): Promise<any>;
+    /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
+    wallet(): Promise<any>;
+    linkStart(address: string): Promise<any>;
+    linkFinish(address: string, signatureBase64: string): Promise<any>;
+    unlink(): Promise<any>;
     quote(p: {
         side: 'buy' | 'sell';
         token: string;

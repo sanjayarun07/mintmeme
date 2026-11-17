@@ -4,7 +4,7 @@
  *  - The server listens on 127.0.0.1 for one user. Sessions live in memory: a restart signs the user out (orders are saved and resume with the next signer).
  *  - Trades run through the SDK engine: write-ahead record, policy signer (per-trade and daily caps, ledger on disk), simulation before signing, confirmation tracking.
  *  Checked on a local validator with fake funds (npm run verify:sol-guard) and with small real trades on mainnet (docs/KNOWN_LIMITATIONS.md). */
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Engine, Router, Store, PolicySigner, NATIVE, MemoryLedger, writeAtomic } from '../../packages/core/src/index.ts';
 import type { SpentLedger } from '../../packages/core/src/index.ts';
@@ -99,9 +99,26 @@ export class SolMainnet {
     if (!this.remote) throw bad('Sign in with your Privy wallet first.', 409);
     let d; try { d = await new PrivyApi(cfg).delegation(c.address); } catch (e) { throw bad((e as Error).message, (e as any).status === 503 ? 503 : 502); }
     if (!d.ok) throw bad(d.why, 409);
-    const address = c.address; await this.drop(); this.capLimits();
-    this.attach(address, new PrivySolSigner(new PrivyApi(cfg), new Map([[address, d.walletId]]))); this.privy = true;
+    const address = c.address; await this.drop(); this.startPrivy(cfg, address, d.walletId);
+    writeFileSync(this.autoFile(), JSON.stringify({ address, walletId: d.walletId, since: Date.now() }), { mode: 0o600 });   // so a restart resumes (see resumeAutomatic)
     return { ...(await this.status()), __setSession: this.session };
+  }
+  private startPrivy(cfg: PrivyConfig, address: string, walletId: string) { this.capLimits(); this.attach(address, new PrivySolSigner(new PrivyApi(cfg), new Map([[address, walletId]]))); this.privy = true; }
+  /** Which wallet had automatic trading on. Holds no key: only the address and its Privy wallet id. Removed when automatic trading ends on purpose (any disconnect). */
+  private autoFile() { return join(this.dir, 'automatic.json'); }
+  private resumeTimer?: ReturnType<typeof setTimeout>;
+  /** After a restart: if automatic trading was on, ask Privy again whether the wallet still carries this app's signer and policy, and if so reconnect it so saved orders
+   *  keep firing without anyone signing in. A definite no (the user revoked it, or the policy changed) ends it and removes the file; Privy being unreachable retries in a minute.
+   *  Returns what happened, for the log. */
+  async resumeAutomatic(retryMs = 60_000): Promise<'none' | 'resumed' | 'revoked' | 'retrying'> {
+    clearTimeout(this.resumeTimer); let saved: { address: string; walletId: string };
+    try { saved = JSON.parse(readFileSync(this.autoFile(), 'utf8')); } catch { return 'none'; }
+    const cfg = privyConfig(); if (!cfg || this.conn) return 'none';
+    let d; try { d = await new PrivyApi(cfg).delegation(saved.address); }
+    catch { this.resumeTimer = setTimeout(() => { void this.resumeAutomatic(retryMs); }, retryMs); (this.resumeTimer as any).unref?.(); return 'retrying'; }
+    if (this.conn) return 'none';   // someone signed in while Privy was being asked
+    if (!d.ok || d.walletId !== saved.walletId) { rmSync(this.autoFile(), { force: true }); return 'revoked'; }
+    this.startPrivy(cfg, saved.address, d.walletId); return 'resumed';
   }
   private needSession(b: any) { if (this.session && b?.__session !== this.session) throw bad('sign in again: this browser has no active wallet session', 401); }
 
@@ -211,6 +228,8 @@ export class SolMainnet {
     if (sig.length !== 64 || !verifySignature(address, new TextEncoder().encode(n.message), sig)) throw bad('the signature does not match this address', 401);
     // A fresh wallet signature proves the user is here: it replaces whatever is connected (for example the trading key started from another browser or address,
     // whose session cookie this browser does not have). Saved orders stay on disk and resume when that signer is connected again.
+    // Signing in with the wallet that is trading automatically (for example after a restart resumed it) keeps automatic trading and gives this browser its session.
+    if (this.conn && this.privy && this.conn.address === address) { this.session = randomBytes(24).toString('base64url'); this.rememberWallet(address); return { ...(await this.status()), __setSession: this.session }; }
     if (this.conn) await this.drop();
     const remote = new RemoteSolSigner(); this.attach(address, remote); this.remote = remote; this.rememberWallet(address); return { ...(await this.status()), __setSession: this.session };
   }
@@ -223,7 +242,7 @@ export class SolMainnet {
   submitSign(b: any) { this.needSession(b); if (!this.remote) throw bad('no wallet is waiting to sign', 409); try { this.remote.submit(String(b?.id ?? ''), Uint8Array.from(Buffer.from(String(b?.signature ?? ''), 'base64'))); } catch (e) { throw bad((e as Error).message, e instanceof SignRequestError ? 422 : 400); } return { ok: true }; }
   rejectSign(b: any) { this.needSession(b); this.remote?.reject(String(b?.id ?? '')); return { ok: true }; }
   async disconnect(b?: any) { this.needSession(b); return this.drop(); }
-  private async drop() { this.keyExpiry = undefined; this.privy = false; if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
+  private async drop() { if (this.privy) rmSync(this.autoFile(), { force: true }); clearTimeout(this.resumeTimer); this.keyExpiry = undefined; this.privy = false; if (this.ticker) clearInterval(this.ticker); this.ticker = undefined; this.remote?.cancelAll(); this.remote = undefined; this.conn = undefined; this.session = undefined; return { ...(await this.status()), __setSession: '' }; }
   /** Turning the kill switch ON never needs a session (it is the emergency stop). Turning it off does. */
   killSwitch(on: boolean, b?: any) { if (!on) this.needSession(b); this.guard.setKill(!!on); return this.status(b); }
 

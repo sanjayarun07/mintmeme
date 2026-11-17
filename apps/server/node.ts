@@ -13,13 +13,14 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createApi } from '../api/server.ts';
-import type { ApiKey } from '../api/server.ts';
+import type { ApiKey, Route } from '../api/server.ts';
 import { SyncRedis } from '../../packages/core/src/index.ts';
 import type { Backend } from '../../packages/core/src/index.ts';
 import type { Trader } from '../../packages/sdk/src/trader.ts';
 import { UserLease, ownerOf, ownersOf, usersKey } from './lease.ts';
 
-export interface Account { trader: Trader; stop?: () => void }
+/** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
+export interface Account { trader: Trader; stop?: () => void; prepare?: (body: any, path: string) => Promise<any> }
 export interface NodeOptions {
   redisUrl: string; namespace: string;
   /** How OTHER nodes reach this one (http://, e.g. http://10.0.3.7:3500). Must be routable from the other nodes. */
@@ -27,6 +28,8 @@ export interface NodeOptions {
   keys: ApiKey[];
   /** Build a user's Trader over the given durable state. Called on the node that just took the user's lease. */
   makeAccount: (userId: string, state: (name: string) => Backend) => Account | Promise<Account>;
+  /** Extra API routes that need the owner node's durable state for the user and a way to rebuild its account (MODE=solana-mainnet: wallet linking, solaccount.ts). */
+  extraRoutes?: (h: { state: (userId: string) => ((name: string) => Backend) | undefined; reload: (userId: string) => Promise<void> }) => Route[];
   leaseTtlMs?: number; maxUsers?: number; sweepMs?: number;
   /** Refuse a Redis without AOF (a Redis crash could lose recent checkpoints). Default true. */
   requireAof?: boolean;
@@ -61,8 +64,16 @@ export async function createNode(o: NodeOptions) {
   const owned = new Map<string, { lease: UserLease; acct: Account }>(); const claiming = new Map<string, Promise<boolean>>();
   const m = { requests: 0, proxied: 0, proxyErrors: 0, claims: 0, leasesLost: 0, released: 0, refusedNoCapacity: 0 };
   let draining = false;
-  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate });
   const stopAcct = (a: Account | undefined) => { try { a?.trader.stop(); a?.stop?.(); } catch { /* stopping must never throw out of a loop */ } };
+  /** Rebuild an owned user's account from Redis (after its wallet link changed). The lease stays; the old Trader stops before the new one reads the state. */
+  const reload = async (user: string) => {
+    const x = owned.get(user); if (!x) throw new Error(`${user} is not owned by this node`);
+    stopAcct(x.acct); api.endStreams(user); const acct = await o.makeAccount(user, n => x.lease.backend(n)); await acct.trader.resume();
+    if (owned.get(user) !== x) { stopAcct(acct); throw new Error('ownership changed while reloading'); }
+    acct.trader.start(1000); acct.trader.on(e => { if (e.type === 'error' && /lease for .* lost/.test(e.message)) drop(user, 'lost'); }); x.acct = acct;
+  };
+  const extra = o.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? (n: string) => x.lease.backend(n) : undefined; }, reload });
+  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: extra, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path) });
 
   /** Take the user's lease and start its Trader from the state in Redis. Concurrent claims for one user share one attempt. */
   const claim = (user: string): Promise<boolean> => {

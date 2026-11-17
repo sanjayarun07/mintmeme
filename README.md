@@ -154,9 +154,10 @@ The engine still builds, sends and confirms every trade, and it checks each sign
 Tests:
 - `packages/sol/test/privysigner.test.ts` covers request signing, policy refusals, a revoked signer and a tampered transaction.
 - `npm run verify:sol-guard`, checks P1 to P7, uses a local stand-in for Privy on the validator.
+- `apps/web/test/privyresume.test.ts` covers a restart: it resumes only while Privy still allows it, retries while Privy is unreachable, and never resumes after Stop.
 - Mainnet, 2026-11-17: a 0.005 SOL Bonk buy through Jupiter, signed by real Privy under this policy with no wallet prompt, finalized as tx `5HyLiXhuMp6fa7ocCa1s85xfc1CyFsNycbCQaq9nnGZC1FDDd3yKJ8Sn5HK4GEk9AXYTNW8nj3tk1seoTW88rxej`. The first try, with the rules on `signAndSendTransaction`, was refused by Privy and nothing was sent. A standing order (limit buy of 0.005 SOL with a USD trigger) then fired by itself, was signed by Privy and landed as tx `2TiNZtupHL8Cen3JLQCuwpGdV9fD64owbTkqZhDP7MVm9NpjnnMaHpGAuypwbnZaFXB2VHNb3sp1C8Hr5nmHJgcp`.
 
-Current state of this app (checked 2026-11-17, read-only): TEE enabled; no keys, no policies; smart wallets off; development mode.
+Current state of this app (checked 2026-11-17): TEE enabled; one authorization key; policy `memedesk-solana-trading` with its three rules on `signTransaction`; smart wallets off; development mode.
 
 **B. EVM via ERC-4337, if not using Privy smart wallets:** choose the smart-account implementation (for example ZeroDev Kernel, Safe with ERC-7579 modules,
 Biconomy Nexus or Alchemy Account Kit), a bundler and paymaster provider (for example Pimlico, ZeroDev, Alchemy or Biconomy; their API key goes into `.env` as
@@ -164,11 +165,10 @@ Biconomy Nexus or Alchemy Account Kit), a bundler and paymaster provider (for ex
 Account, factory and entry-point addresses come from the providers' official pages, never guessed.
 
 **C. What gets built once A is done** (each behind tests on a local validator or fork first, then small real amounts that you approve):
-- `/solana`: an "Allow automatic trading" button (you approve adding the server signer with the policy once) and a "Revoke" button; orders then fire unattended
-  through Privy, and the trading key retires.
-- Execution server: `MODE=solana-mainnet` with a `realAccount` factory that signs through Privy within the policy, so `/console` and `MemeClient` can use real accounts.
+- `/solana` automatic trading: **done** (above). It also resumes by itself after a server restart, once Privy confirms the wallet still allows it.
+- Execution server: `MODE=solana-mainnet`: **built**. Each API user links their Privy wallet (`/v1/wallet/link/*`) and the owner node signs through Privy (docs/PRODUCTION_SERVER.md, docs/SDK_AND_API.md 4.5). Run on a local validator with two nodes; not yet on mainnet.
 
-Until then, the server stays practice-only, and the `/solana` UI's wallet sign-in and capped trading key are the real-funds paths.
+Real funds so far: the `/solana` UI (wallet sign-in, Privy automatic trading, the capped trading key) on mainnet; the execution server's real mode on a local validator.
 
 ## Test and verify
 
@@ -176,7 +176,8 @@ Until then, the server stays practice-only, and the `/solana` UI's wallet sign-i
 |---|---|---|
 | `npm run setup:check` | Which parts are configured: `.env` keys (values never printed), Redis and its AOF, Privy bundle, Privy signing keys and policies, test tools | – |
 | `npm test` | Unit, HTTP, cluster and server tests (379) | Redis for the cluster tests |
-| `npm run verify:sol-guard` | The `/solana` back end on a local Solana validator, fake SOL: limits, kill switch, wallet sign-in and signing, orders, TWAP, trading key fund, use and return (55 checks) | `solana-test-validator`, `ALCHEMY_API_KEY` |
+| `npm run verify:sol-guard` | The `/solana` back end on a local Solana validator, fake SOL: limits, kill switch, wallet sign-in and signing, orders, TWAP, trading key fund, use and return, Privy automatic trading with a Privy stand-in (62 checks) | `solana-test-validator`, `ALCHEMY_API_KEY` |
+| `npm run verify:server-sol` | The execution server in `MODE=solana-mainnet`: two nodes, local Redis, a local Solana validator and a Privy stand-in: linking, a forwarded buy and a sell in plain units, idempotency, caps, an order surviving an owner crash, revocation (9 checks) | `solana-test-validator`, Redis, `ALCHEMY_API_KEY` |
 | `npm run verify:evm` | The SDK `Trader` and HTTP API on a local Ethereum mainnet fork, real Uniswap V2 WETH/USDC pool, fake ETH: market buy and sell with approval, orders, bulk, TWAP, restart | `anvil`, `ALCHEMY_API_KEY` |
 | `npm run server:loadtest` | Throughput, latency, event-loop delay with standing orders, failover with many users (`USERS`, `NODES`, `SECONDS`, `CONCURRENCY`) | Redis |
 | `npm run bench` | In-process engine benchmark (not network latency) | – |

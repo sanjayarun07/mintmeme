@@ -27,6 +27,17 @@ export class MemeClient {
         }
     }
     overview() { return this.req('GET', '/v1/overview'); }
+    // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
+    /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
+    swap(p) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
+    /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
+     *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
+    placeOrder(p) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
+    /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
+    wallet() { return this.req('GET', '/v1/wallet'); }
+    linkStart(address) { return this.req('POST', '/v1/wallet/link/start', { address }); }
+    linkFinish(address, signatureBase64) { return this.req('POST', '/v1/wallet/link/finish', { address, signature: signatureBase64 }); }
+    unlink() { return this.req('DELETE', '/v1/wallet'); }
     quote(p) { return this.req('POST', '/v1/quote', p); }
     /** `key` becomes the Idempotency-Key: retrying the same key never trades twice. */
     buy(p) { const { key, ...b } = p; return this.req('POST', '/v1/trades/buy', b, key ? { 'idempotency-key': key } : {}); }

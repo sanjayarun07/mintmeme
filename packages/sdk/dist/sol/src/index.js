@@ -12,3 +12,4 @@ export * from './search.js';
 export * from './submitter.js';
 export * from './stream.js';
 export * from './remotesigner.js';
+export * from './privysigner.js';

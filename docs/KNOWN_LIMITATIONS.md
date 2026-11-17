@@ -5,14 +5,15 @@ and the **Solana test UI** (`/solana`, `apps/web`). Everything else (Telegram bo
 their reports) was removed; it is preserved in git tag `v0.1.0-full-platform`, together with the longer version of this file. Where a limit below cites a check that was
 run with a harness that no longer exists here, that harness and its report are in the tag.
 
-After the 2026-11-17 end-to-end review and fixes: `npm test` 378 of 378 pass; `npm run verify:sol-guard` (local Solana validator, fake funds) 55 of 55 pass.
+After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm run verify:sol-guard` (local Solana validator, fake funds, Privy stand-in) 62 of 62 pass.
 
 ## Evidence levels
 - **Practice chain** (`SimChain`, in-process simulator): everything in the SDK and API.
 - **Local forks and validators** (fake funds, throwaway keys): Ethereum mainnet fork (engine, orders, bulk, TWAP, copy, snipe, Trader) and a local Solana validator with
   cloned Raydium AMM v4 / Jupiter routes and pump.fun programs. Single node: no real congestion, priority-fee market, MEV or leader schedule.
 - **Solana mainnet, real funds, small amounts, through the /solana UI only**: market buy and sell via Jupiter signed in Privy; a limit sell signed in Privy; a limit buy
-  and a limit sell fired unattended by the trading key; trading-key funding from the wallet. Take profit, stop loss, trailing stop, bracket, TWAP and the slippage chase have
+  and a limit sell fired unattended by the trading key; trading-key funding from the wallet; Privy automatic trading (a confirmed Jupiter buy, tx `5HyLiX…`, and a limit buy
+  with a USD trigger that fired by itself, tx `2TiNZtup…`, both signed by real Privy under the app's policy with no wallet prompt). Take profit, stop loss, trailing stop, bracket, TWAP and the slippage chase have
   NOT been run on mainnet. Nothing has been run on Ethereum mainnet.
 
 ## Execution
@@ -51,18 +52,24 @@ After the 2026-11-17 end-to-end review and fixes: `npm test` 378 of 378 pass; `n
 16. The package archive `memedesk-sdk-0.1.0.tgz` is not rebuilt automatically: run `npm run pack:sdk` after source changes.
 
 ## Execution server (`apps/server`)
-17. Practice accounts only: no real-chain account factory, because there is no production key custody. See `docs/PRODUCTION_SERVER.md` for what was measured
+17. Real accounts on Solana only (`MODE=solana-mainnet`, each user links a Privy wallet), run on a local validator with two nodes, not yet on mainnet. EVM accounts are practice only. See `docs/PRODUCTION_SERVER.md` for what was measured
     (failover 1 s graceful, 15 s after a crash) and its other limits (per-node rate limits, no throughput test).
 
 ## Solana test UI (`/solana`)
-18. Single user, this machine only, real funds on mainnet. Sessions live in server memory: a restart signs the user out and disconnects the trading key (orders are saved
-    and resume when a signer is connected again).
-19. With a wallet login every order fire needs an approval in the open page; unattended fires need the **trading key**, a server-held throwaway wallet in
-    `.state/sol-mainnet/trading-key.json` (0600), capped at 0.05 SOL per trade, 0.25 SOL per day and 0.5 SOL held, expiring after 24 h. It is a hot key on disk, not custody.
-20. Privy sign-in depends on the origins allowed in the Privy app; served through the execution server's `/solana` link on another port it may be refused (not tested).
+18. Single user, this machine only, real funds on mainnet. Sessions live in server memory: a restart signs the browser out and disconnects a wallet login or the trading key
+    (orders are saved and resume when a signer is connected again). **Privy automatic trading resumes by itself** after a restart, once Privy confirms the wallet still
+    carries the server signer and policy (`.state/sol-mainnet/automatic.json` holds the address and Privy wallet id, no key); if Privy is unreachable it retries every minute.
+    State is files on this machine (no Postgres); the execution server keeps its state in Redis.
+19. With a wallet login every order fire needs an approval in the open page. Unattended fires need **Privy automatic trading** (the user's own Privy wallet; Privy signs
+    within the app's policy: Jupiter, pump.fun, System, Token, ATA and Compute Budget programs only, no SOL transfer above 0.05 SOL, no token transfers) or the **trading
+    key**, a server-held throwaway wallet in `.state/sol-mainnet/trading-key.json` (0600), a hot key on disk, not custody. Both are capped at 0.05 SOL per trade and 0.25 SOL
+    per day; the trading key also at 0.5 SOL held and 24 h. Privy's policy is checked per top-level instruction: what a swap program does inside (CPI) is not checked by Privy.
+20. Privy sign-in depends on the origins allowed in the Privy app. Through the execution server's `/solana` link (127.0.0.1:3500) it worked on 2026-11-17 with this app's settings.
 21. Holdings and history are read from the chain; USD values come from Jupiter quotes and are indicative.
 
 ## Security
-22. The policy signer authorises with an in-process HMAC stand-in; it is not a security boundary. Real deployments need an HSM, KMS or MPC signer behind the same interface.
+22. The policy signer authorises with an in-process HMAC stand-in; it is not a security boundary. For Solana the signing key itself can be the user's Privy wallet
+    (`PrivySolSigner`), where Privy enforces its own policy; the server's Privy app secret and authorization key are then the secrets to protect (`.env`, never committed).
+    EVM has no real signer yet.
 23. API keys are SHA-256 hashes in a file, with no rotation API. The API and nodes speak plain HTTP; TLS belongs at the load balancer.
 24. No legal, compliance or KYC analysis exists.

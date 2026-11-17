@@ -17,6 +17,18 @@ export class MemeClient {
     } catch (e) { if (e instanceof SdkError) throw e; throw new SdkError('network', `could not reach the API: ${(e as Error).message}`, 'Check baseUrl and that the server is running.', 0); } finally { clearTimeout(t); }
   }
   overview() { return this.req('GET', '/v1/overview'); }
+  // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
+  /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
+  swap(p: { side: 'buy' | 'sell'; mint: string; sol?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string }) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
+  /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
+   *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
+  placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; mint: string; sol?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
+    trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number }) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
+  /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
+  wallet() { return this.req('GET', '/v1/wallet'); }
+  linkStart(address: string) { return this.req('POST', '/v1/wallet/link/start', { address }); }
+  linkFinish(address: string, signatureBase64: string) { return this.req('POST', '/v1/wallet/link/finish', { address, signature: signatureBase64 }); }
+  unlink() { return this.req('DELETE', '/v1/wallet'); }
   quote(p: { side: 'buy' | 'sell'; token: string; amount: Amount; slippageBps?: number }) { return this.req('POST', '/v1/quote', p); }
   /** `key` becomes the Idempotency-Key: retrying the same key never trades twice. */
   buy(p: { walletId: string; token: string; amount: Amount; slippageBps?: number; minOut?: Amount; key?: string; deadlineS?: number; maxFeeBps?: number }) { const { key, ...b } = p; return this.req('POST', '/v1/trades/buy', b, key ? { 'idempotency-key': key } : {}); }

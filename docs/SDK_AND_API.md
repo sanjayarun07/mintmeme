@@ -1,8 +1,8 @@
 # SDK and Execution API
 
-Date: 2026-11-16. This document covers the TypeScript SDK (`packages/sdk`), the HTTP API (`apps/api`), what chains and platforms are supported **today**, what happens in the backend when you send an order, and every parameter that controls execution.
+Date: 2026-11-17. This document covers the TypeScript SDK (`packages/sdk`), the HTTP API (`apps/api`), what chains and platforms are supported **today**, what happens in the backend when you send an order, and every parameter that controls execution.
 
-**Read this first.** Everything here has been run on a **practice chain** (a simulator in this repo, fake funds). The SDK and the HTTP API have also been run end to end on a **local fork of Ethereum mainnet** (14/14 checks) and on a **local Solana validator** with the mainnet SOL/USDC Raydium pool cloned (13/13 checks); those harnesses and reports are in git tag `v0.1.0-full-platform`. The SDK itself has not moved real money; the `/solana` test UI, built on the same engine, has made small mainnet trades (see `KNOWN_LIMITATIONS.md`). See [Supported chains](#2-supported-chains) for the exact level of evidence per chain.
+**Read this first.** Everything here has been run on a **practice chain** (a simulator in this repo, fake funds). The SDK and the HTTP API have also been run end to end on a **local fork of Ethereum mainnet** (14/14 checks) and on a **local Solana validator** with the mainnet SOL/USDC Raydium pool cloned (13/13 checks); those harnesses and reports are in git tag `v0.1.0-full-platform`. The `/solana` test UI runs the SDK engine and Trader on Solana mainnet with small real amounts, including orders signed by the user's own Privy wallet while the page is closed (`PrivySolSigner`, section 4.4; `KNOWN_LIMITATIONS.md`). The execution server also has a real Solana mode (section 4.5 A), verified on a local validator. See [Supported chains](#2-supported-chains) for the exact level of evidence per chain.
 
 ---
 
@@ -127,6 +127,72 @@ await trader.trailingStop({ walletId: 'w1', token: '0xMEME', amount: 4_000n, tra
 
 To run against a **real or forked chain**, build the `Engine` the way `apps/web/solmainnet.ts` does for Solana (`SolanaChain` + signer + `PolicySigner`; `EvmRpcChain` for EVM) and pass it to `new Trader({ engine, chain, userId, venues: ['uniswap-v2'], persistDir })`. The Trader has been run end to end over `EvmRpcChain` on a mainnet fork and over `SolanaChain` on a local validator (section 2).
 
+### 4.4 Signers (who signs a Solana transaction)
+
+`SolanaChain` takes any `SolSigner` (`sign(wallet, message) → 64-byte signature`). The engine builds, sends and confirms the transaction itself; the signer only signs.
+
+| Signer | Key held by | Signs orders without the user present | Use |
+|---|---|---|---|
+| `DevSolSigner` | this process (memory) | yes | tests, local validator, the `/solana` trading key |
+| `RemoteSolSigner` | the user's browser wallet | no: each request waits for the wallet | `/solana` wallet sign-in |
+| `PrivySolSigner` | Privy (TEE), the user's own wallet | yes, within a Privy policy the user agreed to | `/solana` automatic trading; verified on mainnet |
+
+```ts
+import { PrivyApi, PrivySolSigner, SolanaChain, SolJsonRpc } from 'memedesk-sdk/sol';
+const api = new PrivyApi({ appId, appSecret, authKey, signerId, policyId });   // values from the Privy dashboard (README → Custody plan)
+const d = await api.delegation(userAddress);          // the user must have added signerId with policyId to their wallet (browser: useSigners().addSigners)
+if (!d.ok) throw new Error(d.why);                     // also refuses a policy with no ALLOW rule for the method signTransaction
+const chain = new SolanaChain(cfg, new SolJsonRpc(rpcUrl), new PrivySolSigner(api, new Map([[userAddress, d.walletId]])));
+```
+
+`PrivySolSigner` calls Privy's `signTransaction` with an authorization signature (P-256 over RFC 8785 JSON), and accepts the result only if the signature verifies for the
+exact message the engine built. A policy refusal, a revoked signer or an unreachable Privy fails the trade with `... nothing was sent`. Keep `PolicySigner` in front of it:
+Privy's policy limits programs and SOL per transfer, while `PolicySigner` keeps the per-trade and daily caps and the automation switch.
+
+### 4.5 Real Solana accounts: two ways for a client
+
+**A. Hosted: call our execution server** (`MODE=solana-mainnet`, docs/PRODUCTION_SERVER.md). The client runs nothing of ours.
+1. Get an API key from the operator (`npm run server:key -- <user>`).
+2. In the client's frontend, after Privy login, allow the server once: `useSigners().addSigners({ address, signers: [{ signerId, policyIds: [policyId] }] })`. The operator
+   publishes `signerId` (`PRIVY_AUTH_KEY_ID`) and `policyId` (`PRIVY_SOLANA_POLICY_ID`); the client's Privy app must be the operator's Privy app.
+3. Link the wallet to the API key: `POST /v1/wallet/link/start {address}` returns a message; sign it with the Privy wallet (`useSignMessage`); `POST /v1/wallet/link/finish
+   {address, signature}` (base64). `GET /v1/wallet` then shows `active: true`.
+4. Trade in plain units (the linked wallet is the default; raw fields such as `amount`, `priceE18`, `walletId` still work and win):
+
+```ts
+const api = new MemeClient({ baseUrl, apiKey });
+await api.swap({ side: 'buy', mint, sol: '0.01', slippagePct: 3, key: 'buy-1' });          // same key again never trades twice
+await api.swap({ side: 'sell', mint, pct: 50 });                                            // half the holding
+await api.placeOrder({ type: 'limit-buy', mint, sol: '0.01', priceUsd: '0.0000023' });      // fires by itself, also while the client is offline
+await api.placeOrder({ type: 'bracket', mint, pct: 100, tpUsd: '0.00001', slUsd: '0.000001' });
+await api.placeOrder({ type: 'trailing-stop', mint, tokens: '150000', trailPct: 15 });
+```
+
+   Over plain HTTP: `POST /v1/trades/buy {"mint":"...","sol":"0.01"}`. Plain fields: `mint`, `sol`, `tokens`, `pct`, `price` (SOL per token), `priceUsd`, `slippagePct`,
+   `trailPct`, `tpUsd`, `slUsd`. `pct` on a sell order is taken from the balance when the order is placed.
+5. To stop: `DELETE /v1/wallet`, or `removeSigners({ address })` in the frontend (Privy then refuses every signature at once).
+
+**B. Embedded: run the SDK in the client's own backend** (the client operates its own Privy app and its own server).
+1. In the Privy dashboard: TEE wallets, an authorization key, and a Solana policy with its rules on method `signTransaction` (README → Custody plan, steps 1 to 5).
+2. `npm install memedesk-sdk-0.1.0.tgz` (see "Use the SDK outside this repo").
+3. Frontend: the same `addSigners` call as A.2, with the client's own `signerId` and `policyId`.
+4. Backend, once per user (keep it running; on restart do the same again, state comes back from `persistDir`):
+
+```ts
+import { createSolanaTrader } from 'memedesk-sdk';
+const s = await createSolanaTrader({ userId: 'u1', address: userWallet, rpcUrl: SOLANA_RPC_URL, persistDir: `state/u1`,
+  privy: { appId, appSecret, authKey: PRIVY_AUTH_PRIVATE_KEY, signerId: PRIVY_AUTH_KEY_ID, policyId: PRIVY_SOLANA_POLICY_ID } });
+if (!s.active) console.warn(s.why);                       // not allowed in Privy (yet): reads work, trades are refused with this reason
+await s.trader.resume(); s.trader.start(2000);           // restored orders keep firing
+await s.prepare(mint); await s.sync();                    // learn the token, then read the chain's clock and pools, before a market trade
+await s.trader.buy({ walletId: userWallet, token: mint, amount: 5_000_000n, slippageBps: 300, key: 'buy-1' });   // 0.005 SOL; same key never trades twice
+await s.prepare(mint); await s.trader.limitBuy({ walletId: userWallet, token: mint, amount: 5_000_000n, priceUsd: '0.0000023' });
+s.trader.on(e => console.log(e));
+```
+
+Defaults: Jupiter and pump.fun only, at most 0.05 SOL per buy and 0.25 SOL of buys per day (`caps` lowers or changes them), sells of held tokens not capped in SOL, SOL/USD
+from a Jupiter quote (`solUsd` replaces it). For many users in one process, share one `PrivyApi` and one `jupiterSolUsd()` across them.
+
 ---
 
 ## 5. How it works in the backend
@@ -179,7 +245,8 @@ A reverted transaction still costs gas, and the daily-limit charge is **kept** (
 
 The policy signer is a separate component the engine must pass through before any signature. Per wallet it enforces: allowed chains, allowed venues, **per-transaction cap and daily cap per token**, an **automation switch** (revoking it blocks every non-manual origin: orders, bulk, TWAP, snipe, copy), and for transfers a destination allowlist plus an out-of-band device confirmation. A wallet belongs to one user; another user's request for it is refused. Every decision is audited.
 
-> The signer in this repository is an in-process stand-in. A real deployment needs an HSM or MPC service behind the same interface. See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) (Security).
+> The policy check itself is an in-process stand-in (an HMAC, not a security boundary). The key that signs is separate: for Solana it can be the user's own Privy wallet
+> (`PrivySolSigner`, section 4.4), where Privy enforces its own policy as well. See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) (Security).
 
 ### 5.5 Idempotency (why retrying is safe)
 
@@ -390,6 +457,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 | `POST /v1/entries/pause`, `/resume` | Pause new buys |
 | `GET /v1/snipes`, `/v1/copies`; `POST` (host-configured) | Sniping and copy trading |
 | `GET /v1/events` | Live events |
+| `GET /v1/wallet`; `POST /v1/wallet/link/start`, `/v1/wallet/link/finish`; `DELETE /v1/wallet` | Execution server in `MODE=solana-mainnet` only: link the user's Privy wallet (section 4.5 A), see whether it may trade now, unlink. Errors: `bad_signature` 401, `not_delegated` 409, `link_expired` 410, `privy_unavailable` 503; trades on an account whose wallet is not active: `wallet_not_active` 409 |
 
 ---
 
@@ -405,9 +473,12 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 
 ## 10. What is not done (read before trusting it with money)
 
-1. **No real funds have ever been used.** Evidence is practice chain, local forks, and mainnet read-only checks.
+1. **Real funds only in small amounts on Solana, through the `/solana` UI** (KNOWN_LIMITATIONS.md, evidence levels): market trades, limit orders, the trading key, and
+   Privy automatic trading (a confirmed buy and a standing order that fired by itself, both signed by real Privy). Nothing on Ethereum mainnet. The execution server's real mode (`MODE=solana-mainnet`)
+   has been run on a local validator only.
 2. The **Trader and API layer** is verified on the practice chain, an **Ethereum** fork and a **Solana** local validator. Sniping and copy trading through the Trader were not part of those runs (their runners have their own fork and validator reports), and on Solana only the Raydium SOL/USDC pool was used, not Jupiter routes.
-3. **The signer is a stand-in**, not an HSM or MPC service, and API users do not hold their own keys here. Custody is unsolved for production.
+3. **Custody:** Solana has a production-grade option in the SDK (`PrivySolSigner`: the user's own Privy wallet, server signing under a Privy policy), used by `/solana`.
+   The execution server uses it in `MODE=solana-mainnet` (verified on a local validator with two nodes and a Privy stand-in, not yet on mainnet). EVM has no real signer yet (ERC-4337 or Privy smart wallets are the plan, README → Custody plan).
 4. Only **Uniswap-V2-style pools** (Ethereum) and **Raydium AMM v4 / Jupiter routes** (Solana) are supported. No V3, CLMM, DLMM, stable pools or multi-hop routes.
 5. Triggers poll about once a second from pool **spot price**; there is no sub-second reaction, no private mempool and no MEV protection. Gas is not tuned (no fee bumping logic beyond replace-by-fee for cancels).
 6. Sniping on a networked chain cannot see honeypots before buying; Solana discovery sees pool **creations** only, not later migrations.
@@ -437,8 +508,8 @@ npm install /path/to/memedesk-sdk-0.1.0.tgz
 ```
 
 Imports: `memedesk-sdk` (Trader, practice world, client, helpers), `memedesk-sdk/client` (HTTP client only),
-`memedesk-sdk/core`, `memedesk-sdk/evm`, `memedesk-sdk/sol`.
+`memedesk-sdk/core`, `memedesk-sdk/evm`, `memedesk-sdk/sol` (includes `PrivyApi` and `PrivySolSigner`, section 4.4).
 
 Checked: a clean install into an empty folder ran a practice buy to `finalized`, rejected a bad amount with a
 clear error, resolved all five import paths, and passed a TypeScript type check. Not done: publishing to
-the npm registry (the package is marked private), TLS or auth hardening, and a real signer.
+the npm registry (the package is marked private), TLS or auth hardening, and an EVM signer with real custody.
