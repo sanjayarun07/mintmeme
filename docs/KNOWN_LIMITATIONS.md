@@ -52,7 +52,7 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
 16. The package archive `memedesk-sdk-0.1.0.tgz` is not rebuilt automatically: run `npm run pack:sdk` after source changes.
 
 ## Execution server (`apps/server`)
-17. Real accounts on Solana only (`MODE=solana-mainnet`, each user links a Privy wallet), run on a local validator with two nodes, not yet on mainnet. EVM accounts are practice only. See `docs/PRODUCTION_SERVER.md` for what was measured
+17. Real accounts on Solana only (`MODE=solana-mainnet`, each user links a Privy wallet): local validator with two nodes, and one small mainnet buy through the API (tx `3zMawg…`). Orders, sells and failover through the server not yet on mainnet. EVM accounts are practice only. See `docs/PRODUCTION_SERVER.md` for what was measured
     (failover 1 s graceful, 15 s after a crash) and its other limits (per-node rate limits, no throughput test).
 
 ## Solana test UI (`/solana`)

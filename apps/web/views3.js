@@ -36,8 +36,8 @@ async function swPoll(){if(SW.busy||!SW.wallet)return;SW.busy=true;try{const r=a
 
 V.solana={title:'Solana lookup',
 html(){return head('Solana lookup','Search any Solana token by name, symbol or mint. Searching, quoting and simulating only read; a trade needs a signed-in wallet and your confirmation.')+
-`<div id="sprivy" class="panel row" style="max-width:640px;display:none"></div><div id="swal"></div><div id="shold" style="max-width:640px"></div><div class="panel stack" style="max-width:640px"><div><label for="sq">Name, symbol or mint address</label><input id="sq" autocomplete="off" spellcheck="false" placeholder="bonk, or a mint address"></div><div class="row"><button class="btn primary" id="sgo">Search</button></div></div><div id="sres" aria-live="polite"></div><div id="stok"></div>`},
-mount(){this.wallet();this.privy($('#sprivy'));const run=()=>this.search($('#sq').value.trim());$('#sgo').onclick=run;$('#sq').onkeydown=e=>{if(e.key==='Enter')run()};$('#sq').focus()},
+`<div id="sprivy" class="panel row" style="max-width:640px;display:none"></div><div id="swal"></div><div id="sapi"></div><div id="shold" style="max-width:640px"></div><div class="panel stack" style="max-width:640px"><div><label for="sq">Name, symbol or mint address</label><input id="sq" autocomplete="off" spellcheck="false" placeholder="bonk, or a mint address"></div><div class="row"><button class="btn primary" id="sgo">Search</button></div></div><div id="sres" aria-live="polite"></div><div id="stok"></div>`},
+mount(){this.wallet();this.privy($('#sprivy'));this.apiLink();const run=()=>this.search($('#sq').value.trim());$('#sgo').onclick=run;$('#sq').onkeydown=e=>{if(e.key==='Enter')run()};$('#sq').focus()},
 
 async wallet(){const el=$('#swal');if(!el)return;let w;try{w=await api('/api/sol/wallet/status')}catch{el.innerHTML=notice('error','Could not reach the terminal','');return}
   if(w.ok===false){el.innerHTML=notice('error',esc(w.title||'Wallet unavailable'),esc(w.why||''));return}this.w=w;const sol=l=>l==null?'unknown':(Number(l)/1e9).toLocaleString('en',{maximumFractionDigits:6})+' SOL',L=w.limits;
@@ -82,6 +82,30 @@ async wallet(){const el=$('#swal');if(!el)return;let w;try{w=await api('/api/sol
   if($('#sdis'))$('#sdis').onclick=async()=>{await call('/api/sol/wallet/disconnect',{},'Wallet disconnected');swStop()};
   if($('#skill'))$('#skill').onclick=()=>call('/api/sol/kill',{on:!w.killed},w.killed?'Trading allowed':'Kill switch on');
   $('#slim').onclick=()=>call('/api/sol/settings',{maxTradeSol:$('#lmax').value,dailyCapSol:$('#lcap').value,maxSlippagePct:$('#lslip').value},'Limits saved')},
+/** Execution server (MODE=solana-mainnet), same origin only: link the Privy wallet to an API key and try a buy through the server. Shown only when this page is served
+ *  by an execution node (127.0.0.1:3500/solana), whose /v1 API answers here. The API key stays in this tab (never sent to the terminal, never stored). */
+async apiLink(){const el=$('#sapi');if(!el)return;let h;try{h=await fetch('/v1/health').then(r=>r.ok?r.json():null)}catch{h=null}if(!h||!h.ok){el.innerHTML='';return}
+  el.innerHTML=`<div class="panel stack" style="max-width:640px"><h2>Execution server</h2><div class="faint">Link your Privy wallet to an API key of this server, so the server can trade it (within your Privy policy) for any app that uses the key. Needs Automatic trading allowed in Privy (above).</div>
+  <div><label for="akey">API key</label><input id="akey" type="password" autocomplete="off" spellcheck="false" placeholder="paste the key"></div><div class="row"><button class="btn" id="astat">Check</button><button class="btn primary" id="alink">Link my Privy wallet</button><button class="btn" id="aunlink">Unlink</button></div><div id="ares"></div>
+  <details><summary>Try a buy through the server</summary><div class="stack"><div class="row"><div><label for="amint">Mint</label><input id="amint" spellcheck="false" value="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"></div><div><label for="asol">SOL</label><input id="asol" inputmode="decimal" value="0.005"></div></div>
+  <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="aack" style="width:auto;min-height:0"> Spend this SOL from my wallet now (real funds)</label><div class="row"><button class="btn" id="abuy">Buy through the server</button></div><div id="abres"></div></div></details></div>`;
+  const key=()=>$('#akey').value.trim(),out=(k,t,b)=>{$('#ares').innerHTML=notice(k,t,b)};
+  const call=async(m,p,b)=>{const r=await fetch(p,{method:m,headers:{authorization:'Bearer '+key(),...(b?{'content-type':'application/json'}:{})},body:b?JSON.stringify(b):undefined});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error((j.error&&(j.error.message+(j.error.fix?' '+j.error.fix:'')))||('HTTP '+r.status));return j};
+  const show=w=>out(w.active?'ok':'warn',w.linked?(w.active?'Linked and active':'Linked, not active'):'No wallet linked',w.linked?`<span class="mono">${esc(short(w.address))}</span>${w.why?' · '+esc(w.why):''}`:esc(w.why||''));
+  $('#astat').onclick=async()=>{try{show(await call('GET','/v1/wallet'))}catch(e){out('error','Could not read',esc(e.message))}};
+  $('#aunlink').onclick=async()=>{try{show(await call('DELETE','/v1/wallet'))}catch(e){out('error','Could not unlink',esc(e.message))}};
+  $('#alink').onclick=async()=>{const b=$('#alink');b.disabled=true;try{
+      const pw=SW.privy[0],acc=pw&&(pw.accounts||[])[0];if(!acc)throw new Error('Log in with Privy above first.');
+      out('plain','Linking','Step 1 of 2: asking the server for a one-time message…');const s=await call('POST','/v1/wallet/link/start',{address:acc.address});
+      out('plain','Linking','Step 2 of 2: approve the message in Privy. It moves no funds.');
+      const [m]=await swTimeout(pw.features['solana:signMessage'].signMessage({account:acc,message:new TextEncoder().encode(s.message)}),90000,'Privy message signing');
+      const sig=btoa(String.fromCharCode(...m.signature));show(await call('POST','/v1/wallet/link/finish',{address:acc.address,signature:sig}));
+    }catch(e){out('error','Not linked',esc(e.message))}finally{b.disabled=false}};
+  $('#abuy').onclick=async()=>{const b=$('#abuy'),o=$('#abres');if(!$('#aack').checked){o.innerHTML=notice('warn','Tick the box first','');return}b.disabled=true;o.innerHTML=notice('plain','Sending','The server builds the trade, Privy signs it within your policy, the server sends it. Up to a minute.');
+    try{const k='ui-'+Date.now();let t=await call('POST','/v1/trades/buy',{mint:$('#amint').value.trim(),sol:$('#asol').value.trim(),slippagePct:3,key:k});
+      for(let i=0;i<60&&!['finalized','failed','expired'].includes(t.state);i++){await new Promise(r=>setTimeout(r,1500));t=await call('POST','/v1/trades/'+encodeURIComponent(t.key)+'/advance',{})}
+      const sent=(t.history||[]).some(x=>x.state==='submitted');o.innerHTML=notice(t.state==='failed'?'error':'ok','Trade '+esc(t.state),(sent?'Sent. ':'Nothing was sent. ')+esc(t.failure||'')+(t.txHash&&sent?` <a href="https://solscan.io/tx/${esc(t.txHash)}" target="_blank" rel="noopener noreferrer">View on Solscan</a>`:''));
+    }catch(e){o.innerHTML=notice('error','Not done',esc(e.message))}finally{b.disabled=false}}},
 async privy(box){let c;try{c=await api('/api/sol/config')}catch{return}if(!c||!c.privyAppId||!c.privyBundle)return;
   box.style.display='';const go=()=>{window.MintPrivy.mount(box,{appId:c.privyAppId,onWallets:ws=>{const key=l=>l.map(w=>w.name+':'+((w.accounts||[])[0]||{}).address).join('|'),before=key(SW.privy);SW.privy=ws||[];if(before!==key(SW.privy))V.solana.wallet()}})};
   if(window.MintPrivy)return go();const sc=document.createElement('script');sc.src='/privy.bundle.js?v='+Date.now();sc.onload=go;sc.onerror=()=>{box.innerHTML='<span class="faint">Privy could not load.</span>'};document.head.appendChild(sc)},

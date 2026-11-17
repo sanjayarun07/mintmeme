@@ -5,7 +5,7 @@ but as a **cluster of identical nodes** that share one Redis. Add nodes to serve
 
 Status: the cluster mechanics (ownership, routing, failover, durability of orders) are built and tested, including in Docker. Two account modes:
 **practice** (simulated chain, fake funds) and **solana-mainnet** (real funds: each user links their own Privy wallet and the owner node signs through Privy; see
-"Real Solana accounts" below). The real mode has been run on a local validator with two nodes and a Privy stand-in, not yet on mainnet.
+"Real Solana accounts" below). The real mode has been run on a local validator with two nodes and a Privy stand-in, and with one small user-approved buy on mainnet.
 
 ## Real Solana accounts (`MODE=solana-mainnet`)
 
@@ -25,6 +25,10 @@ Verified (`npm run verify:server-sol`, report in `docs/live-verification/`, 9 of
 signed by the Privy stand-in and landed; the same idempotency key not trading twice; the per-trade cap; a limit order surviving a crash of the owner node, the other node
 asking Privy again, the order edited there and firing by itself; a sell of half the holding in plain units; and a revoked signer failing with nothing sent. `apps/server/realmode.test.ts` covers linking, refusals
 and failover without a chain.
+
+**Mainnet, 2026-11-17 (user-approved):** two nodes in `MODE=solana-mainnet`; the user linked their Privy wallet from the `/solana` page's Execution server box (served by a node, same origin
+as the API) and bought 0.005 SOL of Bonk through the API in plain units. Routed through Jupiter, signed by real Privy under the app's policy, finalized as tx
+`3zMawgRFnseC1daidQZMQarkmFvqHS6scJu5qgCeNAdwUhj95E8ee2SBv1FhTZbXSbWdoUDmwj9Py7dbvQ8tpQ8G` (wallet paid 0.005009668 SOL, received 154,813.93 Bonk).
 
 ## How it works
 
@@ -131,7 +135,7 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 ## What is not done (read before trusting it with money)
 
-- **Real accounts: Solana only, not yet on mainnet.** `MODE=solana-mainnet` (above) has been run on a local validator only. EVM still has no real signer.
+- **Real accounts: Solana only.** `MODE=solana-mainnet` (above): local validator, plus one small mainnet buy. Orders, failover and sells through the server have not run on mainnet. EVM still has no real signer.
   Server-held hot keys in files are not production custody.
 - **No Postgres.** Redis is the only store and the single source of truth. Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.

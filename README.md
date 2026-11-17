@@ -166,7 +166,7 @@ Account, factory and entry-point addresses come from the providers' official pag
 
 **C. What gets built once A is done** (each behind tests on a local validator or fork first, then small real amounts that you approve):
 - `/solana` automatic trading: **done** (above). It also resumes by itself after a server restart, once Privy confirms the wallet still allows it.
-- Execution server: `MODE=solana-mainnet`: **built**. Each API user links their Privy wallet (`/v1/wallet/link/*`) and the owner node signs through Privy (docs/PRODUCTION_SERVER.md, docs/SDK_AND_API.md 4.5). Run on a local validator with two nodes; not yet on mainnet.
+- Execution server: `MODE=solana-mainnet`: **built**. Each API user links their Privy wallet (`/v1/wallet/link/*`) and the owner node signs through Privy (docs/PRODUCTION_SERVER.md, docs/SDK_AND_API.md 4.5). Run on a local validator with two nodes, and one small mainnet buy through the API (tx `3zMawg…`).
 
 Real funds so far: the `/solana` UI (wallet sign-in, Privy automatic trading, the capped trading key) on mainnet; the execution server's real mode on a local validator.
 
