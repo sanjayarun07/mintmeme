@@ -23,6 +23,7 @@ full web terminal, markets, indexer, more fork harnesses) is preserved in git ta
 git clone https://github.com/sanjayarun07/mintmeme.git && cd mintmeme
 git switch cleanup/sdk-server-only
 cp .env.example .env        # then fill in what you need (below)
+npm run setup:check         # what is configured and what is missing (never prints secret values)
 npm test                    # unit, HTTP and cluster tests (cluster tests need a local Redis; they are skipped without one)
 ```
 
@@ -32,6 +33,7 @@ npm test                    # unit, HTTP and cluster tests (cluster tests need a
 | `PRIVY_APP_ID` | Privy login on `/solana` | Public. Build the bundle once: `npm run build:privy`. Add your UI addresses to the Privy app's allowed origins. |
 | `API_KEYS` | practice API (`npm run api`) | `"<16+ char key>:<user>[:read\|trade],..."` |
 | `REDIS_URL`, `NODE_PUBLIC_URL`, `API_KEYS_FILE` | execution server (`npm run server`) | See the server section. |
+| `PRIVY_APP_SECRET`, `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`, `PRIVY_SOLANA_POLICY_ID` | delegated signing (planned) | Secrets: `.env` only. Steps in the custody section's setup checklist. |
 
 Optional tools: Redis (cluster tests and the server), Solana CLI with `solana-test-validator` (`verify:sol-guard`), Foundry's `anvil` (`verify:evm`), Docker (3-node stack).
 
@@ -112,13 +114,35 @@ The server needs a signer for each user before it can trade real funds. Chosen d
 | **Solana** | **Privy delegated signing** (option B) | The user's Privy wallet grants the app a limited, revocable permission ("session signer") with a policy: max per trade, allowed programs (Jupiter, pump.fun), expiry. The server asks Privy to sign within that policy; it never holds the key. Standing orders fire unattended. Replaces the trading key. | **Planned.** Not built yet. |
 | **Ethereum / EVM** | **ERC-4337 smart account with session keys** (option C) | The user owns a smart account; it grants the server a session key limited on chain (allowed contracts such as the Uniswap V2 router, token and amount limits, expiry). Even a stolen session key cannot exceed those on-chain limits. | **Planned.** Not built yet. |
 
-**What is needed from you to build it:**
-- **Solana (Privy):** turn on delegated signing / session signers for the Privy app; create the server authorization key and the app secret and put them in `.env`
-  (`PRIVY_APP_SECRET` and the authorization key; never in chat or git); add the UI addresses to the allowed origins; confirm the policy limits (default: the current
-  0.05 SOL per trade, 0.25 SOL per day, swaps only through Jupiter and pump.fun).
-- **EVM (ERC-4337):** choose the smart-account implementation and bundler/paymaster providers (account and entry-point addresses must come from the providers' official
-  pages, never guessed), the chain (Ethereum mainnet or an L2), and the session-key limits.
-- **Build order:** each lands behind tests on a local validator or fork first, then small real amounts that you approve.
+One Privy app serves both chains: each user can have a Privy wallet on Solana and on Ethereum, one server **authorization key** is added as the signer on both, and
+each chain gets its own **policy** (the dashboard's Policies list has a "Chain type" column). Privy also has its own ERC-4337 **smart wallets** (Wallet infrastructure →
+Advanced → Smart wallets), which may cover option C without a separate provider; whether signer policies apply to smart-wallet transactions is not checked yet.
+
+### Setup checklist (do this once; `npm run setup:check` shows what is still missing)
+
+**A. Privy app (dashboard.privy.io → your app).** Steps 1 to 3 handle secrets: do them yourself, paste the values only into `.env`, never into chat, git or a ticket.
+
+| # | Where in the dashboard | What to do | Goes into `.env` |
+|---|---|---|---|
+| 1 | Wallet infrastructure → **Advanced** → More | Check that **Wallet environment** shows **TEE enabled** (policies need it). If it does not, follow Privy's TEE migration guide. | – |
+| 2 | Wallet infrastructure → **Keys and quorums** → **New key** | Create the server authorization key (P-256). Privy shows the private key **once** and cannot recover it. | `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY` |
+| 3 | App settings → Basics → **API keys** | Copy the app secret. Optional: Basics → Advanced → **IP allowlist** with your servers' addresses, so only they can use it. | `PRIVY_APP_SECRET` |
+| 4 | App settings → Basics → **Domains and clients** | Add the UI addresses to the allowed origins: `http://localhost:3000`, `http://127.0.0.1:3500`, and your production URL. | – |
+| 5 | Wallet infrastructure → **Policies** → **New policy**, chain type **Solana** | Allow only what trading needs: the Jupiter swap and pump.fun programs, plus the System, Token and Associated Token programs a swap uses (program ids from each project's official docs). Cap the SOL per transaction (default 0.05 SOL). | `PRIVY_SOLANA_POLICY_ID` |
+| 6 | (later, for EVM) Policies → New policy, chain type **Ethereum**; optionally Advanced → **Smart wallets** | Allow only the swap router (Uniswap V2 router for the chosen chain, address from Uniswap's deployments page) and cap the ETH per transaction. | `PRIVY_ETHEREUM_POLICY_ID` |
+| 7 | top bar: **Upgrade to production** | Only when you go live with other users' funds. Development mode is fine for testing. | – |
+
+Current state of this app (checked 2026-11-17, read-only): TEE enabled; no keys, no policies; smart wallets off; development mode.
+
+**B. EVM via ERC-4337, if not using Privy smart wallets:** choose the smart-account implementation (for example ZeroDev Kernel, Safe with ERC-7579 modules,
+Biconomy Nexus or Alchemy Account Kit), a bundler and paymaster provider (for example Pimlico, ZeroDev, Alchemy or Biconomy; their API key goes into `.env` as
+`AA_BUNDLER_URL` and `AA_PAYMASTER_URL`), the chain (Ethereum mainnet or an L2 where Uniswap V2 is deployed), who pays gas, and the session-key limits.
+Account, factory and entry-point addresses come from the providers' official pages, never guessed.
+
+**C. What gets built once A is done** (each behind tests on a local validator or fork first, then small real amounts that you approve):
+- `/solana`: an "Allow automatic trading" button (you approve adding the server signer with the policy once) and a "Revoke" button; orders then fire unattended
+  through Privy, and the trading key retires.
+- Execution server: `MODE=solana-mainnet` with a `realAccount` factory that signs through Privy within the policy, so `/console` and `MemeClient` can use real accounts.
 
 Until then, the server stays practice-only, and the `/solana` UI's wallet sign-in and capped trading key are the real-funds paths.
 
@@ -126,6 +150,7 @@ Until then, the server stays practice-only, and the `/solana` UI's wallet sign-i
 
 | Command | What it checks | Needs |
 |---|---|---|
+| `npm run setup:check` | Which parts are configured: `.env` keys (values never printed), Redis and its AOF, Privy bundle, Privy signing keys and policies, test tools | – |
 | `npm test` | Unit, HTTP, cluster and server tests (379) | Redis for the cluster tests |
 | `npm run verify:sol-guard` | The `/solana` back end on a local Solana validator, fake SOL: limits, kill switch, wallet sign-in and signing, orders, TWAP, trading key fund, use and return (55 checks) | `solana-test-validator`, `ALCHEMY_API_KEY` |
 | `npm run verify:evm` | The SDK `Trader` and HTTP API on a local Ethereum mainnet fork, real Uniswap V2 WETH/USDC pool, fake ETH: market buy and sell with approval, orders, bulk, TWAP, restart | `anvil`, `ALCHEMY_API_KEY` |
@@ -147,6 +172,7 @@ apps/server       execution node: leases, forwarding, console, key tool, load te
 apps/web          /solana test UI: server, back end (solmainnet), guards, page scripts
 apps/privy        Privy login bundle (React, built separately)
 deploy/server     Dockerfile, docker-compose (Redis + 3 nodes + nginx), nginx.conf
+scripts           setup-check (what is configured and what is missing)
 docs              SDK and API guide, production server, known limitations, Solana test checklist, verification reports
 ```
 
