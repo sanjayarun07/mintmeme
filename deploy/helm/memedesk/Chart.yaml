@@ -1,7 +1,0 @@
-# TEMPLATE — not applied or validated against a live environment.
-apiVersion: v2
-name: memedesk
-description: Generic chart for memedesk services (api, strategy, listeners, signer, reconciler, notifier, billing)
-type: application
-version: 0.0.0
-appVersion: "0.0.0"

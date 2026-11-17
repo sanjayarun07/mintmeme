@@ -10,5 +10,7 @@ node_modules/
 test-ledger/
 .state/
 apps/web/privy.bundle.js
+# local database left by the removed Ponder indexer (in tag v0.1.0-full-platform)
+indexer/
 # production server deploy: API key hashes stay local
 deploy/server/keys.txt

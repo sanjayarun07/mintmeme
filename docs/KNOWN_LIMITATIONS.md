@@ -1,269 +1,68 @@
 # Known Limitations
 
-Date: 2026-11-13. Derived from reading `packages/core/src/*.ts` and the tests. `npm test` was run once for this revision: 216 tests, 216 pass, 0 fail (core, telegram, scraper, evm and live-harness suites; the hardening file contributes 3 of the core tests as seeded fuzz runs). Passing tests are evidence about SimChain, a fake Telegram transport and recorded fixtures only. `apps/web` has no automated tests.
+Scope of this repository after the 2026-11-17 cleanup: the **SDK** (`packages/core`, `evm`, `sol`, `sdk`), the **HTTP API** (`apps/api`), the **execution server** (`apps/server`)
+and the **Solana test UI** (`/solana`, `apps/web`). Everything else (Telegram bot, scraper, full web terminal, markets and launch feeds, indexer, most fork harnesses and
+their reports) was removed; it is preserved in git tag `v0.1.0-full-platform`, together with the longer version of this file. Where a limit below cites a check that was
+run with a harness that no longer exists here, that harness and its report are in the tag.
 
-## Scope
-1. Only simulated environments exist: `SimChain` (EVM-style) and the `SimulatedSolana` / `SimulatedTon` / `SimulatedTron` fixtures in `chains.ts`. No real RPC, venue contract, program, or network has been touched. No chain IDs, addresses, or RPC URLs are recorded anywhere in the repo.
-2. `apps/telegram` (a transport-agnostic command handler, no bot token), `deploy/*` (Helm, Terraform, Postgres schema, collector/Prometheus config; each marked as an unvalidated template), and `bench` (in-process fixture benchmark) are skeletons. There is no live bot, production UI, scheduler, applied deploy, or network load-test harness. `apps/web` ("Tideline") is a practice terminal on the simulated chain, not a production UI (see section Practice terminal).
-3. Feature-parity claims about Maestro now rest on a full read of the public docs (2026-11-15, see MAESTRO_DOCS_READ_2026-11-15.md), but the older rows in FEATURE_PARITY.md still carry `unverified, needs reading` marks that have not been re-checked one by one, and the docs contradict themselves in places (wallet caps, price impact default).
-4. Nothing in the repo has been verified against a live network, real venue, real Telegram, or real money.
+Tests at the time of the cleanup: `npm test` 370 of 370 pass; `npm run verify:sol-guard` (local Solana validator, fake funds) 55 of 55 pass.
 
-## Chain coverage
-5. (Superseded for Solana: see the Solana section at the end.) `Engine` is wired only to `SimChain`, an EVM-style model (nonce per wallet, mempool, receipts). `SimulatedSolana`, `SimulatedTon`, `SimulatedTron` implement a `ChainAdapter` seam and are tested standalone; they are NOT connected to `Engine`, `Router`, the signer, or `Store`. Their numeric parameters (windows, depths, resource prices) are fixture assumptions, not protocol constants.
-6. Engine nonce handling, cancel/replace, and reorg handling therefore have no Solana blockhash, TON seqno, or Tron resource implementation behind them.
-
-## Persistence and concurrency
-7. `Store` is in-memory; snapshot/restore is manual. A crash between a state change and the caller's snapshot loses that change.
-8. The seeded fuzz tests (`hardening.test.ts`, seeds 1-3, 500 intents each) restart only at consistent boundaries (a snapshot taken between operations). They do NOT crash between a network send and the persist of the resulting state, so write-ahead behavior at that exact point is covered only by the targeted ack-loss and restart tests, not by fuzz.
-9. Per-key lock is an in-process promise chain; multiple workers could double-drive a record.
-10. `SpentLedger` is a persistence seam; the only implementation is `MemoryLedger` (JSON snapshot/restore in tests). Reservations, copy inventory and pending buys, order state, the commerce ledger, subscriptions, portfolio events, alert state, and bridge ops are all in memory.
+## Evidence levels
+- **Practice chain** (`SimChain`, in-process simulator): everything in the SDK and API.
+- **Local forks and validators** (fake funds, throwaway keys): Ethereum mainnet fork (engine, orders, bulk, TWAP, copy, snipe, Trader) and a local Solana validator with
+  cloned Raydium AMM v4 / Jupiter routes and pump.fun programs. Single node: no real congestion, priority-fee market, MEV or leader schedule.
+- **Solana mainnet, real funds, small amounts, through the /solana UI only**: market buy and sell via Jupiter signed in Privy; a limit sell signed in Privy; a limit buy
+  and a limit sell fired unattended by the trading key; trading-key funding from the wallet. Take profit, stop loss, trailing stop, bracket, TWAP and the slippage chase have
+  NOT been run on mainnet. Nothing has been run on Ethereum mainnet.
 
 ## Execution
-11. Single venue model per swap; no multi-hop, split routes, concentrated liquidity, DLMM, or stable pools.
-12. Simulation runs against current state; inclusion-time state may differ. A passing simulation or launch simulation is not proof of safe execution; tokens can detect simulation. `simulateLaunch` states its own limitations (throwaway wallet, sell simulated against pre-buy state, max-wallet not modeled by the fixture, fixture gates buys only by `tradingOpenBlock`).
-13. `cancelNonce` / `healNonce` replace a stuck nonce with a signed no-op. With `force`, a still-pending original is removed via `SimChain.evict`, which is atomic in the sim. A real node has no such atomic evict; it would need replace-by-fee semantics and handling of the race where the original lands anyway. Without `force`, a pending original is never replaced.
-14. No fee-bumping, no private mempool, no MEV protection, no priority-fee logic, no real gas estimation (fixed `gasFee`).
-15. Reorg support is fixture-level: `reorgDrop` and `reorgReinclude` (state/nonce rollback to a journal entry, re-execution of that tx and later ones). The engine detects a vanished or changed receipt and recomputes the fill. Tested for shallow reorgs and in fuzz; there is no deep-reorg or real-finality testing.
-16. Fill is derived from the sim receipt's balance deltas; real-chain fill extraction (logs, token accounts, TON traces) is unwritten.
-17. Platform fee on the engine path is deducted in the swap in the sim. `FeeCollector` in `commerce.ts` models in-tx vs accrued-then-swept fees against the ledger, but it is not called by `Engine`; no trade currently flows from an engine fill into a fee posting automatically.
+1. A price order is a trigger, not a resting order: when it fires it takes the pool price within the slippage. Triggers use the best authorised pool's spot price at tick
+   time (no oracle, no second source); the executable-output check and `maxDeviationBps` limit, but do not remove, spikes inside one pool. A move shorter than one tick
+   (about 1 to 2 s) is not seen.
+2. Retries after a failed fill keep the original slippage unless the order opted into **chase**, which widens it by `stepBps` per attempt up to `maxBps`. Each retry is a new
+   transaction. Chase is tested in unit and HTTP tests only (a failing fill cannot be forced on demand on the validator).
+3. **USD triggers** are re-derived each tick from the quote-token USD price the host supplies (the /solana UI uses a Jupiter SOL to USDC quote, cached 30 s). A price older
+   than 2 minutes moves nothing. The token's USD price is therefore only as good as that feed.
+4. No mempool access anywhere: sniping and copy trading act after a block is mined, never first. No MEV protection, private relays, Jito tips or priority-fee estimation.
+5. Simulation runs against current state; landing state may differ. A passing simulation is not proof of a safe token.
+6. Platform fees are not collected on real chains (refused at build time rather than ledgered as collected).
+7. Solana: no blockhash refresh (an expired transaction fails closed and needs a new intent), no pending-transaction cancel. EVM: cancel of a pending transaction is
+   replace-by-fee (either may land); exact-amount approvals only.
 
-## Strategies
-18. Orders need an external price snapshot provider; none exists. Executable-output check relies on a caller callback. Order state is not persisted.
-19. Copy engine: net-exposure caps, exit modes, confirmation presets, and `recordReorg` exist. Remaining gaps:
-    - Pending (in-flight) SELLS are not reserved. Only buys are counted in `pending`. Two quick leader sells can each be sized against the same attributed inventory before either fill is recorded.
-    - `recordReorg` reverses attributed inventory and flags the position `orphaned`; it deliberately issues no sell. A reorged leader sell that was already mirrored cannot be undone.
-    - `recordFill` / `recordFailure` must be called by the caller on confirmed fills / failures; there is no automatic link from `Engine` results.
-    - No real leader-event listener or wallet-tracking provider.
-20. Launch sniping (`LaunchDetector`, `Sniper.decide`, `simulateLaunch`, `exitOrders`, `migrateOrders`): decisions use confirmed launch events and chain state only. There is no launch-event listener or indexer, no mempool monitoring, and no front/back-running logic by design. `Sniper.report` must be called by the caller with the outcome. `decide` is not persisted.
-21. Signal extraction uses regexes; the Solana base58 pattern is broad and yields many false candidates (chain validation callback is required). A scraper library exists (`apps/scraper`) but no desktop app and no Telegram client: see section Telegram scraper.
-22. Risk report depends on caller-supplied `TokenFacts`; no source for holder concentration, LP lock, or authority data. LP lock unknown is reported as a note only.
-23. Portfolio: P&L is computed only from confirmed fills passed in, with unknown cost basis left unknown; prices are caller-supplied; no price feed, no persistence, no monitors service.
-24. Alerts, `CommunityBot`, `Trending`: pure logic. No price feed, wallet-tracking provider, or Telegram delivery behind them. `CommunityBot` posts only through an injected sink and only to groups with an authorization record (the evidence string is not verified by anything).
-25. `Trending` has wash-trade defenses (round-trip exclusion, per-wallet cap, min liquidity, decay) and a k-anonymity threshold on the public aggregate, but NO differencing defense: the aggregate carries no noise, so an observer who sees successive aggregates (or the `uniqueWallets` and `score` movement of a token near the k threshold) can infer individual contributions. Coordinated multi-wallet manipulation is only partly defended (wallets that never round-trip are not detected).
-26. No mempool monitoring anywhere in the repo.
+## Solana
+8. Venues: Raydium AMM v4, Jupiter Swap API V2 (we rebuild the transaction, allow only listed programs, refuse tips, extra signers and platform fees, simulate the exact
+   bytes before signing) and pump.fun bonding curves. pump.fun curve trading and non-Raydium Jupiter routes have been run on the local validator only.
+9. Copy trading sees a leader's swap on any DEX (from its balance changes) but can only mirror it on the venues above. A leader reorg flags the position; it never sells
+   automatically.
+10. `MintInspector` checks mint authority, freeze authority and Token-2022 only: no sell simulation, holder concentration or LP lock checks.
+
+## Persistence and concurrency
+11. With `persistDir` or a `state` backend, orders (including chase and USD-trigger settings), OCO claims, trailing peaks, reservations, TWAP and bulk state and the engine
+    journal are written atomically before each action. A crash sweep over 18 checkpoint writes always produced exactly one execution. Whole-state JSON rewrite per step.
+12. **Single writer per state set.** The file backend has no locking. Redis uses one lease per namespace (the server: one per user) with a fail-closed write; it is not a
+    consensus lock, so a Redis failover that loses the lease key can briefly allow two writers.
+13. Redis durability is the server's: without `appendonly yes` a Redis crash can lose recent checkpoints. Nodes refuse such a Redis unless told otherwise. No TLS client,
+    no Sentinel or Cluster. Redis calls are synchronous (block the event loop for each call).
+14. No Postgres backend.
+
+## SDK and HTTP API
+15. Tested on the practice chain, an Ethereum mainnet fork and a Solana validator. Snipe and copy creation over HTTP answer 501 unless the host supplies a launch or leader
+    source. No wallet creation, withdrawals, bridging or billing.
+16. The package archive `memedesk-sdk-0.1.0.tgz` is not rebuilt automatically: run `npm run pack:sdk` after source changes.
+
+## Execution server (`apps/server`)
+17. Practice accounts only: no real-chain account factory, because there is no production key custody. See `docs/PRODUCTION_SERVER.md` for what was measured
+    (failover 1 s graceful, 15 s after a crash) and its other limits (per-node rate limits, no throughput test).
+
+## Solana test UI (`/solana`)
+18. Single user, this machine only, real funds on mainnet. Sessions live in server memory: a restart signs the user out and disconnects the trading key (orders are saved
+    and resume when a signer is connected again).
+19. With a wallet login every order fire needs an approval in the open page; unattended fires need the **trading key**, a server-held throwaway wallet in
+    `.state/sol-mainnet/trading-key.json` (0600), capped at 0.05 SOL per trade, 0.25 SOL per day and 0.5 SOL held, expiring after 24 h. It is a hot key on disk, not custody.
+20. Privy sign-in depends on the origins allowed in the Privy app; served through the execution server's `/solana` link on another port it may be refused (not tested).
+21. Holdings and history are read from the chain; USD values come from Jupiter quotes and are indicative.
 
 ## Security
-27. Signer is an in-process HMAC stand-in (see CUSTODY_AND_SIGNING.md). Not a security boundary; keys, policies and the audit log live in the same process as the engine. Signatures are not chain-valid.
-28. No authentication or user model; `userId` is a string passed by the caller.
-29. No rate limiting, anomaly detection, or secrets management.
-30. Abuse flags are wired into `accrue`, but the caller still has to compute and pass them: `accrue` takes `AbuseFlags { selfReferral, wash }` and does not itself call `isSelfReferral` or `washFlag`. The heuristics see only the data the caller gives them (owner and cluster mappings); no device/IP signal collection exists.
-
-## Product / business
-31. Tiers (`defaultTierConfig`) are placeholders: the numbers are config chosen for tests, not Maestro's documented limits, and the price and asset (`USD`) are placeholders. Enforcement functions exist (`enforce`, `Subscriptions.enforce`) but nothing in the engine, copy, snipe, or order paths calls them. No billing or payment rail exists; `Subscriptions.purchase` posts to the in-memory ledger only.
-32. Fee schedules, referral commission, cashback, campaigns, and competition prize rules are our own configurable models; none reproduces a verified Maestro rule. Competition prize payout and referral claims are ledger moves only.
-33. Chain list conflict (12 vs 13) and bridge provider conflict are unresolved.
-34. No legal, compliance, or KYC analysis exists.
-
-## Telegram scraper (`apps/scraper`)
-35. **Live use is BLOCKED.** There is no MTProto client (gramjs/TDLib would be an external dependency) and no user-supplied API id/hash. Only `FakeTransport` is tested; nothing has touched Telegram. Real-world behavior (flood limits, session expiry, 2FA, channel access, message edits/deletes) is unknown.
-36. No desktop app or UI; it is a library. The session store keeps ciphertext in memory; persisting `export()` is the caller's job. `revoke()` wipes only the local blob; it does not terminate the session on Telegram's servers, so the user must also remove it in Telegram (Settings, Devices).
-37. Secret hygiene is by construction (generic errors, redacted log, `toJSON`) plus one test. It is not a defense against a hostile host process or memory inspection; JS strings cannot be reliably zeroed. Passphrase strength is checked only as length >= 8.
-38. Auto mode requires `mode:'auto'`, `autoEnabled=true` and a callback; otherwise it silently stays in preview. The scraper never signs or submits, and it builds intents with `minOut: 0n`, so the downstream engine, simulation, slippage and signer policy are the only protections. Regex extraction plus a chain-existence validator is not proof a token is real or safe; no scam or honeypot check runs here. Dedup state is in memory and resets on restart.
-
-## EVM adapter (`packages/evm`)
-39. **Live use is BLOCKED.** Verified only against known Keccak vectors, EIP-1014 spec vectors, a property check against core `CpAmm`, and recorded eth_call fixtures that use synthetic placeholder addresses. No chain ID, RPC, router, factory, wrapped-native address or init code hash is recorded; nothing here has been compared with a real chain or venue. Not fork tested.
-40. Scope is calldata and math only: no signing, tx submission, gas estimation, nonce or reorg handling, and it is not wired into `Engine` or `Router`. The 997/1000 fee is only the Uniswap V2 default; other V2 forks and router ABI variants must be checked per venue. Fee-on-transfer tokens need `feeOnTransfer` chosen per token (no detection). `V2Venue.quote` runs on a loaded snapshot, so reserves must be refreshed with `V2Venue.load`. Keccak-256 is a hand-written implementation (not an audited library); it is cross-checked but not independently reviewed. Approval planning refuses unlimited approvals unless `allowUnlimited`; allowance reads need an `EthCall` that does not exist yet.
-41. The package does not cover Uniswap V3 / concentrated liquidity, Aerodrome, stable pools, Solana, TON or Tron.
-
-## Practice terminal (`apps/web`, "Tideline")
-42. Runs only on the simulated chain and fixture pools (it imports `packages/core/test/fixtures.ts`) with one hard-coded user and wallets; state is in memory and lost on restart. No authentication; `listen(3000)` is not bound to loopback, so run it only on a trusted machine. Demo controls (move market, mine blocks) exist and would not in production.
-43. Eleven pages (discover, buy & sell, price orders, copy trading, launch check, signals, portfolio, wallets, alerts, activity, plan & fees) drive the real `Engine`, `OrderManager`, `CopyEngine`, `Portfolio` and `PriceAlerts`. The lifecycle tracker, failure explanations and notifications are UI-layer logic in `server.ts`/`index.html`.
-44. **Tier limits are enforced for price orders only.** Plan & fees shows other limits (copy, snipes, wallets, monitors) but does not enforce them; switching plan takes no payment and is a demo.
-45. Plain-language failure explanations are pattern matches on engine failure text for a fixed set of reasons (price moved past limit, honeypot, trading not open, daily or per-trade limit, automation paused, balance, deadline, no route); anything else falls back to a generic message with the raw reason. They can be wrong or stale if engine messages change, and they are not safety advice.
-46. Checked by hand in a browser only. There are no automated browser, UI, accessibility or API tests, so UI regressions are not caught by `npm test`.
-
-## Not implemented
-Telegram desktop app and live Telegram connectivity, wallet-tracking data providers, mempool monitoring, any real venue or chain adapter (live Uniswap, Pancake, Raydium, Pump.fun, STON.fi, SunSwap, etc.; only offline V2 calldata/math exists), real RPC/indexer/price-feed integrations, Rust workers, Postgres store (a schema template exists in `deploy/schema.sql`, unapplied), Redis, Redpanda, ClickHouse, HSM/MPC signing, notification delivery.
-
-## Real-node engine (EvmRpcChain), added 2026-11-13
-- The engine now runs over a `ChainPort` and was exercised on a local mainnet fork (17/17, see CAPABILITY_MATRIX.md). Copy trading, sniping, risk probes and the web terminal still use the in-memory `SimChain` directly. Price orders now run on a real-node port through `OrderRunner` (see below).
-- Platform fees are not collected on a real chain (no fee contract). Fee > 0 is refused at build time instead of being ledgered as collected.
-- Approvals: a sell with too little allowance first runs an exact-amount `approve(router, amountIn)` as a tracked child transaction (`<key>:approve`, policy kind `approve`: per-tx cap and venue allowlist apply, not charged to the daily limit). Tokens needing allowance reset to 0 first (USDT-style) are handled when `resetApprovalFirst` is configured (reset child `<key>:reset:approve`, then exact approve); checked on a mainnet-forked USDT (verify:usdt), otherwise such tokens fail visibly. Approval is waited for until `confirmed`, not `finalized`: a reorg between the approval and the swap would make the swap revert on-chain (gas lost, no fill).
-- Cancelling a PENDING tx: `EvmRpcChain` sets `replaceByFee`; `cancelNonce(force)` sends a higher-fee no-op at the same nonce and returns `replacing`. The original stays unresolved and keeps its limit charge because either tx may win. Checked on anvil only (verify:cancel); the web terminal does not expose it. Cancelling an ABSENT nonce with a noop works in the engine but was only exercised against the simulator and, at node level, on anvil.
-- Real-node `fill.received` for native proceeds relies on the router's WETH `Withdrawal` log; routers that unwrap differently are not supported.
-- Signing on the real-node path is a dev-only `cast` signer with throwaway keys. The policy signer still authorizes with an HMAC stand-in, not an HSM/MPC.
-- The hand-written Keccak is now cross-checked on every transaction (our computed hash must equal the node's), which is evidence for transaction hashing and the selectors used, not an independent review of the whole implementation.
-- Making the engine async exposed one latent bug fixed in this change: a node rejecting a signed tx outright raised an illegal `signed -> failed` transition; the transition is now allowed and the signer charge released.
-
-## Orders on a real-node port (OrderRunner), added 2026-11-13
-- Trigger price is the spot reserve ratio of the best authorized pool at tick time (no TWAP, no oracle, no second source). A one-block price spike inside that pool could trigger an order; the executable-output requirement and `maxDeviationBps` limit this, they do not remove it.
-- Persistence (added after the first version of this section): with `persistPath` on the runner and `Store.open(path)` on the engine, orders, OCO claims, trailing peaks, reservations, the outbox and the in-flight map are written atomically (temp file + fsync + rename) at every step, outbox before submission. A crash-sweep test kills the process before each of 18 checkpoint writes and restarts from disk: always exactly one execution; two deliberate breakages of the write-ahead ordering are caught by that test. Limits: single process only (no file locking, two runners on one file would corrupt each other); whole-state JSON rewrite per step (fine for hundreds of orders, not for millions); no Postgres/Redis implementation; the state files contain signed raw transactions and order details (no private keys, verified on the fork run) so they need the same access control as any user data; disk-full or I/O errors stop the run before it acts (fail closed) but are not retried automatically; the policy signer's daily-limit ledger is separate and persists only if given a durable ledger.
-- If the node is unreachable the runner evaluates nothing (it does not trade on stale data).
-- Venues without a spot price (launchpad curves) are reported as "cannot report a spot price" and never evaluated. Trailing stops and market-cap triggers have not been exercised on a real chain.
-- Retries after an on-chain revert use a new key with the SAME limits (no slippage widening); each retry is a new transaction and costs gas.
-- Fills reported to the order manager are `finalized` outcomes only; an order whose execution is stuck pending stays "fired" until the engine resolves it.
-
-## Copy trading on a real-node port (LeaderWatcher + CopyRunner), added 2026-11-13
-- Leader detection is receipt-based: only transactions SENT BY the leader's EOA are seen. Swaps made through smart-contract wallets, relayers, bundlers or aggregator-internal flows are invisible. A token moving with no opposite quote leg is labelled `transfer` and never copied.
-- There is no mempool monitoring: the earliest signal is a MINED leader block, so the follower always trades after the leader and at a worse price than the leader got. The deviation limit (default behaviour in the fork run: 3%) decides whether it still follows.
-- Balances before/after use `eth_call` at block-1 and block; several leader txs in one block share those reads (sell fractions can be slightly off), and old blocks need archive state.
-- One confirmation policy per watcher and one quote token per chain are enforced. With 0 confirmations a leader reorg orphans the position (attribution reversed, flagged, tokens still held, NO automatic sell); with N confirmations the copy is later but reorg-resistant.
-- Copies already submitted when the leader's tx is reorged are not cancelled. The runner is a single process (state file, no locking), like OrderRunner.
-- Verified only on a local anvil fork with our own leader and follower wallets, WETH/USDC only; the reorg is simulated (snapshot/revert plus re-sending our tx). Pause-new-entries and whale-alert providers are not implemented here (Solana copy trading: see the Solana snipe and copy section).
-
-## Redis state backend, added 2026-11-13
-- The engine store, OrderRunner and CopyRunner accept a `Persist` (file path or Backend). `openRedisState({ namespace })` gives Redis backends. The client is hand-written (RESP over a worker thread, called synchronously with Atomics.wait) because checkpoints are synchronous; every write blocks the event loop until Redis answers. Fine on loopback, a real cost over a network.
-- Durability is the SERVER's: this machine's Redis had `appendonly no` (snapshots only), so a Redis crash could lose recent checkpoints and break the write-ahead guarantee. `openRedisState` refuses such a server unless `requireAof:false`. We did not change your Redis config; to enable AOF run `redis-cli CONFIG SET appendonly yes` (and set it in redis.conf to survive restarts).
-- Single writer: one lock per namespace (SET NX PX, 30 s default, extended by every write). A crashed owner blocks restart until the TTL expires; a process that lost the lock fails closed on its next write. An idle process must call `renew()` or it loses the lock. This is not a distributed consensus lock (no Redlock, no replicas): a failover that loses the lock key can briefly allow two writers.
-- No TLS (`redis://` only), no Sentinel/Cluster, no password rotation. Auth via the URL password works but was not exercised against a server that requires it.
-- The Redis path has unit/integration tests only (including a crash then restart for the copy runner); it has not been run through the anvil fork scripts, and the engine/order state files still default to JSON.
-
-## Web terminal on a real-node port, added 2026-11-13
-- `npm run web:fork` serves the terminal's HTTP API from OUR engine over a local anvil fork (loopback, fake ETH, throwaway dev wallets created at start; they and all state are lost on restart). It is not connected to any public network and has no real signer.
-- Supported in this mode: overview, quote, trade, mine, txs, notes, orders (limit buy, take profit, stop loss, bracket) and the global pause of automated entries. Everything else (copy, portfolio, alerts, signals, launch sniper, risk checks, plan/fees, signing audit, per-wallet automation, simulated market moves, trailing stops, limit sells) returns an explicit "not available" answer; nothing is simulated behind it.
-- The API returns raw base units plus `overview.live.units`. The UI session adapted the UI (decimals, ETH/USDC labels, unavailable pages marked "Sim only") and checked it by hand in the browser pane at desktop and 375px against `web:fork`: buy, review dialog, tracker, bracket exit rules, Add funds, disconnected banner. NOT exercised in the browser on the fork: one-click trading, placing a limit buy from the UI, the sell side, the stale-data indicator. `verify:web` drives the HTTP API only, not the browser; there are still no automated browser tests.
-- Only the WETH/USDC pool. The network fee shown in quotes is an estimate (gas price x 200k gas); platform fees are not collected on this port. The pause blocks automated BUYS only; each blocked order burns one of its retry attempts.
-
-## Sniper and trailing stops on a real-node port, added 2026-11-13
-- Verified only on a local anvil fork with a TEST token we deployed (owner-only trading until a block, no tax, no blacklist, no max-wallet or max-tx rules). Real launches have these; none are exercised.
-- No mempool access: the sniper acts only after the launch is mined, so it is never first and cannot compete with bots. No MEV protection, no private relays.
-- No pre-trade sell or tax simulation: honeypots and sell tax are not detected before buying. Only a buy dry-run is used, and its revert reason is whatever the router surfaces (usually `UniswapV2: TRANSFER_FAILED`), so "trading not enabled" cannot be told apart from other failures. Buy tax is measured after the fill. Loss is bounded by `maxSpend` and `maxAttempts`.
-- Detection covers Uniswap-V2-style pools against the wrapped native token only. No v3/v4, no launchpad curves, nothing before the first poll (it starts at the head).
-- Trailing stops follow the peak at tick time: a spike and fall between two ticks is not seen. The peak is persisted and restored after restart.
-- A launch whose creation is reorged out is revoked and its pool removed (found and fixed by the fork run); the reorg itself is simulated with evm_snapshot/evm_revert.
-- The web terminal on the real-node port exposes trailing stops (placement checked over HTTP; peak, firing and restart are checked by verify:snipe) but not the sniper page or limit sells. The browser UI form for trailing stops was not driven in a browser.
-
-## Solana engine (SolanaChain), added 2026-11-13
-- Verified only on a local solana-test-validator with the Raydium AMM v4 program, one mainnet SOL/USDC pool and its serum market cloned at start-up. Single node: no leader schedule, forks, congestion, priority-fee market, Jito or MEV. Throwaway ed25519 keys; custody is out of scope.
-- Venues: Raydium AMM v4 plus Jupiter Swap API V2 execution (see below). `verify:jupiter` remains a read-only quote comparison (9-18 bps gap on the sampled pool).
-- Jupiter execution: Implemented + locally tested (9 unit tests) + executed on a LOCAL validator with routes cloned from mainnet (`verify:jupiter-swap`, 13 checks). Not tested on devnet or mainnet; no real funds. Only Raydium AMM v4 routes (`dexes=Raydium`) were executed; other DEXes, multi-hop routes and Token-2022 mints are untested. Lookup tables were patched in one field (last-extended slot) for the local chain.
-- Jupiter safety model: we rebuild the v0 transaction ourselves from Jupiter's raw instructions, read lookup tables from the chain, allow only listed DEX programs, our own token accounts and plain wrap transfers, refuse tips/extra signers/platform fees, and simulate the exact bytes before signing. The route can still differ from the simulation at landing time (price can move; slippage bound is the only protection then).
-- Jupiter access: keyless use is limited to about 0.5 requests/s (`JUPITER_API_KEY` optional); no Jito/priority tipping, no `/execute` or `/submit` landing service; the reference quote snapshot is linear, the real price comes from the exact route re-quoted at execution.
-- Quotes ignore the pool's open-orders balances (layout not sourced), so they can differ slightly from the executed output (0 to a few bps observed on the clone).
-- No nonce: the engine's nonce is a local sequence only (`confirmedNonce` is 0). The transaction id is its signature; identical bytes are idempotent at the node. A send that is not yet visible is reported pending for 4 seconds to avoid pointless resends.
-- Blockhash expiry: the engine does not rebuild with a fresh blockhash. A transaction the cluster rejects as unknown/expired fails closed (limit charge released); a new intent is needed. Tested with an unknown blockhash, not by waiting out the 150-slot window.
-- Not implemented: Solana platform fee collection, pending-transaction cancel, priority-fee estimation, and the web terminal does not run on this chain.
-
-
-## Added in the latest pass (all unaudited, local only)
-- Platform fee on EVM: `packages/evm/contracts/FeeRouter.sol` is an unaudited reference contract. The fee comes from `msg.value` on buys and from input tokens on sells (sells approve the FeeRouter, not the venue router). Configured bps must equal the contract's immutable bps. Checked on a local fork only (verify:fee); never deployed, never audited. Do not use with real funds.
-- Telegram: `apps/telegram/bot.ts` is a long-polling Bot API transport (private linked chats only, secret-looking messages deleted, token redacted, update dedupe). It is tested only against an in-process mock of the Bot API; it has never contacted Telegram and there is no bot token in this repo. Linking a chat to an account (`links`) is the operator's job and has no UI.
-- Web terminal browser check: pages were driven in the built-in browser in practice mode (a buy finalized and matched the quote; no NaN or console errors across all 14 pages). Real-node mode and the trailing-stop form were checked over HTTP (verify:web) but not clicked through in a browser.
-- Keccak-256 is checked against `cast keccak` in a test (skipped if Foundry is absent).
-
-## Real markets view (`npm run web:markets`, `packages/live/src/realmarkets.ts`)
-- Read-only display. Real tokens appear on Discover for Ethereum, BNB Smart Chain and Solana. They can never be quoted or bought: the engine knows nothing about them.
-- Price, liquidity, volume, age and market cap come from DexScreener's public API: third party, unverified, can include spoofed tokens (fake "WBNB", fake "DOGE" with fantasy market caps were seen). Our own check is only whether the POOL is real: the official Uniswap V2 / PancakeSwap V2 factory must return the listed pair (`getPair`), or the Solana pool account must be owned by Raydium AMM v4 with size 752. Anything else (V3, CPMM, CLMM, pump-style pools, spoofs) is shown as "unverified pool". On the first live run 4 of 40 tokens verified.
-- A verified pool says nothing about the TOKEN: tax, honeypot, owner powers and holders are not checked for real tokens.
-- BSC prefers the Alchemy BNB endpoint when the key is enabled for it (it is now; checked with one `eth_chainId` call), else the official public endpoint `https://bsc-dataseed.bnbchain.org` (stated limit 10K requests per 5 minutes, `eth_getLogs` disabled). Override with `BSC_RPC_URL`. Factory and router addresses and chain id 56 were read from official pages on 2026-11-14; WBNB is not on those pages and is not used.
-- Candidates are whatever DexScreener boosts, newly profiles or returns for a few name searches, so the list is a sample, not a ranking of the market. Cached for 90 seconds. Base and Robinhood Chain are not included (no sourced addresses yet).
-
-## Launchpads (read-only, `packages/live/src/launchpads.ts`)
-- **Pump.fun (Solana)**: program id, BondingCurve layout (five u64 + bool after the 8-byte discriminator) and the PDA seeds `["bonding-curve", mint]` are from the official `pump-public-docs` repo; the discriminator is computed locally (sha256 of `account:BondingCurve`) and matches the IDL value. Read live: tokens still on the curve show the share of supply left on it; a completed curve shows "graduated, liquidity moves to PumpSwap". **The graduation threshold is not published, so there is no progress percentage** and Pump.fun tokens never appear under "Approaching migration". PumpSwap pools are not read. Layout fields after the first six are not decoded.
-- **Four.meme (BNB Smart Chain)**: TokenManager and Helper3 addresses and the `getTokenInfo` ABI are from the official `four-meme-community/fourmeme-docs` repo; the selector was checked against Foundry's `cast sig`. Progress is `funds / maxFunds` as a percentage only: the docs give conflicting raise figures (24 BNB in the create guide, about $10,000 in the user guide), so no BNB amount is claimed. At 70% or more a token appears under "Approaching migration". New launches are found from `TokenCreate` events scanned in 10-block windows (Alchemy's free tier limit; `BSC_LOGS_WINDOW` raises it), covering only the last ~300 blocks per refresh, so many launches are missed. The official docs list no public "new tokens" API. The OpenFour system is not covered.
-- **Raydium LaunchLab (Solana)**: only the official program id (`LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj`) is recorded. NOT decoded: byte offsets and exact pool seeds are unpublished and the docs themselves contradict each other (PoolState vs LaunchState). Do not treat LaunchLab tokens as supported.
-- Nothing here trades. Buying on a bonding curve (instructions, accounts, slippage on a virtual curve) is not implemented and needs its own local-validator or fork verification first.
-- Per-chain display is capped (14 per chain) and keeps one token per symbol per chain, because spoofs copy popular names (a dozen fake "SOL" tokens were seen).
-
-## Discover layout (lifecycle columns)
-- Columns run left to right as New (launchpad token still on its curve), Almost bonded, Migrated (curve finished, liquidity moved to a DEX pool); Markets below holds tokens that trade on a DEX pool and were not launched on a curve we read. The stage of a real token is read on-chain (`stage` in `realmarkets.ts`), never guessed.
-- Almost bonded only ever holds Four.meme tokens at 70% or more of the raise target (70% is our display choice, not a Four.meme rule). Pump.fun tokens cannot appear there because its graduation threshold is not published. At the last live run the column was empty (no Four.meme token at 70%): 3 New, 0 Almost bonded, 13 Migrated, 17 Markets.
-- A token launched on a platform we do not read (other Solana launchpads, LaunchLab, Base) shows as a market token or an unverified pool, so New is a subset of real new launches, not all of them.
-
-## Token detail panel (`packages/live/src/tokeninfo.ts`, `GET /api/tokeninfo`)
-- Read-only, only for tokens already in the real list. Tabs: Activity (trades), Holders, Liquidity, Contract controls.
-- **Read on-chain by us:** Pump.fun creator (BondingCurve account bytes 49..81 by IDL field order), creator balance (their associated token account, derived with the mint's own token program id), mint and freeze authority, the ten largest token accounts and their owners (curve-held share labelled and excluded from a second concentration figure), ERC-20 `owner()` and its balance.
-- **Third party:** trades come from GeckoTerminal (last ~300 of a DEX pool; sender address as reported; about 30 calls a minute, so one call every 2.2 s process-wide and a 60 s cache). "Whale" means $5,000 or more, our display choice. Tokens still on a launchpad curve have no pool feed.
-- **Not read, and the panel says so:** the dev's other launches and any dev sells (needs wallet history), Ethereum and BNB holder lists (needs an indexer), the deployer of an EVM token (only `owner()`), whether an EVM token can be minted. A token with no `owner()` is NOT shown as safe. Wallet profit-and-loss and "smart money" labels are not computed.
-- Live checks on 2026-11-14: a Pump.fun token (creator, 50.06% top-10, 23.94% on the curve), Ethereum PEPE (owner renounced, 300 trades, largest $52,479) and a BNB token (no owner() function). Panel tabs were exercised in Chrome on Ethereum PEPE.
-
-## Whale Bot and Buy Bot (trade feed)
-
-Verification level: Locally tested (mock fetch/sinks) and read-only checked against live GeckoTerminal on 2026-11-14. Nothing is posted anywhere.
-
-**Real:** `packages/live/src/tradefeed.ts` polls recent trades of the top 10 real pools (by liquidity) through GeckoTerminal. `GET /api/whales` serves them; the Whale alerts page applies the saved thresholds (min USD, buy/sell, chain, optional watched wallets) client-side. `apps/telegram/buybot.ts` and `whalebot.ts` hold the message formatting, filters, dedupe and rate limits. `GET /api/buybot/preview` shows what the Buy Bot would post.
-
-**Third party and limits:** trade data comes from GeckoTerminal (about 30 calls/min, only the latest trades per pool, rate limited under load). Sender addresses are as reported, not re-verified on-chain. The 5,000 USD whale line and the 50,000 default alert are this app's own choices. Four.meme TokenManager2 pools are skipped.
-
-**Our design, not Maestro's:** Maestro's Wallet, Whale and Buy Bot docs pages are placeholders. Only these are documented: Buy Bot for up to two tokens free (the premium limit of 10 is a placeholder), Wallet Bot balances and price alerts on BSC/ETH/ARB, Whale Bot notifications for wallets users watch. All settings here are our design.
-
-**Built 2026-11-15, tested against a fake Bot API only:** the Telegram transport (`apps/telegram/bot.ts`) now routes `/buybot` in groups and asks Telegram (`getChatMember`) who is an admin; if Telegram cannot be asked, the sender is not an admin. Groups get nothing else: `/buy`, `/sell` and `/wallet` are ignored there. A Wallet Bot (`apps/telegram/walletbot.ts`): `/wallet add|remove|list|balance` and `/wallet alert add|list|remove` for BSC, Ethereum and Arbitrum, read-only (no keys, no trades), alerts fire once. Limits (5 wallets, 10 alerts) and all command names are this app's own design, since the Maestro Wallet Bot page is a placeholder. A pasted private key is still deleted before any command runs.
-
-**Wiring built 2026-11-15:** `apps/telegram/community.ts` runs one cycle (poll the trade feed only for tokens some group watches, post fresh trades through the Buy Bot, check Wallet Bot price alerts) and a loop that survives a failing cycle; `realLookups` gives the Wallet Bot real read-only data (balance by `eth_getBalance`, prices from DexScreener; checked live and read-only on 2026-11-15, 4/4, see the report in `docs/live-verification/`); `npm run telegram` (`apps/telegram/run.ts`) starts everything against real Telegram, but only when `TELEGRAM_BOT_TOKEN` is set, otherwise it says so and exits. Arbitrum balances need your own `ARBITRUM_RPC_URL` (no default endpoint is guessed). A watched token that is not in the real list is reported in the cycle log, not announced.
-
-**Account linking built 2026-11-15 (practice terminal and fork terminal):** the terminal runs the bot itself when `TELEGRAM_BOT_TOKEN` is set (one poller per token). The Community bots page has "Trade from Telegram": it issues a one-time code (8 characters, works once, expires in 10 minutes, at most 3 unused per account); `/link <code>` in a private chat links that chat, `/unlink` removes it, and an account may link at most 3 chats. Five wrong codes lock a chat out for 10 minutes. The `/link` message is deleted after use, and a message that looks like a key is deleted before anything else. A linked chat's `/buy` and `/sell` go through the same engine and wallet limits as the web, on the simulated chain with fake funds; the terminal mines one block per Telegram trade so the reply says confirmed. Links (chat id and account id only, never codes) are saved to `.cache/telegram-links.json`. Tested end to end with the real server and a fake Bot API (`apps/telegram/e2e.test.ts`) and by unit tests of the code rules.
-
-**Still not done:** the linking flow has not yet been tried by a person on real Telegram (message delivery, the group admin check against Telegram's real API, rate limits and bot privacy settings are all untested against the real service); there is exactly one account (`u1`), so "link" means "link to the practice account", not a login system; the fork terminal trades from Telegram too (USDC against ETH, first dev wallet, plain decimal amounts such as `/buy USDC 0.01` and `/sell USDC 5`), checked 10/10 against a fake Bot API in `docs/live-verification/2026-11-15T16-52-59-346Z-telegram-fork.md` (`npm run verify:telegram-fork`) but never with a real Telegram chat; Telegram `/buy` takes raw base-unit amounts like the web form, not "0.1"; transfers and new-wallet events; trades older than the feed window; DexScreener prices are third-party numbers for the deepest pool.
-
-## Solana snipe and copy trading (2026-11-14)
-Report: [live-verification/2026-11-14T17-36-55-431Z-solana-snipe-copy-validator.md](live-verification/2026-11-14T17-36-55-431Z-solana-snipe-copy-validator.md). 14/14 checks on a local validator (cloned Raydium AMM v4 and the mainnet SOL/USDC pool; throwaway keys, fake SOL). Unit tests: `packages/sol/test/snipecopy.test.ts` (15).
-- Copy: `SolLeaderWatcher` reads the leader's own confirmed transactions and derives the swap from the leader's balance changes (so it sees a swap on any DEX), but our engine can only MIRROR trades on venues it can execute: Raydium AMM v4 and the configured Jupiter pairs. A leader trade elsewhere (for example Pump.fun curves, CLMM/CPMM, Orca) is detected and then skipped for lack of a venue.
-- The validator copy checks used a single token (USDC) on one pool, with our own leader and follower wallets. Leader reorg handling is unit-tested with a scripted node, not exercised on a real cluster.
-- Sniping: `RaydiumLaunchSource` finds new Raydium AMM v4 pools from MINED transactions only (no mempool, no bundles, no Jito tips, no private relay): we are always after the creator. Detection was checked read-only against real mainnet: the 8 most recent transactions touching the create-pool fee account (`RAYDIUM_V4_POOL_CREATION_WATCH`, an account recalled from Raydium's SDK and then confirmed empirically) each parsed into a pool that passed the on-chain checks. Raydium AMM v4 pool creation is rare now (those 8 spanned about 4.5 million slots), and most new Solana memecoins launch on Pump.fun or other programs this engine cannot trade. So this sniper will see few launches and does NOT snipe Pump.fun.
-- Polling the whole program instead of the creation account reads every swap; `missed` reports when a page fills before reaching the cursor. If Raydium changes the creation account, detection goes quiet rather than wrong.
-- The snipe checks on the validator used a SYNTHETIC launch event (a pool cannot be created there). The buy, mint check, exits and idempotency are real; the detection step is not exercised in that run.
-- `MintInspector` checks mint authority, freeze authority and Token-2022 only. It blocks a freeze authority by default (USDC itself has one, which is how the guard was exercised) and warns on a mint authority. It does NOT simulate a sell or check holder concentration or LP burn/lock. A user can opt in to accept a freezable token via `rejectVerdicts`.
-- Not built for Solana: priority-fee or Jito tip estimation, platform fee collection, pending-transaction cancel, and the web terminal on this chain.
-
-## Bulk buy / multi-wallet (2026-11-14)
-`BulkRunner` (packages/core/src/bulk.ts). Unit tests: `packages/core/test/bulk.test.ts` (14). Validator: [report](live-verification/2026-11-14T17-54-08-349Z-bulk-buy-validator.md), 7/7 checks (5 wallets, cloned SOL/USDC Raydium pool, fake SOL).
-- NOT atomic: each leg is an independent transaction from its own wallet (own policy, limits, idempotency key `bulk:<id>:<wallet>`). Some legs can fill while others fail; the summary lists each leg and its reason.
-- Default mode is sequential (one leg at a time, pool refreshed between legs) because legs sent at once are all quoted from the same pool state and land one after another: in the simulated-chain test 4 of 10 parallel legs reverted on their own minimum output (they spent only the network fee). `mode: 'parallel'` exists for same-moment buys and is explicit about that. Sequential is slower and cannot put every leg in one block.
-- `maxImpactBps` judges the TOTAL against the best authorized pool before anything is sent; each leg's own slippage guard cannot see the earlier legs' impact.
-- Max 10 wallets (Maestro's documented ceiling; a plan limit can lower it). No wallet creation or management: the caller supplies existing wallet ids. Buys only: there is no bulk sell yet. Verified on Solana (Raydium) and the simulated chain, not yet on an EVM fork.
-
-## Real-data UI (2026-11-14)
-All of these are read-only: no key is used and nothing is sent.
-- **Sniper launch feed** (`GET /api/launches`, `packages/live/src/launchfeed.ts`): launchpad tokens and new pools from the markets loader, plus Raydium AMM v4 pool creations read from chain, plus a mint-account check (freeze/mint authority, Token-2022) for Solana mints. The "would buy" column is a dry run of example rules. Names and USD figures for tokens we did not find ourselves come from DexScreener (third party, can be wrong or spoofed). Raydium v4 creations are rare now; most Solana launches are on Pump.fun, which this engine cannot trade, so those rows say so. Mined pools only: no mempool, no bundles.
-- **Watch a wallet** (Sniper, Wallets, Portfolio): balances and holdings of any public address. Prices are DexScreener's.
-- **Track a real wallet** (Copy trade, `GET /api/watch/trades`): the wallet's latest swaps, derived from its own balance changes, with what your copy rules would do. Track only. It reads the latest 20 successful transactions, so a busy wallet shows minutes of history. A wallet that trades through a router can show several legs.
-- **Signals**: built-in on-chain sources are real. Telegram-channel sources need a scraper that does not exist yet and show an empty state.
-- **Still sample/practice data**: Orders, Automation, Referrals, Cashback, Support, Subscriptions, Community bots, and the practice sections of Wallets and Portfolio.
-- Free-tier rate limits (GeckoTerminal, public RPC) can leave a panel partly filled; it fills on the next refresh.
-
-## Real-time launch stream (2026-11-14, `packages/live/src/launchstream.ts`)
-The Sniper page now receives new Solana launches by push (Server-Sent Events from `GET /api/launches/stream`) instead of waiting for the 60 s poll. Read-only: it listens and never signs or sends.
-- **How**: a WebSocket `logsSubscribe` on two accounts: the Raydium AMM v4 pool-creation account and Pump.fun's mint-authority account (observed to appear only in token creations). Each notification passes a cheap log filter, then the transaction is fetched and decoded on chain, the mint account is inspected, and the example sniper rules are applied as a dry run. Pump.fun names and symbols are read from the Token-2022 metadata extension of the new mint.
-- **Endpoint**: Alchemy's Solana endpoint on this plan answered `Method 'logsSubscribe' not found`, so the stream uses Solana's public WebSocket (`wss://api.mainnet-beta.solana.com`, override with `SOLANA_WS_URL`). It is rate limited and has no SLA. Decoding still goes through the Alchemy HTTP node. `LAUNCH_STREAM=0` turns the stream off.
-- **Measured** (report `docs/live-verification/2026-11-14T18-24-04-396Z-launch-stream-mainnet-readonly.md`, 45 s run): 24 of 24 notifications decoded, names read for 24 of 24, our receive time minus the block time had median 1.5 s, min 0.7 s, max 16.6 s (whole-second resolution, one run, one network path). Do not read that as a guaranteed speed.
-- **Not covered**: nothing is seen before it is mined (no mempool, no Jito/bundle view); commitment is `confirmed`, not finalized; a dropped socket leaves a gap that is counted and shown but not backfilled (the polled list covers what the chain still has); Pump.fun curves cannot be traded by this engine, so those rows never say "would buy"; Pump.fun mints are Token-2022 and are therefore marked "Unusual" by the mint check; the stream does not read liquidity for Pump.fun curves; Raydium v4 creations are too rare for a short run to see one, so that decode path is covered by unit tests and the earlier polled mainnet check, not by the stream report. The Pump.fun mint-authority account is an observed value, not from a vendor doc: if Pump.fun changes it, the stream goes quiet.
-- **Bug found and fixed while building it**: transactions of version 1 were returned as "missing" because requests used `maxSupportedTransactionVersion: 0`. Raydium launch polling and the Solana copy-trade leader watcher used the same setting, so a version-1 leader transaction would have stalled the copy watcher's cursor. All three now request version 1 (version-1 transactions have the same account/instruction fields). The first two stream runs (18:17 and 18:18 UTC reports) recorded the failures before this fix.
-
-## Remaining pages: what is real and what cannot be (2026-11-15)
-- **Orders**: the table and "New rule" still drive the practice engine. New: "Check a rule against a real token" (take profit, stop loss, limit buy): shows the real price now (DexScreener, third party), the distance to your trigger, and whether this engine could act on that pool (supported venue, $5,000 liquidity floor). Preview only; it places nothing and does not read pool reserves (the real watcher does).
-- **Automation**: each card now says whether it is backed by real data or the practice network.
-- **Referrals, Cashback, Support**: stay as plain "not available" pages. They need real accounts, real fees and a support backend, none of which exist here, so there is no honest real data to show.
-- **Subscriptions**: tier limits are example values (labelled). Switching a plan is a demo; no billing exists.
-- **Community bots**: settings are stored in this browser only. The Buy Bot preview uses real trades from a third-party feed; nothing is posted.
-
-## "New on Solana" board (2026-11-15)
-The Sniper page has a table of every token the live stream has seen (Pump.fun creations and Raydium AMM v4 pool creations): newest first, up to 500 kept and nothing older than 24 hours, with a filter, pause, copy-address and links to pump.fun or DexScreener. The stream now starts when the server starts and keeps running with no page open; what it saw is saved to `.cache/launch-stream.json` and loaded again on restart.
-- **The WebSocket alone was not complete.** Measured on 2026-11-15 against the chain's own signature list for the Pump.fun creation account (about 22 creations a minute): the public WebSocket delivered 14 notifications in roughly 3 minutes while the chain recorded about 65. The stream therefore also polls the signature list every 15 s and decodes anything the socket missed (marked `via: poll`, aged by its real block time, nothing older than 30 minutes). After that change a 60 s run emitted 42 launches (20 from the socket, 26 from the poll), close to the chain's rate. One run, one network path, one minute.
-- **Still not covered:** nothing before it is mined; `confirmed`, not finalized; Pump.fun tokens are watch-only (no curve trading) and show "Unusual" because they are Token-2022; "Created by" is the fee payer of the creation transaction, which is usually, not always, the creator; the board does not show price, market cap or holders (gmgn's per-token numbers need their own indexer); the public WebSocket has no SLA.
-- **Compared with gmgn:** this board lists new launches at about the chain's rate, which is the "new pairs" part of their Solana page. Their trending, volume and holder views are not reproduced.
-
-## Discover list size (2026-11-15)
-Discover now shows up to 30 real tokens per chain (90 across Ethereum, BNB and Solana), up from about 33 in total. A second candidate source was added: GeckoTerminal's free public API (trending pools and most-traded pools on each network). It is market data only: every pool is still checked on-chain, and a token is never treated as trusted because a list contains it. Observed on a live run: 90 tokens, 38 confirmed on-chain, about 50 s for a full refresh.
-- GeckoTerminal's free tier allows about 30 calls a minute. This app makes 6 per refresh, spaced 2.3 s apart, and stops asking after two refusals (HTTP 429). A good list is remembered for 30 minutes and reused when the service refuses, so a rate limit shrinks the list only after that.
-- A refresh takes about a minute, so the server now returns the previous list at once and refreshes in the background (the list is up to about 3 minutes old).
-- gmgn.ai still shows far more tokens because it runs its own indexer. This list is a sample of what two public sources call active, not every token on a chain.
-
-## TWAP orders (2026-11-15)
-A TWAP order splits one buy or sell into equal slices and sends one slice per interval, one at a time. Each slice is a normal engine trade, so wallet limits and the verification ladder apply.
-- It spreads the timing. It does not promise an average price, and it cannot beat the market.
-- A slice that cannot go inside its window (the window defaults to the interval) is skipped and shown as skipped. It is never made up later, so a skipped slice means less than the full amount traded.
-- A price limit makes a slice wait while the price is on the wrong side. Waiting past the window skips the slice.
-- The wallet must hold the whole amount when the order starts. The balance is checked, not reserved, so spending it elsewhere can make later slices fail.
-- Runs on the practice network and on a local mainnet fork (`apps/web/livemode.ts`, `npm run verify:twap`, 11/11 checks on 2026-11-15). It is not wired to any live chain. The "Skip ahead" button moves the practice clock, or on the fork the node's clock (`evm_increaseTime`).
-- On the fork the node only makes a block when something is sent, so while a TWAP is open the terminal mines one empty block when the last block is more than 5 seconds old, to let the schedule follow real time. A real chain does not need this.
-- Tested with 14 unit tests, by hand in the practice terminal, on the fork (`npm run verify:twap`, 15/15 including two restarts in the middle of an order from the state files), and from the Orders page in a browser against the fork. Not tested: real waiting of hours, a live chain, or a power loss. An operating-system-level kill was tested on 2026-11-15 (`npm run verify:kill`, 8/8, report `docs/live-verification/2026-11-15T16-58-01-970Z-kill-test.md`): separate worker processes running a TWAP and a bulk order were killed with SIGKILL, once right before a transaction would leave and once right after one was sent, and fresh processes finished each order with every slice or leg traded exactly once. Not tested: a kill in the middle of a state-file write, or a kill at every possible instruction.
-
-## Bulk sell and the EVM-fork run (2026-11-15)
-- `BulkRunner` now takes `side: 'sell'`: each wallet sells its own token amount, the total price impact is checked first, a wallet that does not hold enough is skipped with a reason, and the same id never sells twice. Covered by 4 new simulated-chain tests (18 bulk tests in all).
-- Bulk buy and bulk sell were run on a local Ethereum mainnet fork (`npm run verify:bulk-evm`): 15/15 checks, report `docs/live-verification/2026-11-15T17-03-03-606Z-bulk-evm-fork.md` (17/17 with the per-wallet amounts). Checks E12 to E15 cover parallel mode (three wallets all sent in the first tick) and stop mode (an over-limit leg fails, the later legs are skipped and send nothing). The two earlier reports with the same name in that folder are failed runs of my own check (it left the approval transaction's gas out of the ETH accounting); the product behaviour was right and the check was fixed.
-- Bulk buy and bulk sell were also run on the local Solana validator (`npm run verify:bulk`, 11/11 checks on 2026-11-15).
-- The Orders page now has a "Multi-wallet orders" panel (practice and real-node fork terminals): pick wallets, a total split equally, sequential or all-at-once, an optional price-impact stop, and see each wallet's state and reason. Driven in a browser against the fork on 2026-11-15.
-- Still true: legs are independent transactions, not an atomic basket; the validator ran sequential mode only (the fork also ran parallel and stop modes); the order form can split one total equally or take a separate amount for each wallet (the per-wallet form was driven in a browser on the practice network on 2026-11-15: 20000 and 30000 both filled; on the fork the same endpoint was run with 0.01 and 0.03 ETH and both legs filled, `npm run verify:bulk-evm` checks E16 and E17, though the form itself was only driven in a browser on the practice network); the two dev wallets of the fork terminal share one user so that a multi-wallet order is one account's request.
-
-
-## Indexer (added 2026-11-15)
-- `indexer/` (Ponder) indexes swaps of a FIXED list of Uniswap V2 pairs and serves them to the Whale feed and Buy Bot when `INDEX_URL` is set; otherwise the terminal polls GeckoTerminal as before. Verified only on a local Ethereum fork (`npm run verify:indexer`, 10 checks). BNB, WETH-quoted pools, Postgres and mainnet backfill are untested. Wallet history, holders and new-pair discovery still use today's sources (planned).
-- Wallet push (added 2026-11-15): Solana only, needs `HELIUS_API_KEY` (bare key or full URL), at most 5 wallets, uses `logsSubscribe` (a mention, not proof of a swap; the existing parser still decides). Verified live with `npm run verify:wallet-push`; reconnect after a real network drop is covered only by unit tests with a fake socket. Ethereum and BNB wallets still use the 60 s cache.
-- Solana discovery (added 2026-11-16): with `HELIUS_API_KEY` set, the launch stream (Pump.fun creations and Raydium pool creations) runs on Helius (WebSocket plus paced reads, one call per 150 ms) and Discover shows a "New on Solana" strip fed by it; without the key it uses the public endpoint as before. Verified live with `npm run verify:helius-stream` (6 checks; 21 to 43 notifications a minute measured across runs, about the same as the public endpoint at the same moment). This lists CREATIONS only: tokens on Orca, Meteora, or Pump.fun after migration are not discovered, and Pump.fun curves cannot be traded by this engine. On the free Helius plan ONE terminal per key is safe: a second server running a stream on the same key hit "Too Many Requests". A decode lost to a rate limit is retried once by the next signature poll; a second failure stays failed (about 1 in 40 on the free plan). Launches during a dropped socket are filled by that poll for up to 30 minutes.
-
-## SDK and execution API (2026-11-16)
-- `packages/sdk` (`Trader`, `MemeClient`) and `apps/api` expose the whole engine over TypeScript and HTTP. They are tested on the practice chain (`packages/sdk/test`) and on an Ethereum mainnet fork (`npm run verify:trader-fork`, 14/14). On a Solana local validator (`npm run verify:trader-solana`, 13/13) with the cloned Raydium SOL/USDC pool. Sniping and copy through the Trader were not part of either run.
-- API keys come from the environment, are held in memory as hashes and have no rotation; the API listens on loopback and has no TLS of its own.
-- Snipe and copy creation over HTTP answers 501 unless the host supplies a launch or leader source; listing works.
-- Ids are namespaced `<userId>.<id>` by the API, so responses show the stored id.
-- No wallet creation, withdrawals, bridging or billing in the SDK or API. Full details: `docs/SDK_AND_API.md`.
+22. The policy signer authorises with an in-process HMAC stand-in; it is not a security boundary. Real deployments need an HSM, KMS or MPC signer behind the same interface.
+23. API keys are SHA-256 hashes in a file, with no rotation API. The API and nodes speak plain HTTP; TLS belongs at the load balancer.
+24. No legal, compliance or KYC analysis exists.
