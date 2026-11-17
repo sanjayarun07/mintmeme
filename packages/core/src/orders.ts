@@ -103,9 +103,8 @@ export class OrderManager {
       const snap = snapOf(o); if (!snap) continue;
       const ev = this.evaluate(o, snap); o.reason = ev.why;
       if (!ev.fire) continue;
-      if (o.ocoGroup) { if (this.claimed.has(o.ocoGroup)) continue; this.claimed.add(o.ocoGroup); }  // atomic claim: one leg only
-      o.status = 'fired'; fired.push(o.id);
-      for (const sib of this.orders.values()) if (sib !== o && sib.ocoGroup && sib.ocoGroup === o.ocoGroup && sib.status === 'active') sib.status = 'cancelled';
+      if (o.ocoGroup) { if (this.claimed.has(o.ocoGroup)) { o.reason = 'another leg of this bracket is executing'; continue; } this.claimed.add(o.ocoGroup); }  // atomic claim: one leg at a time
+      o.status = 'fired'; fired.push(o.id);   // the other legs stay active until this fill succeeds: a failed fill must not leave the position unprotected
       const sell = o.kind !== 'limit_buy';
       this.run({ idempotencyKey: `order:${o.id}:a${o.attempts}`, userId: o.userId, walletId: o.walletId, chain: o.chain,
         tokenIn: sell ? o.token : o.quoteToken, tokenOut: sell ? o.quoteToken : o.token, amountIn: o.amount, minOut: 0n,
@@ -113,12 +112,16 @@ export class OrderManager {
     }
     return fired;
   }
-  /** Execution result callback: bounded retries with unchanged limits; reservation released on terminal outcome. */
+  /** Execution result callback. Filled: the other legs of its bracket are cancelled and the reservation released. Failed: retried (same limits, or wider slippage with chase)
+   *  until maxAttempts; a leg that fails for good leaves the other legs active and releases the shared reservation only when no leg is left. */
   onResult(id: string, ok: boolean) {
-    const o = this.orders.get(id)!; const key = o.kind === 'limit_buy' ? o.quoteToken : o.token;
-    if (ok) { this.res.release(this.owner(o), o.walletId, key); return; }
+    const o = this.orders.get(id)!;
+    if (o.ocoGroup) this.claimed.delete(o.ocoGroup);
+    if (ok) {
+      for (const sib of this.orders.values()) if (sib !== o && sib.ocoGroup === o.ocoGroup && o.ocoGroup && sib.status === 'active') sib.status = 'cancelled';
+      this.res.release(this.owner(o), o.walletId, o.kind === 'limit_buy' ? o.quoteToken : o.token); return;
+    }
     o.attempts++;
-    if (o.attempts >= o.maxAttempts) { o.status = 'failed'; this.res.release(this.owner(o), o.walletId, key); if (o.ocoGroup) this.claimed.delete(o.ocoGroup); }
-    else { o.status = 'active'; if (o.ocoGroup) this.claimed.delete(o.ocoGroup); }   // same limits; slippage widens on the next attempt only if the order opted into chase (see slippageFor)
+    if (o.attempts >= o.maxAttempts) { o.status = 'failed'; this.maybeRelease(o); } else o.status = 'active';
   }
 }

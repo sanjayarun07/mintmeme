@@ -54,16 +54,21 @@ const TERMINAL = new Set(['finalized', 'failed', 'expired']);
 const E18 = 10n ** 18n;
 /** A USD price per whole token as a plain decimal string ("0.0000024"): no exponent, above zero, at most 18 decimals. */
 function usdText(v: unknown, what: string): string {
-  const s = typeof v === 'number' ? (Number.isFinite(v) && v > 0 ? v.toFixed(18).replace(/0+$/, '').replace(/\.$/, '') : '') : String(v ?? '').trim();
+  const s = typeof v === 'number' || typeof v === 'string' ? String(v).trim() : '';   // a number is used as JS prints it: 0.1 stays "0.1"; 1e-7 is refused (send "0.0000001")
   if (!/^\d+(\.\d{1,18})?$/.test(s) || !/[1-9]/.test(s)) throw new SdkError('bad_amount', `${what} must be a USD price above zero as a decimal string, e.g. "0.0000024"`);
   return s;
 }
-/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. Integer maths after one rounding of the rate to 1e-9 USD. */
+/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. One rounding of the rate to 1e-9 USD, then a single integer division. */
 export function usdToE18(usd: string, quoteUsd: number, quoteDecimals: number, tokenDecimals: number): bigint {
-  const rate = BigInt(Math.round(quoteUsd * 1e9)); if (rate <= 0n) throw new SdkError('unavailable', 'the quote-token USD price is not usable', undefined, 503);
+  const rate = Number.isFinite(quoteUsd) && quoteUsd > 0 ? BigInt(Math.round(quoteUsd * 1e9)) : 0n;
+  if (rate <= 0n) throw new SdkError('unavailable', 'the quote-token USD price is not usable', undefined, 503);
   const [w, f = ''] = usd.split('.'); const usd18 = BigInt(w + f.padEnd(18, '0'));
-  const quotePerToken18 = usd18 * 10n ** 9n / rate;   // whole quote per whole token, x1e18
-  return quotePerToken18 * 10n ** BigInt(quoteDecimals) / 10n ** BigInt(tokenDecimals);
+  return usd18 * 10n ** (9n + BigInt(quoteDecimals)) / (rate * 10n ** BigInt(tokenDecimals));
+}
+/** The feed's quote/USD price if it is usable now: a finite positive price observed within maxAgeMs (and not more than 5 s in the future). */
+function freshRate(q: { price: number; at: number } | null | undefined, now: number, maxAgeMs: number): number | null {
+  if (!q || !Number.isFinite(q.price) || q.price <= 0 || !Number.isFinite(q.at)) return null;
+  return now - q.at <= maxAgeMs && q.at - now <= 5_000 ? q.price : null;
 }
 
 export class Trader {
@@ -140,7 +145,7 @@ export class Trader {
   }
   private async trade(i: Intent): Promise<TradeView> {
     let rec = await this.engine.submit(i);
-    if (this.c.advanceChain && !['finalized', 'failed', 'expired'].includes(rec.state)) { await this.c.advanceChain(); rec = await this.engine.advance(i.idempotencyKey); }
+    if (this.c.advanceChain && !TERMINAL.has(rec.state)) { await this.c.advanceChain(); rec = await this.engine.advance(i.idempotencyKey); }
     this.record(rec); return view(rec);
   }
   /** One trade by its idempotency key. */
@@ -169,11 +174,13 @@ export class Trader {
       if (maxBps <= o.slippageBps) throw new SdkError('bad_request', `chase needs a maximum slippage above the starting ${o.slippageBps / 100}%`);
       o.chase = { stepBps, maxBps };
       if (p.maxAttempts === undefined) o.maxAttempts = Math.min(10, Math.max(o.maxAttempts, Math.ceil((maxBps - o.slippageBps) / stepBps) + 1));
+      if (o.slippageBps + (o.maxAttempts - 1) * stepBps < maxBps) throw new SdkError('bad_request', `chase cannot reach ${maxBps / 100}% in ${o.maxAttempts} attempts of ${stepBps / 100}%`, 'Use a larger step, a lower maximum, or more attempts (at most 10).');
     }
     return o;
   }
   private async put(o: Order): Promise<Order> {
-    const have = this.orders.orders.orders.get(o.id); if (have) return have;   // same id twice never places a second order
+    const have = this.orders.orders.orders.get(o.id);   // same id twice never places a second order, and never passes off an ended order as placed
+    if (have) { if (have.status === 'active' || have.status === 'fired') return have; throw new SdkError('conflict', `order ${o.id} already ended (${have.status})`, 'Use a new id to place it again.', 409); }
     try { return await this.orders.place(o); } catch (e) { throw new SdkError('order_refused', (e as Error).message, 'Check the wallet balance (orders reserve it) and your plan limit.', 409); }
   }
   /** Buy `amount` (quote budget) when the price falls to `priceE18` (quote per token x1e18) or `priceUsd` or lower. */
@@ -217,27 +224,39 @@ export class Trader {
   async editOrder(orderId: string, p: { priceE18?: Amount; priceUsd?: string }) {
     const id = idOf(orderId); const o = this.orders.orders.orders.get(id); if (!o) throw new SdkError('not_found', `no order ${orderId}`, undefined, 404);
     if ((p.priceE18 === undefined) === (p.priceUsd === undefined)) throw new SdkError('bad_request', 'send priceE18 or priceUsd (exactly one)');
-    const before = o.usdPrice; let e18: bigint, usd: string | undefined;
+    let e18: bigint, usd: string | undefined;
     if (p.priceUsd !== undefined) { usd = usdText(p.priceUsd, 'priceUsd'); e18 = await this.usdE18(o.token, usd); } else e18 = amount(p.priceE18, 'priceE18');
-    o.usdPrice = usd;   // set before retrigger so its checkpoint saves it; put back if the edit is refused
-    try { return this.orders.retrigger(id, e18); } catch (e) { o.usdPrice = before; if (e instanceof SdkError) throw e; throw new SdkError('bad_request', (e as Error).message, undefined, 409); }
+    const before = { usd: o.usdPrice, e18: o.triggerPriceE18 };
+    o.usdPrice = usd;   // set before retrigger so its checkpoint saves it; both fields are put back if the edit does not go through
+    try { return this.orders.retrigger(id, e18); }
+    catch (e) {   // the trigger already changed means the save failed afterwards: a storage error, passed on as is; otherwise the edit was refused (409)
+      const saveFailed = o.triggerPriceE18 === e18 && e18 !== before.e18; o.usdPrice = before.usd; o.triggerPriceE18 = before.e18;
+      if (saveFailed) throw e; throw new SdkError('bad_request', (e as Error).message, undefined, 409);
+    }
   }
   /** Quote-token trigger (x1e18, raw units) for a USD price per whole token, at the current quote/USD price. Refuses when that price is missing or stale. */
   private async usdE18(token: string, usd: string): Promise<bigint> {
     const f = this.c.usd; if (!f) throw new SdkError('bad_request', 'USD triggers need a USD price feed: pass TraderConfig.usd');
-    const q = await f.quoteUsd(); const now = (this.c.clockMs ?? Date.now)();
-    if (!q || !(q.price > 0) || now - q.at > (f.maxAgeMs ?? 120_000)) throw new SdkError('unavailable', 'no fresh quote-token USD price, so a USD trigger cannot be set now', 'Try again shortly, or set the trigger in the quote token (priceE18).', 503);
-    return usdToE18(usd, q.price, f.quoteDecimals, await f.tokenDecimals(token));
+    const rate = freshRate(await f.quoteUsd(), (this.c.clockMs ?? Date.now)(), f.maxAgeMs ?? 120_000);
+    if (rate === null) throw new SdkError('unavailable', 'no fresh quote-token USD price, so a USD trigger cannot be set now', 'Try again shortly, or set the trigger in the quote token (priceE18).', 503);
+    const e18 = usdToE18(usd, rate, f.quoteDecimals, await f.tokenDecimals(token));
+    if (e18 <= 0n) throw new SdkError('bad_amount', `$${usd} is below the smallest price this token can express in the quote token`, 'Use a higher price, or set the trigger with priceE18.');
+    return e18;
   }
   /** Re-derive the quote-token trigger of every active USD order from a fresh quote/USD price. A stale or missing price moves nothing.
    *  Bracket legs move in the order that keeps take profit above stop loss throughout (falling triggers: stop loss first; rising: take profit first). */
   async syncUsdTriggers(): Promise<number> {
     const f = this.c.usd; if (!f) return 0;
     const live = [...this.orders.orders.orders.values()].filter(o => o.status === 'active' && o.usdPrice !== undefined); if (!live.length) return 0;
-    const q = await f.quoteUsd(); const now = (this.c.clockMs ?? Date.now)(); if (!q || !(q.price > 0) || now - q.at > (f.maxAgeMs ?? 120_000)) return 0;
-    const ups: { o: Order; e18: bigint }[] = []; for (const o of live) ups.push({ o, e18: usdToE18(o.usdPrice!, q.price, f.quoteDecimals, await f.tokenDecimals(o.token)) });
+    const rate = freshRate(await f.quoteUsd(), (this.c.clockMs ?? Date.now)(), f.maxAgeMs ?? 120_000); if (rate === null) return 0;
+    const ups: { o: Order; used: string; e18: bigint }[] = [];
+    for (const o of live) { const used = o.usdPrice; if (used === undefined) continue; const e18 = usdToE18(used, rate, f.quoteDecimals, await f.tokenDecimals(o.token)); if (e18 > 0n) ups.push({ o, used, e18 }); }
     const rank = (u: { o: Order; e18: bigint }) => (u.e18 < (u.o.triggerPriceE18 ?? 0n)) === (u.o.kind === 'stop_loss') ? 0 : 1;
-    let moved = 0; for (const u of ups.sort((a, b) => rank(a) - rank(b))) if (u.e18 !== u.o.triggerPriceE18 && u.o.status === 'active') { try { this.orders.retrigger(u.o.id, u.e18); moved++; } catch (e) { this.emit({ type: 'error', where: `usd ${u.o.id}`, message: (e as Error).message }); } }
+    let moved = 0;
+    for (const u of ups.sort((a, b) => rank(a) - rank(b))) {
+      if (u.o.status !== 'active' || u.o.usdPrice !== u.used || u.e18 === u.o.triggerPriceE18) continue;   // edited, fired or cancelled while the feed was read: leave it
+      try { this.orders.retrigger(u.o.id, u.e18); moved++; } catch (e) { this.emit({ type: 'error', where: `usd ${u.o.id}`, message: (e as Error).message }); }
+    }
     return moved;
   }
   cancelOrder(orderId: string) { const o = this.orders.orders.orders.get(idOf(orderId)); if (!o) throw new SdkError('not_found', `no order ${orderId}`, undefined, 404); this.orders.cancel(orderId); return this.orders.orders.orders.get(orderId)!; }

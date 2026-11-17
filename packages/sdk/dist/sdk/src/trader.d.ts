@@ -121,7 +121,7 @@ export type TraderEvent = {
     where: string;
     message: string;
 };
-/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. Integer maths after one rounding of the rate to 1e-9 USD. */
+/** USD per whole token -> quote units per raw token x1e18, at `quoteUsd` USD per whole quote token. One rounding of the rate to 1e-9 USD, then a single integer division. */
 export declare function usdToE18(usd: string, quoteUsd: number, quoteDecimals: number, tokenDecimals: number): bigint;
 export declare class Trader {
     private c;

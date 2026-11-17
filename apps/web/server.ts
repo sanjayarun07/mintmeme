@@ -9,7 +9,9 @@ import { realError } from './realerror.ts';
 import type { SolMainnet } from './solmainnet.ts';
 
 const ser = (v: unknown) => JSON.stringify(v, (_, x) => (typeof x === 'bigint' ? x.toString() : x));
-let solMainInst: SolMainnet | undefined; const solMain = async () => solMainInst ??= new (await import('./solmainnet.ts')).SolMainnet();
+/** State folder of the wallet session (default .state/sol-mainnet). Tests pass a temporary folder so they can never touch the real kill switch, limits or keys. */
+let stateDir: string | undefined;
+let solMainInst: SolMainnet | undefined; const solMain = async () => solMainInst ??= new (await import('./solmainnet.ts')).SolMainnet(stateDir);
 const routes = () => import('./solroutes.ts');
 
 export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
@@ -17,14 +19,14 @@ export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
   '/api/sol/search': async b => (await routes()).solSearch(b), '/api/sol/token': async b => (await routes()).solToken(b), '/api/sol/simulate': async b => (await routes()).solSimulate(b),
   '/api/sol/auth/nonce': async b => (await solMain()).authNonce(b), '/api/sol/auth/verify': async b => (await solMain()).authVerify(b),
   '/api/sol/sign/pending': async b => (await solMain()).pendingSigns(b), '/api/sol/sign/submit': async b => (await solMain()).submitSign(b), '/api/sol/sign/reject': async b => (await solMain()).rejectSign(b),
-  '/api/sol/wallet/status': async () => (await solMain()).status(), '/api/sol/wallet/connect': async b => (await solMain()).connect(b), '/api/sol/wallet/disconnect': async b => (await solMain()).disconnect(b),
+  '/api/sol/wallet/status': async () => (await solMain()).status(), '/api/sol/wallet/disconnect': async b => (await solMain()).disconnect(b),
   '/api/sol/settings': async b => { const m = await solMain(); return b && b.maxTradeSol !== undefined ? m.setLimits(b) : m.status(); },
   '/api/sol/kill': async b => (await solMain()).killSwitch(b?.on !== false, b),
   '/api/sol/trade/prepare': async b => (await solMain()).prepare(b), '/api/sol/trade/confirm': async b => (await solMain()).confirm(b),
   '/api/sol/holdings': async b => (await solMain()).holdings(b), '/api/sol/history': async b => (await solMain()).history(b),
   '/api/sol/orders/context': async b => (await solMain()).orderContext(b), '/api/sol/orders/list': async b => (await solMain()).listOrders(b),
   '/api/sol/orders/create': async b => (await solMain()).createOrder(b), '/api/sol/orders/cancel': async b => (await solMain()).cancelOrder(b), '/api/sol/orders/edit': async b => (await solMain()).editOrder(b),
-  '/api/sol/tradingkey/info': async () => (await solMain()).tradingKeyInfo(), '/api/sol/tradingkey/create': async b => (await solMain()).tradingKeyCreate(b),
+  '/api/sol/tradingkey/create': async b => (await solMain()).tradingKeyCreate(b),
   '/api/sol/tradingkey/use': async () => (await solMain()).tradingKeyUse(), '/api/sol/tradingkey/fund': async b => (await solMain()).fundTradingKey(b),
   '/api/sol/tradingkey/return': async b => (await solMain()).tradingKeyReturn(b), '/api/sol/tradingkey/funders': async () => ({ funders: await (await solMain()).keyFunders() }),
 };
@@ -37,8 +39,11 @@ const STATIC: Record<string, string> = { '/styles.css': 'text/css', '/solana.css
 const RPC_OK = new Set(['getLatestBlockhash', 'getBalance', 'getFeeForMessage', 'simulateTransaction', 'getAccountInfo', 'getMultipleAccounts', 'getTokenAccountsByOwner', 'getTokenAccountBalance', 'getSlot',
   'getBlockHeight', 'isBlockhashValid', 'getMinimumBalanceForRentExemption', 'getRecentPrioritizationFees', 'getVersion', 'getEpochInfo']);
 
-export function createSolServer() {
-  return http.createServer(async (req, res) => {
+export function createSolServer(o: { stateDir?: string } = {}) {
+  if (o.stateDir) { if (solMainInst) throw new Error('createSolServer: the wallet session already started with another state folder'); stateDir = o.stateDir; }
+  // any error that escapes a request becomes a 500 for that request; it must never stop the server (standing orders are watched by this process)
+  return http.createServer((req, res) => { handle(req, res).catch(e => { console.error('[solana] request failed:', (e as Error)?.message); if (!res.headersSent) { res.writeHead(500, { 'content-type': 'application/json' }); res.end(ser(realError(500, 'internal error'))); } else res.end(); }); });
+  async function handle(req: http.IncomingMessage, res: http.ServerResponse) {
     const u = new URL(req.url ?? '/', 'http://localhost');
     let setCookie: string | undefined;
     const send = (code: number, body: string, type = 'application/json') => { res.writeHead(code, { 'content-type': type + '; charset=utf-8', 'cache-control': 'no-cache', ...(setCookie ? { 'set-cookie': setCookie } : {}) }); res.end(body); };
@@ -46,11 +51,14 @@ export function createSolServer() {
     if (u.pathname === '/solana' || u.pathname === '/solana.html') return send(200, readFileSync(new URL('./solana.html', import.meta.url), 'utf8'), 'text/html');
     if (STATIC[u.pathname]) { const f = new URL('.' + u.pathname, import.meta.url); if (!existsSync(f)) return send(404, '{}'); return send(200, readFileSync(f, 'utf8'), STATIC[u.pathname]); }
     if (!u.pathname.startsWith('/api/sol/')) return send(404, ser({ ok: false, title: 'Not found', why: `No page ${u.pathname}.`, fix: 'Open /solana.' }));
+    // Host first, for every /api/sol route: a DNS-rebinding page arrives with its own host name and must not even read the wallet status
+    const host = req.headers.host, origin = req.headers.origin;
+    const refuse = () => send(403, ser({ ok: false, title: 'Refused', why: 'Wallet and trade calls only accept JSON posts from this page.', fix: 'Use the page at the address shown when the server started.' }));
+    if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host ?? '')) return refuse();
     if (req.method === 'GET' && READ_ONLY_GET.has(u.pathname)) { try { return send(200, ser(await SOL_ROUTES[u.pathname]({}))); } catch (e) { return send((e as any).status ?? 500, ser(realError((e as any).status ?? 500, (e as Error).message))); } }
     if (req.method !== 'POST') return send(405, ser({ ok: false, title: 'Not allowed', why: 'Use POST with a JSON body.', fix: '' }));
-    const origin = req.headers.origin, host = req.headers.host;
-    if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host ?? '') || (origin && new URL(origin).host !== host) || !String(req.headers['content-type'] ?? '').startsWith('application/json'))
-      return send(403, ser({ ok: false, title: 'Refused', why: 'Wallet and trade calls only accept JSON posts from this page.', fix: 'Use the page at the address shown when the server started.' }));
+    // an Origin, when sent, must be exactly this page ("null" from a sandboxed frame, or anything unparsable, is refused, never thrown)
+    if ((origin !== undefined && origin !== `http://${host}`) || !String(req.headers['content-type'] ?? '').startsWith('application/json')) return refuse();
     let body: any = {}; { const chunks: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 256 * 1024) return send(413, '{}'); chunks.push(c as Buffer); } try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { return send(400, '{}'); } }
     if (u.pathname === '/api/sol/rpc') {
       const key = process.env.ALCHEMY_API_KEY; if (!key) return send(503, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'no RPC configured' } }));
@@ -66,7 +74,7 @@ export function createSolServer() {
       if (r && (r as any).__setSession !== undefined) { const t = (r as any).__setSession; delete (r as any).__setSession; setCookie = t ? `mint_sol=${t}; HttpOnly; SameSite=Strict; Path=/api/sol; Max-Age=86400` : 'mint_sol=; HttpOnly; SameSite=Strict; Path=/api/sol; Max-Age=0'; }
       return send(200, ser(r));
     } catch (e) { return send((e as any).status ?? 500, ser(realError((e as any).status ?? 500, (e as Error).message))); }
-  });
+  }
 }
 
 if (import.meta.main) {

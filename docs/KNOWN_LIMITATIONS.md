@@ -5,7 +5,7 @@ and the **Solana test UI** (`/solana`, `apps/web`). Everything else (Telegram bo
 their reports) was removed; it is preserved in git tag `v0.1.0-full-platform`, together with the longer version of this file. Where a limit below cites a check that was
 run with a harness that no longer exists here, that harness and its report are in the tag.
 
-Tests at the time of the cleanup: `npm test` 370 of 370 pass; `npm run verify:sol-guard` (local Solana validator, fake funds) 55 of 55 pass.
+After the 2026-11-17 end-to-end review and fixes: `npm test` 378 of 378 pass; `npm run verify:sol-guard` (local Solana validator, fake funds) 55 of 55 pass.
 
 ## Evidence levels
 - **Practice chain** (`SimChain`, in-process simulator): everything in the SDK and API.

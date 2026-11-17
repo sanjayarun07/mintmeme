@@ -168,3 +168,26 @@ test('USD bracket legs are placed in dollars and keep take profit above stop los
   // the token's USD price is spot x rate: rates between 0.5 and 8 (base 2) keep it between the stop loss (1/4) and take profit (4x), so nothing fires while both legs move
   for (const r of [1, 6, 0.7, 7.5]) { rate = r; await trader.tick(); const [tp, sl] = legs.map(l => trader.getOrder(l.id)!); assert.ok(tp.triggerPriceE18! > sl.triggerPriceE18!, `rate ${r}`); assert.equal(tp.status, 'active'); }
 });
+
+test('review fixes: USD conversion is one exact division, tiny or broken feeds never make a zero trigger, an edit during a sync wins, and an ended order id is not passed off as placed', async () => {
+  const { usdToE18 } = await import('../src/trader.ts');
+  // SOL (9 decimals), a 6-decimal token, $150: 1e-12 USD per token -> 6666.66.. lamports per raw unit x1e18 / 1e12 ... exact single division
+  assert.equal(usdToE18('0.000000000001', 150, 9, 6), 6666666n); assert.equal(usdToE18('0.000000000000001', 150, 9, 6), 6666n);
+  assert.throws(() => usdToE18('1', Infinity, 9, 6), /not usable/); assert.throws(() => usdToE18('1', NaN, 9, 6), /not usable/);
+  let at: any = undefined, price = 2; const feed = { quoteUsd: () => ({ price, at }), quoteDecimals: 18, tokenDecimals: () => 18 };
+  let ms = 0; const { trader, chain } = createSimTrader({ usd: feed, clockMs: () => ms }); await trader.buy({ walletId: 'w1', token: T, amount: 50_000n, key: 'seed' });
+  await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceUsd: '5' }), /no fresh/, 'a feed time that is not a number is not fresh');
+  at = ms + 60_000; await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceUsd: '5' }), /no fresh/, 'nor one from the future');
+  at = 0; await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceUsd: '0.000000000000000001' }), (e: any) => /smallest price/.test(e.message), 'a price that rounds to 0 is refused, never a 0 trigger');
+  await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceUsd: 1e-7 as any }), /decimal string/, 'exponents refused');
+  const o = await trader.limitSell({ id: 'u', walletId: 'w1', token: T, amount: 1_000n, priceUsd: 0.1 as any }); assert.equal(o.usdPrice, '0.1', 'no float noise');
+  // an edit that lands while the feed is being read wins
+  let release!: () => void; const slow = new Promise<void>(r => (release = r));
+  (feed as any).quoteUsd = async () => { await slow; return { price: 4, at: 0 }; };
+  const sync = trader.syncUsdTriggers(); await trader.editOrder('u', { priceE18: 12345n * 10n ** 18n }).catch(() => {}); release(); await sync;
+  assert.equal(o.usdPrice, undefined); assert.equal(o.triggerPriceE18, 12345n * 10n ** 18n, 'the sync did not overwrite the edit');
+  // an ended order id is refused instead of returned as placed
+  trader.cancelOrder('u'); await assert.rejects(trader.limitSell({ id: 'u', walletId: 'w1', token: T, amount: 1_000n, priceE18: px(chain) * 3n }), (e: any) => e.code === 'conflict');
+  // chase that cannot reach its cap is refused
+  await assert.rejects(trader.limitSell({ walletId: 'w1', token: T, amount: 1_000n, priceE18: px(chain) * 3n, slippageBps: 100, maxAttempts: 2, chase: { stepBps: 100, maxBps: 500 } }), /cannot reach/);
+});

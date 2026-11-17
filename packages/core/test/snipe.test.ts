@@ -59,7 +59,7 @@ test('4b. snipe waits for trading to open + delay, then emits a bounded intent; 
   const entry = 10_000n * E18 / tokens;
   assert.equal(orders[0].triggerPriceE18, entry * 2n); assert.equal(orders[1].triggerPriceE18, entry * 7n / 10n);
   const snap = (p: bigint) => () => ({ priceE18: p, ts: 1000, liquidity: 10n, executableOut: (o: { amount: bigint }) => o.amount * p / E18 });
-  assert.deepEqual(mgr.tick(snap(entry * 21n / 10n)), [orders[0].id]); assert.equal(mgr.orders.get(orders[1].id)!.status, 'cancelled');
+  assert.deepEqual(mgr.tick(snap(entry * 21n / 10n)), [orders[0].id]); mgr.onResult(orders[0].id, true); assert.equal(mgr.orders.get(orders[1].id)!.status, 'cancelled');
 });
 
 test('4c. attempts strictly bounded: no more than maxAttempts, one per block, spend never exceeds maxSpend, slippage never widens', () => {

@@ -16,6 +16,4 @@ async function act(p,b){try{const r=await api(p,b);if(r&&r.ok===false)toast('err
 function toast(level,title,body){const t=document.createElement('div');t.className='toast '+level;t.innerHTML=`<b>${esc(title)}</b><span>${esc(body)}</span>`;t.onclick=()=>t.remove();$('#toasts').append(t);setTimeout(()=>t.remove(),level==='error'?12000:7000)}
 const IC={ok:'✓',success:'✓',warn:'!',error:'✕',info:'i',plain:'i'};
 const notice=(lvl,title,body='')=>`<div class="notice ${lvl}" role="${lvl==='error'?'alert':'note'}"><span class="ic" aria-hidden="true">${IC[lvl]}</span><div>${title?`<b>${title}</b>`:''}${body}</div></div>`;
-const skeleton=n=>Array.from({length:n},()=>'<div class="skel" style="height:54px;margin-bottom:10px"></div>').join('');
 const head=()=>'';   // this page has its own header
-const go=()=>{};

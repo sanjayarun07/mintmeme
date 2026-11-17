@@ -1,7 +1,7 @@
 /* Professional layout for the standalone Solana page. Overrides how the shared Solana view (views3.js) presents search results and the token, and drives the header
  * (wallet chip and kill switch). Everything that trades still goes through the same view code, routes and checks as before: this file only changes presentation. */
 (function(){
-  const view=V.solana,SOL='So11111111111111111111111111111111111111112';
+  const view=V.solana;
   const solfmt=l=>l==null?'–':(Number(l)/1e9).toLocaleString('en',{maximumFractionDigits:4});
   const looksMint=q=>/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(q);
   const copy=async(t,btn)=>{try{await navigator.clipboard.writeText(t);const o=btn.textContent;btn.textContent='Copied';setTimeout(()=>btn.textContent=o,1200)}catch{toast('warn','Could not copy','Select the address and copy it by hand.')}};
@@ -12,7 +12,7 @@
     const w=view.w,chip=$('#wchip'),kill=$('#killbtn');if(!chip||!kill)return;
     if(!w||!w.connected){chip.innerHTML='<span class="dot off"></span><span>No wallet connected</span>';kill.hidden=true;return}
     const L=w.limits||{};
-    chip.innerHTML=`<span class="dot ${w.killed?'bad':'on'}"></span><span class="mono" title="${esc(w.address)}">${esc(short(w.address))}</span><span class="sep"></span><b class="num">${esc(solfmt(w.balanceLamports))} SOL</b><span class="sep"></span><span class="muted">Spent today ${esc(solfmt(w.spentTodayLamports))} / ${esc(solfmt(L.dailyCapLamports))}</span>`;
+    chip.innerHTML=`<span class="dot ${w.killed?'bad':'on'}"></span><span class="mono" title="${esc(w.address)}">${esc(short(w.address))}</span><span class="sep"></span><b class="num">${esc(solfmt(w.balanceLamports))} SOL</b><span class="sep"></span><span class="muted">Market buys today ${esc(solfmt(w.spentTodayLamports))} / ${esc(solfmt(L.dailyCapLamports))}</span>`;
     kill.hidden=false;kill.dataset.on=w.killed?'1':'0';kill.textContent=w.killed?'Trading paused: resume':'Pause trading';kill.className='btn sm '+(w.killed?'primary':'');
   }
   const origWallet=view.wallet;
@@ -28,8 +28,10 @@
   };
 
   /* ---------- transaction history ---------- */
-  view.history=async function(){
-    const el=$('#shist');if(!el)return;if(!this.w||!this.w.connected){el.innerHTML='';return}
+  view.history=async function(force){
+    const el=$('#shist');if(!el)return;if(!this.w||!this.w.connected){el.innerHTML='';this.__h=null;return}
+    // the 30 s wallet refresh would re-read ~20 transactions each time: re-read only every 3 minutes, when the wallet changes, or when asked
+    const key=this.w.address;if(!force&&this.__h&&this.__h.key===key&&Date.now()-this.__h.at<180000&&el.innerHTML)return;this.__h={key,at:Date.now()};
     const r=await api('/api/sol/history',{}).catch(()=>null);if(!$('#shist'))return;if(!r||r.ok===false){el.innerHTML='';return}
     const usdf=v=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v);
     const when=t=>t?new Date(t).toLocaleString('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'–';
@@ -40,7 +42,6 @@
       return `<tr><td class="muted nowrap">${esc(when(x.time))}</td><td><span class="kind k-${esc(x.kind.split(' ')[0].toLowerCase())}">${esc(x.kind)}</span></td><td class="r num">${sol}${tok}</td><td class="r"><a href="https://solscan.io/tx/${encodeURIComponent(x.signature)}" target="_blank" rel="noopener noreferrer" title="${esc(x.signature)}">${esc(x.signature.slice(0,6))}…</a></td></tr>`}).join('');
     el.innerHTML=`<section class="panel flush"><div class="phead"><h2>Transaction history</h2><span class="muted">Last ${r.rows.length} on this wallet · read from the chain</span></div>${rows?`<div class="tw"><table><thead><tr><th>Time</th><th>Type</th><th class="r">Change</th><th class="r">Transaction</th></tr></thead><tbody>${rows}</tbody></table></div>`:'<div class="pad muted">No transactions yet.</div>'}</section>`;
   };
-  addEventListener('DOMContentLoaded',()=>{});
   document.addEventListener('click',async e=>{
     const k=e.target.closest('#killbtn');if(!k||!view.w)return;
     const r=await act('/api/sol/kill',{on:!view.w.killed});if(r&&r.ok!==false){toast('success',view.w.killed?'Trading allowed':'Trading paused','');view.wallet()}

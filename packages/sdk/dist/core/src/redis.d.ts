@@ -15,6 +15,8 @@ export declare class SyncRedis {
 }
 /** Write KEYS[2] only while KEYS[1] (the lock) still holds our token, extending the lock. Shared with the cluster server's per-user leases. */
 export declare const WRITE_LUA = "if redis.call('get',KEYS[1])==ARGV[1] then redis.call('pexpire',KEYS[1],ARGV[2]); redis.call('set',KEYS[2],ARGV[3]); return 1 else return 0 end";
+/** Extend KEYS[1] only while it still holds our token. */
+export declare const RENEW_LUA = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('pexpire',KEYS[1],ARGV[2]) else return 0 end";
 export declare const RELEASE_LUA = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
 export interface RedisStateOpts {
     url?: string;

@@ -125,3 +125,24 @@ test('the API console is served by every node, and every API response names the 
     const fwd = await fetch(B.url + '/v1/overview', { headers: { authorization: 'Bearer ' + KA } }); assert.equal(fwd.status, 200); assert.equal(fwd.headers.get('x-memedesk-node'), A.url, 'forwarded: still names the owner');
   } finally { await A.nd.drain().catch(() => {}); await B.nd.drain().catch(() => {}); wipe(n); }
 });
+
+test('review fixes: a request target that is not a path is refused (no forwarding to a host the client picks), and the /solana link needs a loopback Host too', { skip, timeout: 30_000 }, async () => {
+  const { default: http } = await import('node:http'); const { isLoopbackHost } = await import('./node.ts');
+  const n = ns(); const A = await node(n), B = await node(n);
+  try {
+    await A.client(KA).overview();   // A owns alice, so B would forward her requests
+    const raw = (target: string) => new Promise<number>(ok => { const u = new URL(B.url); const rq = http.request({ host: u.hostname, port: u.port, path: target, headers: { authorization: 'Bearer ' + KA } }, r => { r.resume(); ok(r.statusCode!); }); rq.on('error', () => ok(0)); rq.end(); });
+    assert.equal(await raw('//169.254.169.254/latest/meta-data'), 400); assert.equal(await raw('http://169.254.169.254/latest/meta-data'), 400); assert.equal(await raw('/v1/overview'), 200);
+    assert.ok(isLoopbackHost('localhost:3500') && isLoopbackHost('127.0.0.1') && isLoopbackHost('[::1]:3500') && !isLoopbackHost('evil.example:3500') && !isLoopbackHost(undefined));
+  } finally { await A.nd.drain().catch(() => {}); await B.nd.drain().catch(() => {}); wipe(n); }
+});
+
+test('practice accounts keep trading after a failover: the rebuilt simulated chain continues from the restored nonces', { skip, timeout: 30_000 }, async () => {
+  const n = ns(); const A = await node(n); let B: Awaited<ReturnType<typeof node>> | undefined;
+  try {
+    assert.equal((await A.client(KA).buy({ walletId: 'w1', token: T, amount: 10_000n, key: 'before' })).state, 'finalized');
+    await A.nd.drain(); B = await node(n);
+    const after = await B.client(KA).buy({ walletId: 'w1', token: T, amount: 10_000n, key: 'after' });
+    assert.equal(after.state, 'finalized', `the first trade on the new owner must not hang (state ${after.state})`);
+  } finally { await B?.nd.drain().catch(() => {}); await A.nd.drain().catch(() => {}); wipe(n); }
+});

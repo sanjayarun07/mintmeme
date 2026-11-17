@@ -51,5 +51,5 @@ export class TradeGuard {
     t.used = true; this.save(); return t;
   }
   /** Give back the daily-cap amount of a buy that was refused before anything was sent. */
-  refund(t: Ticket) { if (t.side === 'buy') { this.spent.set(this.day(), this.spentToday() - t.lamports); this.save(); } }
+  refund(t: Ticket) { if (t.side === 'buy') { const left = this.spentToday() - t.lamports; this.spent.set(this.day(), left > 0n ? left : 0n); this.save(); } }   // never below zero (a refund after midnight UTC)
 }

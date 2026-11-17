@@ -9,6 +9,9 @@ import type { Account } from './node.ts';
 
 export function practiceAccount(userId: string, state: (name: string) => Backend): Account {
   const s = createSimTrader({ userId, state, clockMs: Date.now });
+  // The trade journal (with each wallet's next nonce) came back from Redis but this simulated chain is new and starts at nonce 0. The engine signs with the higher
+  // of the two, and the chain mines a wallet's transactions strictly in nonce order, so without this every new trade after a failover would wait forever.
+  for (const [wk, n] of s.engine.d.store.nonces) { const [chain, wallet] = wk.split(':'); if (chain === s.chain.id && wallet) s.chain.nextNonceMap.set(wallet, n); }
   const clock = setInterval(() => { s.chain.time += 1; }, 1000); clock.unref?.();   // the practice chain only moves time when told to
   return { trader: s.trader, stop: () => clearInterval(clock) };
 }

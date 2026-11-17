@@ -24,7 +24,7 @@ export class MemeClient {
   trades(q: { limit?: number; origin?: string; walletId?: string } = {}) { return this.req('GET', '/v1/trades' + qs(q)); }
   trade(key: string) { return this.req('GET', `/v1/trades/${enc(key)}`); }
   advance(key: string) { return this.req('POST', `/v1/trades/${enc(key)}/advance`, {}); }
-  cancelStuck(walletId: string, force = false) { return this.req('POST', `/v1/wallets/${enc(walletId)}/cancel-stuck`, { force }); }
+  cancelStuck(walletId: string, opts: { force?: boolean } = {}) { return this.req('POST', `/v1/wallets/${enc(walletId)}/cancel-stuck`, { force: opts.force === true }); }   // same shape as Trader.cancelStuck
   limitBuy(p: PriceOrderInput) { return this.req('POST', '/v1/orders/limit-buy', p); }
   limitSell(p: PriceOrderInput) { return this.req('POST', '/v1/orders/limit-sell', p); }
   takeProfit(p: PriceOrderInput) { return this.req('POST', '/v1/orders/take-profit', p); }
@@ -52,7 +52,7 @@ export class MemeClient {
   addSnipe(p: J) { return this.req('POST', '/v1/snipes', p); }
   copies() { return this.req('GET', '/v1/copies'); }
   addCopy(p: J) { return this.req('POST', '/v1/copies', p); }
-  /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Returns a function that stops listening. */
+  /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
   async events(on: (e: TraderEvent) => void, signal?: AbortSignal): Promise<void> {
     const f = this.o.fetch ?? fetch, r = await f(this.o.baseUrl.replace(/\/$/, '') + '/v1/events', { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream' }, signal });
     if (!r.ok || !r.body) throw new SdkError('http_' + r.status, `event stream refused (${r.status})`, undefined, r.status);

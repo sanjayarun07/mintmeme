@@ -32,7 +32,10 @@ export function parseKeyFile(text: string): ApiKey[] {
 if (import.meta.main) {
   const mode = env.MODE ?? 'practice'; if (mode !== 'practice') fail(`MODE=${mode} is not built in. Only MODE=practice ships; real chains need your own account factory and signer (apps/server/accounts.ts).`);
   let keys: ApiKey[] = []; try { keys = parseKeyFile(readFileSync(need('API_KEYS_FILE'), 'utf8')); } catch (e) { fail((e as Error).message); }
-  const publicUrl = need('NODE_PUBLIC_URL'); try { new URL(publicUrl); } catch { fail('NODE_PUBLIC_URL must be a URL such as http://10.0.3.7:3500'); }
+  const httpUrl = (k: string, v: string) => { let u: URL | undefined; try { u = new URL(v); } catch { /* reported below */ } if (u?.protocol !== 'http:') fail(`${k} must be an http:// URL such as http://10.0.3.7:3500 (nodes talk plain HTTP on the private network; TLS belongs at the load balancer)`); return u!; };
+  const publicUrl = need('NODE_PUBLIC_URL'), pub = httpUrl('NODE_PUBLIC_URL', publicUrl);
+  if (env.SOLANA_SAMPLE_URL) httpUrl('SOLANA_SAMPLE_URL', env.SOLANA_SAMPLE_URL);
+  if ((env.HOST ?? '127.0.0.1') === '127.0.0.1' && !/^(localhost|127\.0\.0\.1)$/.test(pub.hostname)) console.warn(`warning: HOST is 127.0.0.1 but NODE_PUBLIC_URL is ${pub.host}: other nodes cannot reach this one. Set HOST=0.0.0.0 (or this machine's private address).`);
   const node = await createNode({
     redisUrl: need('REDIS_URL'), namespace: env.NAMESPACE ?? 'memedesk', publicUrl, keys, makeAccount: practiceAccount,
     leaseTtlMs: int('LEASE_TTL_MS', 15_000, 3_000, 300_000), maxUsers: int('MAX_USERS_PER_NODE', 500, 1, 100_000), sweepMs: int('SWEEP_MS', 2000, 200, 60_000),

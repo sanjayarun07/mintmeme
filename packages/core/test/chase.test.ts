@@ -67,3 +67,13 @@ test('editing is refused for non-active orders, trailing stops, zero prices, and
   mgr.place(order({ id: 'tr', kind: 'trailing_stop', trailBps: 2000, triggerPriceE18: undefined, amount: 100n }));
   assert.throws(() => mgr.retrigger('tr', E18), /trailing stop/);
 });
+
+test('a bracket keeps its stop loss when the take profit fails: the stop loss still fires later, and the shared reservation is kept until no leg is left', () => {
+  const { mgr, order, ran } = setup();
+  mgr.place(order({ id: 'tp', kind: 'take_profit', ocoGroup: 'g', triggerPriceE18: 2n * E18, maxAttempts: 1 }));
+  mgr.place(order({ id: 'sl', kind: 'stop_loss', ocoGroup: 'g', triggerPriceE18: 1n * E18 }));
+  const at = (p: bigint) => mgr.tick(() => ({ priceE18: p, ts: 1000, liquidity: 1000n, executableOut: od => od.amount * 3n }));   // the pool can fill either leg
+  assert.deepEqual(at(3n * E18), ['tp']); mgr.onResult('tp', false);
+  assert.equal(mgr.orders.get('tp')!.status, 'failed'); assert.equal(mgr.orders.get('sl')!.status, 'active', 'the stop loss still protects the position');
+  assert.deepEqual(at(E18 / 2n), ['sl'], 'and fires when the price falls'); assert.equal(ran.length, 2);
+});

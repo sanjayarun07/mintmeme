@@ -46,7 +46,9 @@ export declare class MemeClient {
     }): Promise<any>;
     trade(key: string): Promise<any>;
     advance(key: string): Promise<any>;
-    cancelStuck(walletId: string, force?: boolean): Promise<any>;
+    cancelStuck(walletId: string, opts?: {
+        force?: boolean;
+    }): Promise<any>;
     limitBuy(p: PriceOrderInput): Promise<any>;
     limitSell(p: PriceOrderInput): Promise<any>;
     takeProfit(p: PriceOrderInput): Promise<any>;
@@ -96,7 +98,7 @@ export declare class MemeClient {
     addSnipe(p: J): Promise<any>;
     copies(): Promise<any>;
     addCopy(p: J): Promise<any>;
-    /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Returns a function that stops listening. */
+    /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
     events(on: (e: TraderEvent) => void, signal?: AbortSignal): Promise<void>;
 }
 export {};

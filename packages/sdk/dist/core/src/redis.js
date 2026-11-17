@@ -58,6 +58,8 @@ export class SyncRedis {
 }
 /** Write KEYS[2] only while KEYS[1] (the lock) still holds our token, extending the lock. Shared with the cluster server's per-user leases. */
 export const WRITE_LUA = "if redis.call('get',KEYS[1])==ARGV[1] then redis.call('pexpire',KEYS[1],ARGV[2]); redis.call('set',KEYS[2],ARGV[3]); return 1 else return 0 end";
+/** Extend KEYS[1] only while it still holds our token. */
+export const RENEW_LUA = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('pexpire',KEYS[1],ARGV[2]) else return 0 end";
 export const RELEASE_LUA = "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('del',KEYS[1]) else return 0 end";
 /** Connects, checks the server's durability settings, takes the single-writer lock for `namespace`, and returns backends for the engine store, the order runner and the copy runner. */
 export function openRedisState(o) {
@@ -90,7 +92,7 @@ export function openRedisState(o) {
         };
     };
     return { engine: backend('engine'), orders: backend('orders'), copy: backend('copy'), backend, client: r, durability: { appendonly, appendfsync },
-        renew: () => { if (r.cmd('EVAL', "if redis.call('get',KEYS[1])==ARGV[1] then return redis.call('pexpire',KEYS[1],ARGV[2]) else return 0 end", 1, lockKey, token, ttl) !== 1)
+        renew: () => { if (r.cmd('EVAL', RENEW_LUA, 1, lockKey, token, ttl) !== 1)
             throw new Error(`redis state "${ns}": lock lost`); },
         release: () => { try {
             r.cmd('EVAL', RELEASE_LUA, 1, lockKey, token);

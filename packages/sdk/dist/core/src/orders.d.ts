@@ -87,6 +87,7 @@ export declare class OrderManager {
         why: string;
     };
     tick(snapOf: (o: Order) => Snapshot | undefined): string[];
-    /** Execution result callback: bounded retries with unchanged limits; reservation released on terminal outcome. */
+    /** Execution result callback. Filled: the other legs of its bracket are cancelled and the reservation released. Failed: retried (same limits, or wider slippage with chase)
+     *  until maxAttempts; a leg that fails for good leaves the other legs active and releases the shared reservation only when no leg is left. */
     onResult(id: string, ok: boolean): void;
 }

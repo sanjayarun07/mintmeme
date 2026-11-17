@@ -20,8 +20,8 @@ test('6. TP/SL as OCO: one leg only, shared reservation, no double spend', () =>
   mgr.place(base({ id: 'tp', kind: 'take_profit', ocoGroup: 'g', triggerPriceE18: 3n * E18 }));
   mgr.place(base({ id: 'sl', kind: 'stop_loss', ocoGroup: 'g', triggerPriceE18: 1n * E18 }));
   assert.equal(res.reservedTotal('w1', TOK), 400n);                       // reserved once for the group
-  assert.deepEqual(mgr.tick(() => snap(3n * E18)), ['tp']); assert.deepEqual(mgr.tick(() => snap(E18 / 2n)), []);
-  assert.equal(mgr.orders.get('sl')!.status, 'cancelled'); assert.equal(ran.length, 1);
+  assert.deepEqual(mgr.tick(() => snap(3n * E18)), ['tp']); assert.deepEqual(mgr.tick(() => snap(E18 / 2n)), [], 'the stop loss cannot fire while the take profit is executing');
+  mgr.onResult('tp', true); assert.equal(mgr.orders.get('sl')!.status, 'cancelled', 'cancelled once the take profit filled'); assert.equal(ran.length, 1);
 });
 test('orders refuse stale quotes, illiquid pools, and unexecutable output', () => {
   const { mgr, base, snap, setMs } = om(); mgr.place(base({ id: 'x' }));

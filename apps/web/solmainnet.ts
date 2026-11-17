@@ -1,11 +1,18 @@
-/** REAL-FUNDS SOLANA TRADING FOR THE LOCAL TERMINAL, behind limits and a two-step confirmation (see solguard.ts).
- *  - The wallet key is pasted into the terminal page by the user, held in this process's memory only, and never written to disk, logged or sent back. Restarting the server disconnects the wallet.
- *  - The terminal listens on 127.0.0.1 with no login: anything that can reach that port can use a connected wallet within the limits. Do not expose it, and use a wallet funded only for testing.
- *  - Trades run through the same engine as everywhere else: write-ahead record, policy signer (per-trade and daily caps), simulation before signing, confirmation tracking.
- *  This module is only checked here on a local validator with fake funds. Nothing in this project has made a mainnet trade. */
+/** REAL-FUNDS SOLANA TRADING behind the /solana test UI, with limits and a two-step confirmation (see solguard.ts).
+ *  - Signers: a browser wallet that signed in with a one-time message (it signs every trade in the page), or the trading key (a capped, expiring server-held wallet
+ *    that signs orders by itself). `connect()` with a pasted key exists only for the local-validator test; no route exposes it.
+ *  - The server listens on 127.0.0.1 for one user. Sessions live in memory: a restart signs the user out (orders are saved and resume with the next signer).
+ *  - Trades run through the SDK engine: write-ahead record, policy signer (per-trade and daily caps, ledger on disk), simulation before signing, confirmation tracking.
+ *  Checked on a local validator with fake funds (npm run verify:sol-guard) and with small real trades on mainnet (docs/KNOWN_LIMITATIONS.md). */
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { Engine, Router, Store, PolicySigner, NATIVE } from '../../packages/core/src/index.ts';
+import { Engine, Router, Store, PolicySigner, NATIVE, MemoryLedger, writeAtomic } from '../../packages/core/src/index.ts';
+import type { SpentLedger } from '../../packages/core/src/index.ts';
+/** The policy signer's daily-spend ledger, saved to a file: orders and TWAP buys are charged here, so signing in again (or a restart) must not reset today's spend. */
+function fileLedger(path: string): SpentLedger {
+  let l: MemoryLedger; try { l = MemoryLedger.restore(readFileSync(path, 'utf8')); } catch { l = new MemoryLedger(); }
+  return { get: k => l.get(k), set: (k, v) => { l.set(k, v); writeAtomic(path, l.snapshot()); } };
+}
 import type { WalletPolicy } from '../../packages/core/src/index.ts';
 import { randomBytes } from 'node:crypto';
 import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestError, verifySignature, b58decode, looksLikeMint, mintFacts, compileLegacy, systemTransfer, wireTx } from '../../packages/sol/src/index.ts';
@@ -61,7 +68,7 @@ export class SolMainnet {
     const chain = new SolanaChain({ id: 'sol-main', wsol: WSOL, pools: [], pump: { mints: [] }, jupiter: { pairs: [] } }, rpc, signer);
     const policy: WalletPolicy = { userId: 'u1', chains: ['sol-main'], allowedVenues: this.families, maxPerTx: { [NATIVE]: this.guard.limits.maxTradeLamports }, dailyLimit: { [NATIVE]: this.guard.limits.dailyCapLamports }, destinations: [], deviceSecret: 'local' };
     const store = Store.open(join(this.dir, `engine-${address.slice(0, 8)}.json`));
-    const engine = new Engine({ store, chain, signer: new PolicySigner(new Map([[address, 'x']]), new Map([[address, policy]])), router: new Router(chain), platformFeeBps: 0 });
+    const engine = new Engine({ store, chain, signer: new PolicySigner(new Map([[address, 'x']]), new Map([[address, policy]]), fileLedger(join(this.dir, `ledger-${address.slice(0, 8)}.json`))), router: new Router(chain), platformFeeBps: 0 });
     const trader = new Trader({ engine, chain, userId: 'u1', venues: this.families, persistDir: join(this.dir, `trader-${address.slice(0, 8)}`), usd: this.usdFeed() });
     this.conn = { address, signer, chain, trader, policy, rpc }; this.session = randomBytes(24).toString('base64url');
     // Orders and TWAP slices are evaluated by this loop. While the kill switch is on nothing is evaluated, so nothing new fires. A wallet-signed order needs the browser open to approve each fire.
@@ -94,12 +101,15 @@ export class SolMainnet {
     writeFileSync(this.keyFile(), JSON.stringify({ address, keypair, createdAt: Date.now(), expiresAt: Date.now() + hours * 3_600_000, note: 'Solana CLI keypair. Import it into a wallet to recover any funds. Never share it.' }), { mode: 0o600 });
     return this.tradingKeyInfo();
   }
-  /** Connect the saved trading key. Orders then fire on their own while the server runs, within the limits, until the key expires or the kill switch is turned on. */
   /** Send a little SOL from the signed-in WALLET to the trading key, so the key can trade. This is the one place the terminal moves SOL that is not a swap, so it is deliberately narrow:
    *  the destination is read from the trading key's own file and is never taken from the request; one funding is at most TRADING_KEY_CAPS.maxTradeLamports (0.05 SOL) and the key's
    *  balance may never exceed TRADING_KEY_CAPS.maxBalanceLamports (0.5 SOL); it needs a connected wallet that signs in the browser (a key cannot fund itself), the kill switch off, and an
    *  explicit ack. The transaction is built here, the wallet shows it and signs it, and the signature is verified against these exact bytes before anything is sent. */
-  async fundTradingKey(b: any) {
+  async fundTradingKey(b: any) { return this.oneTransfer(() => this.fundNow(b)); }
+  /** One fund or return at a time: two fundings in flight could each pass the 0.5 SOL ceiling check before either lands. */
+  private moving = false;
+  private async oneTransfer<T>(f: () => Promise<T>): Promise<T> { if (this.moving) throw bad('A transfer to or from the trading key is already in progress. Wait for it to finish.', 409); this.moving = true; try { return await f(); } finally { this.moving = false; } }
+  private async fundNow(b: any) {
     this.needSession(b); const c = this.need();
     if (!this.remote) throw bad('Fund the trading key from a signed-in wallet. A trading key cannot fund itself.', 409);
     if (this.guard.killed) throw bad('The kill switch is on. Turn it off to move SOL.', 403);
@@ -127,17 +137,19 @@ export class SolMainnet {
     this.histCache = undefined;
     return { ok: state !== 'failed', state, signature: hash, explorer: `https://solscan.io/tx/${hash}`, from: c.address, to, sol: Number(lamports) / 1e9 };
   }
-  /** Wallets that sent SOL to the trading key, read from the chain (its last 50 transactions). Only these may receive SOL back from it, so the key can never pay a stranger. */
+  /** Wallets that sent SOL to the trading key (its last 50 transactions, read from the chain) AND signed in here. Only these may receive SOL back from it, so the key can never pay a stranger. */
   async keyFunders(): Promise<string[]> {
     const k = this.readKey(); if (!k) return []; const c = this.need(); const out = new Set<string>();
     const sigs: any[] = await c.rpc.call('getSignaturesForAddress', [k.address, { limit: 50, commitment: 'confirmed' }]);   // 'confirmed', not the default 'finalized': a funding made seconds ago must count
     for (const s of sigs) { if (s.err) continue; const tx: any = await c.rpc.call('getTransaction', [s.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]).catch(() => null);
       for (const ix of tx?.transaction?.message?.instructions ?? []) if (ix.program === 'system' && ix.parsed?.type === 'transfer' && ix.parsed.info?.destination === k.address && ix.parsed.info?.source !== k.address) out.add(String(ix.parsed.info.source)); }
-    return [...out];
+    // anyone can send the key 1 lamport: a sender counts only if it is also a wallet that signed in here (proved control), so dust from a stranger never becomes a destination
+    const known = this.knownWallets(); return [...out].filter(a => known.has(a));
   }
   /** Send all of the trading key's SOL (less the network fee) back to a wallet that funded it. Needs the key connected and an ack. Allowed with the kill switch on: taking money out is always safe.
    *  Tokens the key holds are not moved here: sell them first. */
-  async tradingKeyReturn(b: any) {
+  async tradingKeyReturn(b: any) { return this.oneTransfer(() => this.returnNow(b)); }
+  private async returnNow(b: any) {
     this.needSession(b); const c = this.need(); const k = this.readKey();
     if (!k || c.address !== k.address || this.remote) throw bad('Connect the trading key first (Use trading key). Only the key can send its own SOL.', 409);
     if (b?.ack !== true) throw bad('Tick the confirmation box first.');
@@ -147,13 +159,14 @@ export class SolMainnet {
     if (bal <= FEE) throw bad('The trading key holds no SOL to return.', 409);
     return this.transfer(c, to, bal - FEE);
   }
+  /** Connect the saved trading key. Orders then fire on their own while the server runs, within the limits, until the key expires or the kill switch is turned on. */
   async tradingKeyUse() {
     const k = this.readKey(); if (!k) throw bad('create a trading key first', 404); if (k.expiresAt < Date.now()) throw bad('this trading key has expired. Create a new one (move the old file away first, after taking any funds out)', 410);
     const signer = new DevSolSigner(); if (signer.add(k.seed) !== k.address) throw bad('the saved trading key is damaged', 500);
     // Hard ceilings for this mode: limits are lowered to them, never raised.
     const l = this.guard.limits, c = TRADING_KEY_CAPS; if (l.maxTradeLamports > c.maxTradeLamports || l.dailyCapLamports > c.dailyCapLamports) { this.guard.limits = { ...l, maxTradeLamports: l.maxTradeLamports > c.maxTradeLamports ? c.maxTradeLamports : l.maxTradeLamports, dailyCapLamports: l.dailyCapLamports > c.dailyCapLamports ? c.dailyCapLamports : l.dailyCapLamports }; this.persist(); }
     this.attach(k.address, signer); this.remote = undefined; this.keyExpiry = k.expiresAt;
-    try { const bal = BigInt((await this.conn!.rpc.call<any>('getBalance', [k.address, { commitment: 'confirmed' }])).value); if (bal > c.maxBalanceLamports) { await this.drop(); throw bad(`this key holds ${Number(bal) / 1e9} SOL. The trading key is limited to ${Number(c.maxBalanceLamports) / 1e9} SOL: move the rest out first`, 422); } } catch (e) { if (e instanceof GuardError) throw e; }
+    try { const bal = BigInt((await this.conn!.rpc.call<any>('getBalance', [k.address, { commitment: 'confirmed' }])).value); if (bal > c.maxBalanceLamports) { await this.drop(); throw bad(`this key holds ${Number(bal) / 1e9} SOL. The trading key is limited to ${Number(c.maxBalanceLamports) / 1e9} SOL: move the rest out first`, 422); } } catch (e) { if (e instanceof GuardError) throw e; await this.drop(); throw bad('could not read the trading key balance, so it was not connected (its 0.5 SOL ceiling cannot be checked). Try again.', 503); }
     return { ...(await this.status()), __setSession: this.session };
   }
   /** Wallet login step 1: a one-time message for the wallet to sign. Signing it proves the browser controls the address; it moves no funds and the message says so. */
@@ -169,8 +182,12 @@ export class SolMainnet {
     if (!n || n.exp < Date.now()) throw bad('the sign-in request expired: try again', 410);
     let sig: Uint8Array; try { sig = Uint8Array.from(Buffer.from(String(b?.signature ?? ''), 'base64')); } catch { throw bad('bad signature encoding'); }
     if (sig.length !== 64 || !verifySignature(address, new TextEncoder().encode(n.message), sig)) throw bad('the signature does not match this address', 401);
-    const remote = new RemoteSolSigner(); this.attach(address, remote); this.remote = remote; return { ...(await this.status()), __setSession: this.session };
+    const remote = new RemoteSolSigner(); this.attach(address, remote); this.remote = remote; this.rememberWallet(address); return { ...(await this.status()), __setSession: this.session };
   }
+  /** Wallets that have proved control by signing in here. Only these can be a destination for the trading key's SOL (see keyFunders). */
+  private walletsFile() { return join(this.dir, 'signed-in-wallets.json'); }
+  private knownWallets(): Set<string> { try { return new Set(JSON.parse(readFileSync(this.walletsFile(), 'utf8'))); } catch { return new Set(); } }
+  private rememberWallet(address: string) { const s = this.knownWallets(); if (s.has(address)) return; s.add(address); writeFileSync(this.walletsFile(), JSON.stringify([...s]), { mode: 0o600 }); }
   /** Signing requests waiting for the browser wallet. */
   pendingSigns(b: any) { this.needSession(b); if (!this.conn || !this.remote) return { items: [] }; return { items: this.remote.pending(this.conn.address).map(p => ({ id: p.id, wallet: p.wallet, message: Buffer.from(p.message).toString('base64'), expiresAt: p.expiresAt })) }; }
   submitSign(b: any) { this.needSession(b); if (!this.remote) throw bad('no wallet is waiting to sign', 409); try { this.remote.submit(String(b?.id ?? ''), Uint8Array.from(Buffer.from(String(b?.signature ?? ''), 'base64'))); } catch (e) { throw bad((e as Error).message, e instanceof SignRequestError ? 422 : 400); } return { ok: true }; }
@@ -193,7 +210,6 @@ export class SolMainnet {
 
   private async tickOnce() { const c = this.conn; if (c && this.keyExpiry && !this.remote && Date.now() > this.keyExpiry) { await this.drop(); return; }
     if (!c || this.ticking || this.guard.killed) return; this.ticking = true; try { this.openSellPolicy(c); await c.chain.refresh('venues'); await c.trader.tick(); } catch { /* the next tick retries; a failed evaluation never trades */ } finally { this.ticking = false; } }
-  /** After a restart the engine reloads saved orders; make sure their tokens have venues again. */
   /** The policy signer's per-tx and daily limits are written in SOL (the native token). A SELL spends the token being sold, which has no SOL-denominated entry, so the signer
    *  refused every order-fired sell ("exceeds per-tx limit"; seen on mainnet 2026-11-17). Selling tokens you hold is capped by your balance, and the proceeds come back to your own wallet,
    *  so a token being sold by one of your active sell-side orders gets the same open entry a confirmed market sell gets. BUYS are unchanged: they still count against the SOL limits. */
@@ -201,6 +217,7 @@ export class SolMainnet {
     const sells = new Set(['limit_sell', 'take_profit', 'stop_loss', 'trailing_stop']);   // a bracket is a take_profit plus a stop_loss
     for (const o of c.trader.listOrders({ status: 'active' })) if (sells.has(o.kind)) { c.policy.maxPerTx[o.token] = BIG; c.policy.dailyLimit[o.token] = BIG; }
   }
+  /** After a restart the engine reloads saved orders; make sure their tokens have venues again. */
   private async reloadTokens() { const c = this.conn; if (!c) return; try { await c.chain.refresh('venues'); for (const m of new Set([...c.trader.listOrders({ status: 'active' }).map(o => o.token), ...c.trader.listTwaps().filter(t => !t.done && !t.cancelled).map(() => '')].filter(Boolean))) await c.chain.addToken(m); } catch { /* shown as "no venue" on the order until it works */ } }
   private async decimals(mint: string) { let d = this.decs.get(mint); if (d === undefined) { d = (await mintFacts(this.need().rpc, mint)).decimals ?? 0; this.decs.set(mint, d); } return d; }
   private async tokenBalance(mint: string) { const c = this.need(); const r = await c.rpc.call<any>('getTokenAccountsByOwner', [c.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]); return (r.value as any[]).reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); }
@@ -294,7 +311,7 @@ export class SolMainnet {
     const L = this.guard.limits, slippageBps = Math.round(Number(b?.slippagePct ?? L.maxSlippageBps / 100) * 100); if (!(slippageBps >= 0 && slippageBps <= L.maxSlippageBps)) throw bad(`slippage is above the limit of ${L.maxSlippageBps / 100}%`);
     if ((c.trader.listOrders({ status: 'active' }).length) >= 20) throw bad('too many active orders (20): cancel one first');
     try {
-      await c.chain.refresh('venues'); await c.chain.addToken(mint); const dec = await this.decimals(mint), base = { walletId: c.address, token: mint, slippageBps, ttlS: Math.max(60, Math.min(30, Number(b?.ttlDays ?? 7)) * 86_400),
+      await c.chain.refresh('venues'); await c.chain.addToken(mint); const dec = await this.decimals(mint), base = { walletId: c.address, token: mint, slippageBps, ttlS: Math.max(60, Math.min(30, Number.isFinite(Number(b?.ttlDays)) ? Number(b.ttlDays) : 7) * 86_400),
         // slippage chase (opt-in): +1% per failed attempt, capped at the wallet's maximum slippage, so a chase can never pass the limit you set
         ...(b?.chase === true ? (slippageBps < L.maxSlippageBps ? { chase: { stepBps: 100, maxBps: L.maxSlippageBps } } : (() => { throw bad(`chase needs a starting slippage below your maximum of ${L.maxSlippageBps / 100}%`); })()) : {}) };
       const trig = (usd: unknown, sol: unknown, what: string) => { const u = this.usdStr(usd); return u ? { priceUsd: u } : { priceE18: this.priceE18(sol, dec, what) }; };   // dollars when sent, else SOL
@@ -351,6 +368,9 @@ export class SolMainnet {
       for (let i = 0; i < 90 && !TERMINAL.has(v.state) && v.state !== 'confirmed'; i++) { await new Promise(r => setTimeout(r, 1000)); v = await c.trader.advance(key); }
       const sent = v.history.some(h => h.state === 'submitted'); if (!sent && v.state === 'failed') this.guard.refund(t);
       return { ok: v.state !== 'failed', state: v.state, sent, signature: v.txHash ?? null, explorer: v.txHash ? `https://solscan.io/tx/${v.txHash}` : null, failure: v.failure ? this.redact(v.failure) : null, key };
-    } catch (e) { this.guard.refund(t); throw bad(this.redact((e as Error).message), 502); }
+    } catch (e) {   // give the daily budget back only if the engine never sent the transaction: an RPC error while WAITING for a sent trade must still count it
+      const rec = c.trader.trade_(key); if (!rec || !rec.history.some(h => h.state === 'submitted')) this.guard.refund(t);
+      throw bad(this.redact((e as Error).message), 502);
+    }
   }
 }

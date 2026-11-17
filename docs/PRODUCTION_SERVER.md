@@ -33,7 +33,9 @@ Status: the cluster mechanics (ownership, routing, failover, durability of order
 
 | What | Result |
 |---|---|
-| Unit and cluster tests (`apps/server/server.test.ts`, real nodes on real ports, local Redis) | 7 of 7 pass: single-owner leases, fail-closed write after a lost lease, AOF refusal, forwarding, crash failover with orders restored, drain handover, per-node cap, `/solana` sample link |
+| Unit and cluster tests (`apps/server/server.test.ts`, real nodes on real ports, local Redis) | 10 of 10 pass: single-owner leases, fail-closed write after a lost lease, AOF refusal, forwarding, crash failover with orders restored, drain handover, per-node cap, `/solana` sample link, `/console` and the node header, non-path request targets refused, trading after a practice failover |
+| API end to end through two nodes (every call made on purpose to the owner or the non-owner) | 24 of 24: market trades, every order type with chase, edit, cancel, an order firing by itself, bulk, TWAP, the event stream through the forwarding node, isolation, read-only keys, drain handover |
+| `/console` in a browser, through the non-owner node | every action: quote, buy, sell, all six order types, edit, cancel, a self-firing limit buy, bulk, TWAP, pause and resume, live events |
 | Two node processes via `main.ts` | request on the non-owner forwarded; order placed through it; SIGTERM on the owner: the other node owned the user at once, order still active with its chase settings; `PATCH` edit worked on the new owner; no lease left behind |
 | Docker: Redis (AOF) + 3 nodes + nginx (`deploy/server`) | requests through the load balancer reached the owner; `docker stop` of the owner: next request answered by a new owner in **1 s**; `SIGKILL` of the next owner: answered after **15 s** (= `LEASE_TTL_MS`); the order stayed active throughout |
 
@@ -67,6 +69,14 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
 | `SOLANA_SAMPLE_URL` | none | Serve the `/solana` test page from a running terminal (`apps/web`), to this machine only. |
 | `MODE` | practice | Only `practice` is built in. |
+
+**API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it
+(`x-memedesk-node`), so forwarding is visible. The page holds no secrets; the key stays in the browser tab.
+
+**Hardening from the 2026-11-17 review:** request targets must be paths (no `//host/...`, so forwarding can never be pointed at another host); the `/solana` link
+needs a loopback peer AND a loopback `Host` (DNS rebinding) and nginx returns 404 for it and strips `x-memedesk-hop`; claims re-check their lease after starting and
+abort during a drain; one Redis call per sweep (`MGET`) and per renewal round (one script for all leases); forwarded event streams close upstream when the client leaves;
+a user re-claimed on the same node gets its event stream wired again.
 
 Endpoints besides the API: `/healthz` (process up), `/readyz` (Redis reachable and not draining; use for load-balancer health), `/metrics` (Prometheus text:
 users owned, requests, forwarded, forward errors, claims, leases lost, capacity refusals, draining). `nginx.conf` hides `/metrics` from the public entry: scrape each

@@ -82,21 +82,22 @@ export function createApi(o: ApiOptions) {
     if (k.keyHash !== undefined) { if (!/^[0-9a-f]{64}$/i.test(k.keyHash)) throw new Error('keyHash must be 64 hex characters (SHA-256)'); return { h: Buffer.from(k.keyHash, 'hex'), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; }
     if (!k.key || k.key.length < 16) throw new Error('API keys must be at least 16 characters'); return { h: sha(k.key), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; });
   const rs = routes(o), compiled = rs.map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
-  const buckets = new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new Set<string>();
+  const buckets = new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new WeakSet<Trader>();   // per Trader: a user re-created on this node gets its new Trader wired
   const send = (res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(typeof body === 'string' ? body : toJson(body)); };
   const fail = (res: http.ServerResponse, e: unknown) => { if (e instanceof SdkError) return send(res, e.status || 400, { error: e.toJSON() }); send(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the server log.' } }); console.error('[api] internal error:', (e as Error)?.message); };
   const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, no) => { let n = 0; const ch: Buffer[] = []; req.on('data', d => { n += d.length; if (n > 256 * 1024) { no(new SdkError('too_large', 'request body is over 256 KB', undefined, 413)); req.destroy(); } else ch.push(d); }); req.on('end', () => { if (!n) return ok({}); try { const j = JSON.parse(Buffer.concat(ch).toString('utf8')); if (j === null || typeof j !== 'object' || Array.isArray(j)) throw 0; ok(j); } catch { no(new SdkError('bad_json', 'the body must be a JSON object', 'Send Content-Type: application/json with an object body.')); } }); req.on('error', no); });
+  /** The key a request carries (Authorization: Bearer), or undefined. Hash comparison in constant time. */
+  const keyOf = (req: http.IncomingMessage) => { const m = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')); if (!m) return undefined; const h = sha(m[1]); return keys.find(x => timingSafeEqual(x.h, h)); };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://x'), path = url.pathname;
       if (path === '/v1/health') return send(res, 200, { ok: true });
       if (path === '/v1/openapi.json') return send(res, 200, openapi(rs));
-      const m = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')); const h = m ? sha(m[1]) : undefined;
-      const k = h && keys.find(x => timingSafeEqual(x.h, h)); if (!k) return send(res, 401, { error: { code: 'unauthorized', message: 'Missing or unknown API key.', fix: 'Send Authorization: Bearer <your key>.' } }, { 'www-authenticate': 'Bearer' });
+      const k = keyOf(req); if (!k) return send(res, 401, { error: { code: 'unauthorized', message: 'Missing or unknown API key.', fix: 'Send Authorization: Bearer <your key>.' } }, { 'www-authenticate': 'Bearer' });
       const bk = k.h.toString('hex'), b = buckets.get(bk) ?? { tokens: rate.burst, at: now() }; b.tokens = Math.min(rate.burst, b.tokens + (now() - b.at) / 1000 * rate.perSecond); b.at = now(); buckets.set(bk, b);
       if (b.tokens < 1) return send(res, 429, { error: { code: 'rate_limited', message: 'Too many requests.', fix: `Slow down to ${rate.perSecond} requests per second.` } }, { 'retry-after': '1' }); b.tokens -= 1;
       const t = o.traderFor(k.userId); if (!t) throw new SdkError('no_account', 'no trading account is set up for this key', undefined, 403);
-      if (!wired.has(k.userId)) { wired.add(k.userId); t.on(e => { const sub = streams.get(k.userId); if (sub) for (const r of sub) r.write(`data: ${toJson(e)}\n\n`); }); }
+      if (!wired.has(t)) { wired.add(t); t.on(e => { const sub = streams.get(k.userId); if (sub) for (const r of sub) r.write(`data: ${toJson(e)}\n\n`); }); }
       if (path === '/v1/events' && req.method === 'GET') {
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store', connection: 'keep-alive' }); res.write(': connected\n\n');
         const set = streams.get(k.userId) ?? new Set(); set.add(res); streams.set(k.userId, set); const hb = setInterval(() => res.write(': hb\n\n'), 15_000); hb.unref?.();
@@ -110,5 +111,7 @@ export function createApi(o: ApiOptions) {
       send(res, 200, plain(await hit.r.run({ t, userId: k.userId, body, params, query: url.searchParams, headers: req.headers })));
     } catch (e) { fail(res, e); }
   });
-  return { server, routes: rs, listen: (port = 0, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))), close: () => { for (const s of streams.values()) for (const r of s) r.end(); return new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); }); } };
+  /** End a user's open event streams (their account moved to another node or stopped here); clients reconnect and reach the new owner. */
+  const endStreams = (userId: string) => { for (const r of streams.get(userId) ?? []) r.end(); streams.delete(userId); };
+  return { server, routes: rs, userOf: (req: http.IncomingMessage) => keyOf(req)?.userId, endStreams, listen: (port = 0, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))), close: () => { for (const s of streams.values()) for (const r of s) r.end(); return new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); }); } };
 }
