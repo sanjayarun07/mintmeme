@@ -19,24 +19,53 @@ export class RpcSubmitter {
         return h;
     }
 }
-export const JITO_MAINNET_BLOCK_ENGINE = 'https://mainnet.block-engine.jito.wtf/api/v1'; // Jito's documented public block engine; override for a regional endpoint
+/** Jito's documented block engine host (https://docs.jito.wtf/lowlatencytxnsend/). Regional hosts such as https://ny.mainnet.block-engine.jito.wtf can replace it. */
+export const JITO_MAINNET_BLOCK_ENGINE = 'https://mainnet.block-engine.jito.wtf';
+export const JITO_TIP_FLOOR_URL = 'https://bundles.jito.wtf/api/v1/bundles/tip_floor';
+/** Jito's sandwich-mitigation flag: any valid public key starting with "jitodontfront", added read-only to an instruction. The block engine then rejects a bundle unless this
+ *  transaction is first in it. Jito: "may help reduce sandwich attacks but is not guaranteed to do so". It does not need to exist on chain. */
+export const JITO_DONT_FRONT = 'jitodontfront111111111111111111111111111111';
+export const JITO_MIN_TIP = 1000n; // Jito's documented minimum tip, lamports
+/** Sends each transaction privately to the Jito block engine: `sendTransaction` with `bundleOnly=true`, i.e. as a one-transaction bundle that is never broadcast publicly
+ *  by Jito and lands all-or-nothing (a failing transaction is not included and pays no tip). The tip is a SOL transfer to one of Jito's tip accounts inside the same transaction
+ *  (Jito: tips only work with Jito-Solana leaders; not through address lookup tables). Limits (Jito docs): 1 request per second per IP per region without a custom limit;
+ *  a block that is skipped and rebroadcast can expose the transaction to the normal path ("uncled blocks"). */
 export class JitoSubmitter {
     o;
     name = 'jito';
     accounts;
-    constructor(o) {
+    floor;
+    constructor(o = {}) {
         this.o = o;
-        if (!(o.tipLamports > 0n))
-            throw new Error('Jito needs a tip greater than zero');
-        const cap = o.maxTipLamports ?? 10000000n;
-        if (o.tipLamports > cap)
-            throw new Error(`tip ${o.tipLamports} lamports is above the safety cap ${cap}: raise maxTipLamports on purpose if you mean it`);
+        const fixed = o.tip !== undefined && o.tip !== 'auto' ? o.tip : o.tipLamports, cap = o.maxTipLamports ?? 100000n;
+        if (fixed !== undefined) {
+            if (!(fixed > 0n))
+                throw new Error('Jito needs a tip greater than zero');
+            if (fixed > cap)
+                throw new Error(`tip ${fixed} lamports is above the safety cap ${cap}: raise maxTipLamports on purpose if you mean it`);
+        }
     }
-    async rpc(path, method, params) {
+    /** Jito allows 1 request per second per IP per region by default: every block-engine call in this process waits its turn (shared by all users on a node). */
+    static queues = new Map();
+    async paced(f) {
+        const key = this.o.url ?? JITO_MAINNET_BLOCK_ENGINE, gap = this.o.minIntervalMs ?? 1_000, prev = JitoSubmitter.queues.get(key) ?? Promise.resolve();
+        let done;
+        const mine = new Promise(r => { done = r; });
+        JitoSubmitter.queues.set(key, prev.then(() => mine));
+        await prev;
+        try {
+            return await f();
+        }
+        finally {
+            setTimeout(done, gap);
+        }
+    }
+    async rpc(path, method, params) { return this.paced(() => this.call(path, method, params)); }
+    async call(path, method, params) {
         const f = this.o.fetchFn ?? fetch, headers = { 'content-type': 'application/json', ...(this.o.uuid ? { 'x-jito-auth': this.o.uuid } : {}) };
-        const r = await f(`${this.o.url ?? JITO_MAINNET_BLOCK_ENGINE}${path}`, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(this.o.timeoutMs ?? 10_000) });
+        const r = await f(`${(this.o.url ?? JITO_MAINNET_BLOCK_ENGINE).replace(/\/+$/, '')}${path}`, { method: 'POST', headers, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(this.o.timeoutMs ?? 10_000) });
         if (!r.ok)
-            throw new Error(`jito ${method}: HTTP ${r.status}`);
+            throw new Error(`jito ${method}: HTTP ${r.status}${r.status === 429 ? ' (rate limited: 1 request per second per IP without a custom limit)' : ''}`);
         const j = await r.json();
         if (j.error)
             throw new Error(`jito ${method}: ${String(j.error.message ?? JSON.stringify(j.error)).slice(0, 200)}`);
@@ -47,18 +76,52 @@ export class JitoSubmitter {
         const now = (this.o.now ?? Date.now)();
         if (this.accounts && now - this.accounts.at < (this.o.tipAccountsTtlMs ?? 600_000))
             return this.accounts.list;
-        const list = await this.rpc('/bundles', 'getTipAccounts', []);
+        const list = await this.rpc('/api/v1/getTipAccounts', 'getTipAccounts', []);
         if (!Array.isArray(list) || !list.length || list.some(a => typeof a !== 'string' || a.length < 32 || a.length > 44))
             throw new Error('jito returned an unusable tip account list');
         this.accounts = { list, at: now };
         return list;
     }
-    async extraInstruction(payer) { const a = await this.tipAccounts(), to = (this.o.pickTip ?? (x => x[Math.floor(Math.random() * x.length)]))(a); if (!a.includes(to))
-        throw new Error('chosen tip account is not in the block engine\'s list'); return systemTransfer(payer, to, this.o.tipLamports); }
+    /** The tip for the next transaction, in lamports. 'auto': the tip floor's landed-tip percentile (reported in SOL), cached 30 s; if the floor cannot be read, the cap's tenth. */
+    async tipNow() {
+        const cap = this.o.maxTipLamports ?? 100000n, fixed = this.o.tip !== undefined && this.o.tip !== 'auto' ? this.o.tip : this.o.tipLamports;
+        if (fixed !== undefined)
+            return fixed;
+        const now = (this.o.now ?? Date.now)();
+        if (this.floor && now - this.floor.at < (this.o.tipFloorTtlMs ?? 30_000))
+            return this.floor.lamports;
+        let lamports;
+        try {
+            const r = await (this.o.fetchFn ?? fetch)(this.o.tipFloorUrl ?? JITO_TIP_FLOOR_URL, { signal: AbortSignal.timeout(this.o.timeoutMs ?? 10_000) });
+            const j = await r.json();
+            const sol = Number((Array.isArray(j) ? j[0] : j)?.[`landed_tips_${this.o.tipPercentile ?? 75}th_percentile`]);
+            if (!(sol > 0) || !Number.isFinite(sol))
+                throw new Error('no tip floor');
+            lamports = BigInt(Math.ceil(sol * 1e9));
+        }
+        catch {
+            lamports = cap / 10n;
+        }
+        if (lamports < JITO_MIN_TIP)
+            lamports = JITO_MIN_TIP;
+        if (lamports > cap)
+            lamports = cap;
+        this.floor = { at: now, lamports };
+        return lamports;
+    }
+    async extraInstruction(payer) {
+        const a = await this.tipAccounts(), to = (this.o.pickTip ?? (x => x[Math.floor(Math.random() * x.length)]))(a);
+        if (!a.includes(to))
+            throw new Error('chosen tip account is not in the block engine\'s list');
+        const ix = systemTransfer(payer, to, await this.tipNow());
+        if (this.o.dontFront ?? true)
+            ix.keys.push({ pubkey: JITO_DONT_FRONT }); // read-only, not a signer: the System program ignores extra accounts
+        return ix;
+    }
     async send(raw, signature) {
-        const id = await this.rpc('/bundles', 'sendBundle', [[raw], { encoding: 'base64' }]);
-        if (typeof id !== 'string' || !id)
-            throw new Error('jito accepted the bundle but returned no bundle id');
-        return signature; // the network confirms by signature, exactly as for a normal send; the bundle id is only a receipt from the block engine
+        const sig = await this.rpc(`/api/v1/transactions?bundleOnly=true${this.o.uuid ? `&uuid=${encodeURIComponent(this.o.uuid)}` : ''}`, 'sendTransaction', [raw, { encoding: 'base64' }]);
+        if (sig !== signature)
+            throw new Error(`jito returned signature ${String(sig).slice(0, 12)}... but we computed ${signature.slice(0, 12)}...: refusing to track a different transaction`);
+        return signature;
     }
 }

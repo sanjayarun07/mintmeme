@@ -215,6 +215,20 @@ HTTP request
 
 ### 5.2 The trade state machine
 
+**MEV protection** (off by default; each protected trade pays a small Jito tip). On, a trade is sent privately to Jito's block engine (`sendTransaction` with
+`bundleOnly=true`: never broadcast publicly by Jito, all-or-nothing, a failing trade pays no tip), with a tip from Jito's live tip floor (75th percentile, at least 1,000
+lamports, at most `maxTipLamports`, default 0.0001 SOL) and the `jitodontfront` flag that asks the block engine to keep it first in its bundle. Jito: this "may help reduce
+sandwich attacks but is not guaranteed". It works on Jupiter and pump.fun trades; your minimum output (slippage) still bounds the worst case.
+
+- **Per account:** `createSolanaTrader({ ..., mevProtection: true })`, or `{ enabled, maxTipLamports, tipPercentile, jito: { url /* region */, uuid } }`.
+  Over the API (server in `MODE=solana-mainnet`): `PATCH /v1/settings {"mevProtection": true, "maxTipSol": "0.0001"}` (`maxTipSol` at most 0.001), `GET /v1/settings`;
+  client: `api.updateSettings({ mevProtection: true })`.
+- **Per trade, overrides the account setting:** `mevProtection: true | false` on any trade or order: `api.swap({ side: 'buy', mint, sol: '0.01', mevProtection: true })`,
+  `api.placeOrder({ type: 'stop-loss', mint, pct: 100, priceUsd: '0.000002', mevProtection: true })`, or `trader.buy({ ..., mevProtection: true })`.
+  An order applies it to every fill attempt. TWAP and bulk follow the account setting.
+- **Limits:** Jito allows 1 request per second per IP by default; every block-engine call in one process is spaced to respect it, so many users on one node queue up
+  (a custom limit from Jito, passed as `jito.uuid`, lifts it). A rebroadcast after a skipped block can still expose a transaction (Jito: "uncled blocks").
+
 Every trade is a record that moves through these states. The record is written to storage **after every step**, and the signed transaction is stored **before** it is sent (write-ahead), so a crash at any point resumes instead of repeating.
 
 | State | What happened |
@@ -483,6 +497,7 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
    has been run on a local validator only.
 2. The **Trader and API layer** is verified on the practice chain, an **Ethereum** fork and a **Solana** local validator. Sniping and copy trading through the Trader were not part of those runs (their runners have their own fork and validator reports), and on Solana only the Raydium SOL/USDC pool was used, not Jupiter routes.
 3. **Custody:** Solana has a production-grade option in the SDK (`PrivySolSigner`: the user's own Privy wallet, server signing under a Privy policy), used by `/solana`.
+| `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false) and `maxTipSol` (default 0.0001, at most 0.001). Any trade or order also takes `mevProtection: true|false` for itself |
    The execution server uses it in `MODE=solana-mainnet` (verified on a local validator with two nodes and a Privy stand-in, not yet on mainnet). EVM has no real signer yet (ERC-4337 or Privy smart wallets are the plan, README → Custody plan).
 4. Only **Uniswap-V2-style pools** (Ethereum) and **Raydium AMM v4 / Jupiter routes** (Solana) are supported. No V3, CLMM, DLMM, stable pools or multi-hop routes.
 5. Triggers poll about once a second from pool **spot price**; there is no sub-second reaction, no private mempool and no MEV protection. Gas is not tuned (no fee bumping logic beyond replace-by-fee for cancels).

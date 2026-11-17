@@ -50,6 +50,12 @@ test('real Solana accounts: linking proves the wallet and its Privy permission, 
     fp.state.delegated = false; const o = live.find(x => x.url === owner)!, other = live.find(x => x.url !== owner)!; await o.nd.drain(); live.splice(live.indexOf(o), 1);
     w = await call(other.url, KA, 'GET', '/v1/wallet'); assert.equal(w.node, other.url); assert.equal(w.j.linked, true); assert.equal(w.j.active, false); assert.match(w.j.why, /not allowed automatic trading/);
     assert.equal((await call(other.url, KA, 'POST', '/v1/trades/buy', { walletId: addr, token: 'So11111111111111111111111111111111111111112', amount: '1000' })).j.error.code, 'wallet_not_active');
+    // settings: MEV protection off by default; turning it on is stored and validated
+    const s0 = await call(other.url, KA, 'GET', '/v1/settings'); assert.deepEqual(s0.j, { mevProtection: false, maxTipSol: '0.0001' });
+    const s1 = await call(other.url, KA, 'PATCH', '/v1/settings', { mevProtection: true, maxTipSol: '0.0002' }); assert.deepEqual(s1.j, { mevProtection: true, maxTipSol: '0.0002' });
+    assert.equal((await call(other.url, KA, 'PATCH', '/v1/settings', { maxTipSol: '0.5' })).j.error.code, 'bad_amount', 'a tip above 0.001 SOL is refused');
+    assert.equal((await call(other.url, KA, 'PATCH', '/v1/settings', { mevProtection: 'yes' })).status, 400);
+    assert.equal((await call(other.url, KB, 'GET', '/v1/settings')).j.mevProtection, false, 'per user');
     // unlink removes it
     const un = await call(other.url, KA, 'DELETE', '/v1/wallet'); assert.deepEqual([un.j.linked, un.j.active], [false, false]);
     await sleep(10);

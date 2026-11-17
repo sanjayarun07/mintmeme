@@ -43,6 +43,8 @@ export interface SolChainConfig {
     finalityDepth?: number;
     /** Automatic priority fees (priorityfee.ts): price from recent fees on the trade's accounts, limit from simulation, total capped. Unset: the fixed `priorityMicroLamports` (default none) and Jupiter's own price. */
     priority?: PriorityConfig;
+    /** With a tipping submitter (Jito): send privately unless a trade says otherwise. Default true. */
+    mevDefault?: boolean;
     /** Jupiter routes the engine may use. `pairs` are directions (a pair needs one entry per direction); `refAmount` is the size of the quote snapshot used for estimates. */
     /** pump.fun bonding curves to track, by mint. Only curves we can trade (not complete, not mayhem or cashback) become tradable venues; the rest are loaded with the reason they are not. */
     pump?: {
@@ -136,6 +138,9 @@ export declare class SolanaChain implements ChainPort {
         raw: string;
         hash: string;
     }>;
+    /** Whether this transaction goes privately through a tipping submitter (Jito): the trade's own choice, else the chain default (`mevDefault`, default on when such a
+     *  submitter is configured). The choice is written on the transaction, which the engine stores with its signed bytes, so a resend after a restart uses the same path. */
+    private privateSend;
     /** pump.fun and Raydium: the limit from a simulation (units used x 1.2; the configured limit if it cannot be simulated) and the price from recent fees on the accounts
      *  this trade writes, capped (priorityfee.ts). An estimate that cannot be read falls back to the floor price. */
     private withPriority;

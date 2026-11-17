@@ -150,7 +150,7 @@ export class OrderManager {
             const sell = o.kind !== 'limit_buy';
             this.run({ idempotencyKey: `order:${o.id}:a${o.attempts}`, userId: o.userId, walletId: o.walletId, chain: o.chain,
                 tokenIn: sell ? o.token : o.quoteToken, tokenOut: sell ? o.quoteToken : o.token, amountIn: o.amount, minOut: 0n,
-                slippageBps: slippageFor(o), deadline: this.now() + 120, maxFeeBps: 200, venues: o.venues, origin: 'order' });
+                slippageBps: slippageFor(o), deadline: this.now() + 120, maxFeeBps: 200, venues: o.venues, origin: 'order', ...(o.mev !== undefined ? { mev: o.mev } : {}) });
         }
         return fired;
     }

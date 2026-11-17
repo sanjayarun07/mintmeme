@@ -134,7 +134,7 @@ export async function fetchBuild(o: { inputMint: string; outputMint: string; amo
 }
 
 /* ---------------- the safety gate ---------------- */
-export interface GateCtx { wallet: string; wsol: string; tokenIn: string; tokenOut: string; amountIn: bigint; allowedPrograms: Set<string>; maxPriorityLamports: bigint; maxComputeUnits: number }
+export interface GateCtx { wallet: string; wsol: string; tokenIn: string; tokenOut: string; amountIn: bigint; allowedPrograms: Set<string>; maxPriorityLamports: bigint; maxComputeUnits: number ; /** The one tip transfer we added ourselves (Jito): exactly this destination and at most this amount. */ tip?: { to: string; maxLamports: bigint } }
 export interface GateResult { createdTokenAccounts: string[]; createdNonWsol: number; computeUnitLimit: number; priorityLamports: bigint; swapIndex: number }
 const dv = (d: Uint8Array) => new DataView(d.buffer, d.byteOffset, d.byteLength);
 /** Refuses every instruction that is not one of the few shapes a swap legitimately needs. `ixs` is what will be SIGNED (resolved from the final message), in order. */
@@ -152,6 +152,7 @@ export function gateInstructions(ixs: JIx[], c: GateCtx): GateResult {
     } else if (p === PROGRAMS.system) {
       if (ix.data.length !== 12 || dv(ix.data).getUint32(0, true) !== 2) refuse('only a plain System transfer is allowed');
       const [from, to] = [ix.accounts[0]?.pubkey, ix.accounts[1]?.pubkey], lamports = dv(ix.data).getBigUint64(4, true);
+      if (c.tip && to === c.tip.to) { if (from !== c.wallet || lamports > c.tip.maxLamports) refuse(`the tip transfer is not ours or is above ${c.tip.maxLamports} lamports`); return; }
       if (from !== c.wallet || to !== wsolAta) refuse('a System transfer may only move SOL from our wallet into our own wrapped-SOL account');
       if (c.tokenIn !== c.wsol || lamports > c.amountIn) refuse(`a System transfer of ${lamports} lamports exceeds what this swap may spend (${c.tokenIn === c.wsol ? c.amountIn : 0n})`);
     } else if (p === PROGRAMS.token) {

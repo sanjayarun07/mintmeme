@@ -216,6 +216,11 @@ export function gateInstructions(ixs, c) {
             if (ix.data.length !== 12 || dv(ix.data).getUint32(0, true) !== 2)
                 refuse('only a plain System transfer is allowed');
             const [from, to] = [ix.accounts[0]?.pubkey, ix.accounts[1]?.pubkey], lamports = dv(ix.data).getBigUint64(4, true);
+            if (c.tip && to === c.tip.to) {
+                if (from !== c.wallet || lamports > c.tip.maxLamports)
+                    refuse(`the tip transfer is not ours or is above ${c.tip.maxLamports} lamports`);
+                return;
+            }
             if (from !== c.wallet || to !== wsolAta)
                 refuse('a System transfer may only move SOL from our wallet into our own wrapped-SOL account');
             if (c.tokenIn !== c.wsol || lamports > c.amountIn)

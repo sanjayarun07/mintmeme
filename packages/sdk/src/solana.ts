@@ -10,8 +10,8 @@ import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.ts';
 import type { Backend, SpentLedger, WalletPolicy } from '../../core/src/index.ts';
-import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, looksLikeMint } from '../../sol/src/index.ts';
-import type { PrivyConfig, PriorityConfig } from '../../sol/src/index.ts';
+import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, looksLikeMint } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig, JitoOptions } from '../../sol/src/index.ts';
 import { fetchJupiterQuote } from '../../sol/src/jupiter.ts';
 import { Trader } from './trader.ts';
 import { SdkError } from './wire.ts';
@@ -35,6 +35,9 @@ export interface SolanaTraderOptions {
   walletId?: string;
   /** Priority fees (packages/sol/src/priorityfee.ts). Default on: 75th percentile of recent fees on the trade's accounts, at most 0.0001 SOL per transaction. false: off. */
   priority?: PriorityConfig | false;
+  /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
+   *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
+  mevProtection?: boolean | MevOptions;
   log?: (m: string) => void;
 }
 export interface SolanaTrader { trader: Trader; chain: SolanaChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
@@ -99,7 +102,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   if (!o.address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(o.address);   // throws when Privy is unreachable: nothing can be signed, so the caller should retry rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[o.address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
-  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }) }, rpc, new PrivySolSigner(privy, signable));
+  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (o.address) { owners.set(o.address, 'x'); policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });
@@ -117,4 +120,13 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   const balance = async (mint: string) => { const r: any = await rpc.call('getTokenAccountsByOwner', [o.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]); return (r.value as any[]).reduce((s, a) => s + BigInt(a.account.data.parsed.info.tokenAmount.amount), 0n); };
   const simple = (path: string, body: any) => simpleBody(path, body, { address: o.address, decimals, balance });
   return { trader, chain, active, why, prepare, simple, sync: () => chain.refresh('venues'), refuseIfInactive: () => { if (!active) throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
+}
+
+/** MEV protection options. `enabled` (default true when you pass an object) is the account default; a trade's own `mevProtection` wins either way. The block-engine
+ *  settings apply whenever a trade goes privately, also when the default is off. */
+export interface MevOptions { enabled?: boolean; maxTipLamports?: bigint; tipPercentile?: 25 | 50 | 75 | 95 | 99; jito?: JitoOptions }
+export const mevOn = (m: boolean | MevOptions | undefined) => m === true || (typeof m === 'object' && m.enabled !== false);
+/** The Jito submitter for a `mevProtection` setting (always built, so a single trade can ask for private sending). */
+export function mevSubmitter(m: boolean | MevOptions): JitoSubmitter {
+  const o: MevOptions = typeof m === 'object' ? m : {}; return new JitoSubmitter({ ...(o.jito ?? {}), tip: 'auto', ...(o.maxTipLamports !== undefined ? { maxTipLamports: o.maxTipLamports } : {}), ...(o.tipPercentile ? { tipPercentile: o.tipPercentile } : {}) });
 }

@@ -14,6 +14,8 @@ export interface SimTx {
     deadline: number;
     platformFeeBps: number;
     raw?: string;
+    /** Private sending (MEV protection): undefined = the chain's default. A chain that sent it privately records true here, so a resend after a restart takes the same path. */
+    mev?: boolean;
     kind?: 'swap' | 'noop' | 'approve';
     spender?: string;
 }

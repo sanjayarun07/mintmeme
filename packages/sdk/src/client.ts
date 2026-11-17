@@ -19,11 +19,11 @@ export class MemeClient {
   overview() { return this.req('GET', '/v1/overview'); }
   // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
   /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
-  swap(p: { side: 'buy' | 'sell'; mint: string; sol?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string }) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
+  swap(p: { side: 'buy' | 'sell'; mint: string; sol?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string; /** this trade only: true = private (Jito), false = public; absent = your setting */ mevProtection?: boolean }) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
   /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
    *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
   placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; mint: string; sol?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
-    trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number }) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
+    trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number; mevProtection?: boolean }) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
   /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
   wallet() { return this.req('GET', '/v1/wallet'); }
   linkStart(address: string) { return this.req('POST', '/v1/wallet/link/start', { address }); }
@@ -39,6 +39,9 @@ export class MemeClient {
   cancelStuck(walletId: string, opts: { force?: boolean } = {}) { return this.req('POST', `/v1/wallets/${enc(walletId)}/cancel-stuck`, { force: opts.force === true }); }   // same shape as Trader.cancelStuck
   limitBuy(p: PriceOrderInput) { return this.req('POST', '/v1/orders/limit-buy', p); }
   limitSell(p: PriceOrderInput) { return this.req('POST', '/v1/orders/limit-sell', p); }
+  /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */
+  settings() { return this.req('GET', '/v1/settings'); }
+  updateSettings(p: { mevProtection?: boolean; maxTipSol?: string }) { return this.req('PATCH', '/v1/settings', p); }
   takeProfit(p: PriceOrderInput) { return this.req('POST', '/v1/orders/take-profit', p); }
   stopLoss(p: PriceOrderInput) { return this.req('POST', '/v1/orders/stop-loss', p); }
   trailingStop(p: Omit<PriceOrderInput, 'priceE18'> & { trailBps: number }) { return this.req('POST', '/v1/orders/trailing-stop', p); }

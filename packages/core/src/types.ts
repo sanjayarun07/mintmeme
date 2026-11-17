@@ -21,6 +21,8 @@ export interface Intent {
   maxFeeBps: number;         // cap on platform fee
   venues: string[];          // authorized venue ids or families
   origin: Origin;
+  /** Send this trade privately (MEV protection) when the chain supports it; undefined: the account's default. */
+  mev?: boolean;
 }
 
 export interface Quote {

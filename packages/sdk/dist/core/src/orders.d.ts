@@ -15,6 +15,7 @@ export interface Order {
     quoteToken: string;
     kind: OrderKind;
     amount: bigint;
+    mev?: boolean;
     triggerPriceE18?: bigint;
     trailBps?: number;
     ocoGroup?: string;

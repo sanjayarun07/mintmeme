@@ -173,6 +173,7 @@ export declare class Trader {
         slippageBps?: number;
         minOut?: Amount;
         key?: string;
+        mevProtection?: boolean;
         deadlineS?: number;
         maxFeeBps?: number;
     }): Promise<TradeView>;
@@ -185,6 +186,7 @@ export declare class Trader {
         slippageBps?: number;
         minOut?: Amount;
         key?: string;
+        mevProtection?: boolean;
         deadlineS?: number;
         maxFeeBps?: number;
     }): Promise<TradeView>;
@@ -322,6 +324,8 @@ export declare class Trader {
     private diff;
 }
 export interface PriceOrderInput {
+    /** Send this order's trades privately (true) or publicly (false); absent: the account default. */
+    mevProtection?: boolean;
     id?: string;
     walletId: string;
     token: string;

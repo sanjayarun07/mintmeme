@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.js';
-import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, looksLikeMint } from '../../sol/src/index.js';
+import { SolanaChain, SolJsonRpc, PrivyApi, PrivySolSigner, JitoSubmitter, looksLikeMint } from '../../sol/src/index.js';
 import { fetchJupiterQuote } from '../../sol/src/jupiter.js';
 import { Trader } from './trader.js';
 import { SdkError } from './wire.js';
@@ -145,7 +145,7 @@ export async function createSolanaTrader(o) {
         else
             why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why;
     }
-    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }) }, rpc, new PrivySolSigner(privy, signable));
+    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
     const policies = new Map(), owners = new Map();
     if (o.address) {
         owners.set(o.address, 'x');
@@ -187,4 +187,10 @@ export async function createSolanaTrader(o) {
     const simple = (path, body) => simpleBody(path, body, { address: o.address, decimals, balance });
     return { trader, chain, active, why, prepare, simple, sync: () => chain.refresh('venues'), refuseIfInactive: () => { if (!active)
             throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + policy).', 409); } };
+}
+export const mevOn = (m) => m === true || (typeof m === 'object' && m.enabled !== false);
+/** The Jito submitter for a `mevProtection` setting (always built, so a single trade can ask for private sending). */
+export function mevSubmitter(m) {
+    const o = typeof m === 'object' ? m : {};
+    return new JitoSubmitter({ ...(o.jito ?? {}), tip: 'auto', ...(o.maxTipLamports !== undefined ? { maxTipLamports: o.maxTipLamports } : {}), ...(o.tipPercentile ? { tipPercentile: o.tipPercentile } : {}) });
 }

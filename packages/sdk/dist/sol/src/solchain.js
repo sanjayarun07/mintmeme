@@ -272,7 +272,12 @@ export class SolanaChain {
         return out;
     }
     /** Ask Jupiter for the route, compile it ourselves, run the safety gate on the exact bytes to be signed, then SIMULATE and check the wallet's balances. Throws JupiterRefused to stop. */
-    async buildJupiter(tx, v) {
+    async buildJupiter(tx, v, extra) {
+        // a Jito tip (submitter.ts) travels inside the swap transaction; the gate allows exactly this transfer and no other
+        const tipIx = extra ? { programId: extra.program, accounts: extra.keys.map(k => ({ pubkey: k.pubkey, isSigner: !!k.signer, isWritable: !!k.writable })), data: extra.data } : undefined;
+        const tip = extra && extra.program === PROGRAMS.system && extra.data.length === 12 ? { to: extra.keys[1].pubkey, maxLamports: Buffer.from(extra.data).readBigUInt64LE(4) } : undefined;
+        if (extra && !tip)
+            throw new JupiterRefused('the extra instruction from the submitter is not a plain SOL tip');
         const j = this.cfg.jupiter, w = tx.wallet, wsol = this.cfg.wsol, inM = this.res(tx.tokenIn), outM = this.res(tx.tokenOut);
         if (tx.platformFeeBps > 0)
             throw new JupiterRefused('platform fee collection is not implemented on this chain (set the platform fee to 0)');
@@ -304,9 +309,12 @@ export class SolanaChain {
             tables.push(t);
         });
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-        let message = compileV0(w, b.ixs, b99(bh.value.blockhash), tables);
+        const body = tipIx ? [...b.ixs, tipIx] : b.ixs;
+        let message = compileV0(w, body, b99(bh.value.blockhash), tables);
+        if (tip && !parseMessage(message).staticKeys.includes(tip.to))
+            throw new JupiterRefused('the tip account ended up in a lookup table, where Jito ignores tips');
         const final = resolveMessage(parseMessage(message), tables);
-        const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
+        const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip });
         const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM), outAta = ataAddress(w, outM), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
         const route = final[gate.swapIndex], cand = route.accounts.filter(a => a.isWritable && !a.isSigner).map(a => a.pubkey), cinfo = await this.accountsAt(cand), wb = pubkeyBytes(w);
         const mine = new Set(cand.filter((a, i) => { const x = cinfo[i]; return !!x && x.owner === PROGRAMS.token && x.data.length === 165 && x.data.subarray(32, 64).equals(Buffer.from(wb)); }));
@@ -321,7 +329,7 @@ export class SolanaChain {
             throw new JupiterRefused(`simulation failed: ${JSON.stringify(sim.value.err)}${sim.value.logs?.length ? `: ${sim.value.logs[sim.value.logs.length - 1]}` : ''}`);
         const post = sim.value.accounts.map(a => a ? { lamports: BigInt(a.lamports), data: Buffer.from(a.data[0], 'base64') } : null);
         const tok = (a) => (a && a.data.length >= 72 ? a.data.readBigUInt64LE(64) : 0n), lam = (a) => BigInt(a?.lamports ?? 0);
-        const feeAll = 5000n + gate.priorityLamports, rent = BigInt(gate.createdNonWsol) * await this.rentExempt();
+        const feeAll = 5000n + gate.priorityLamports + (tip?.maxLamports ?? 0n), rent = BigInt(gate.createdNonWsol) * await this.rentExempt();
         let k = 1;
         if (tx.tokenIn === NATIVE) {
             const spent = lam(pre[0]) - lam(post[0]);
@@ -350,8 +358,8 @@ export class SolanaChain {
             const jupPrice = b.ixs.filter(i => i.programId === COMPUTE_BUDGET && i.data[0] === 3 && i.data.length === 9).map(i => Buffer.from(i.data).readBigUInt64LE(1))[0] ?? 0n;
             const price = this.fees ? await this.fees.price(cand, limit).catch(() => clampPrice(jupPrice, limit, cap)) : clampPrice(jupPrice, limit, j.maxPriorityLamports ?? 2000000n);
             const cb = (data) => ({ programId: COMPUTE_BUDGET, accounts: [], data });
-            message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...b.ixs.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
-            gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000 });
+            message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...body.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
+            gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2000000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip });
         }
         return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
     }
@@ -392,12 +400,16 @@ export class SolanaChain {
     }
     async prepare(tx) {
         const jv = this.jupVenue(tx);
+        const priv = this.privateSend(tx);
         if (jv) {
-            const { message } = await this.buildJupiter(tx, jv);
+            const sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined;
+            const { message } = await this.buildJupiter(tx, jv, extra);
             const sig = await this.signer.sign(tx.wallet, message);
+            if (extra)
+                this.tipped.add(base58(sig));
             return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) };
         }
-        const ixs = this.fees && (tx.kind ?? 'swap') === 'swap' ? await this.withPriority(this.instructions(tx), tx.wallet) : this.instructions(tx), sub = this.cfg.submitter, extra = sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined;
+        const ixs = this.fees && (tx.kind ?? 'swap') === 'swap' ? await this.withPriority(this.instructions(tx), tx.wallet) : this.instructions(tx), sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined;
         if (extra)
             ixs.push(extra);
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
@@ -405,6 +417,16 @@ export class SolanaChain {
         if (extra)
             this.tipped.add(base58(sig));
         return { raw: Buffer.from(wireTx(message, [sig])).toString('base64'), hash: base58(sig) };
+    }
+    /** Whether this transaction goes privately through a tipping submitter (Jito): the trade's own choice, else the chain default (`mevDefault`, default on when such a
+     *  submitter is configured). The choice is written on the transaction, which the engine stores with its signed bytes, so a resend after a restart uses the same path. */
+    privateSend(tx) {
+        const s = this.cfg.submitter;
+        if (!s?.extraInstruction)
+            return false;
+        const v = tx.mev ?? this.cfg.mevDefault ?? true;
+        tx.mev = v;
+        return v;
     }
     /** pump.fun and Raydium: the limit from a simulation (units used x 1.2; the configured limit if it cannot be simulated) and the price from recent fees on the accounts
      *  this trade writes, capped (priorityfee.ts). An estimate that cannot be read falls back to the floor price. */
@@ -426,7 +448,7 @@ export class SolanaChain {
             throw new Error('transaction was not prepared (no raw bytes)');
         this.sentAt.set(tx.hash, Date.now());
         try {
-            const sub = this.cfg.submitter, viaSub = sub && (!sub.extraInstruction || this.tipped.has(tx.hash));
+            const sub = this.cfg.submitter, viaSub = sub && (!sub.extraInstruction || tx.mev === true || this.tipped.has(tx.hash));
             const h = viaSub ? await sub.send(tx.raw, tx.hash) : await this.rpcCall('sendTransaction', [tx.raw, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 0 }]);
             if (h !== tx.hash)
                 throw new Error(`node returned signature ${h} but we computed ${tx.hash}: refusing to track a different transaction`);

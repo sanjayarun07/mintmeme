@@ -449,7 +449,7 @@ export class Engine {
     build(r) {
         const i = r.intent;
         return { hash: '', wallet: i.walletId, nonce: -1, venue: r.quote.venue, tokenIn: i.tokenIn, tokenOut: i.tokenOut,
-            amountIn: i.amountIn, minOut: r.minOut, deadline: i.deadline, platformFeeBps: this.bps(i) };
+            amountIn: i.amountIn, minOut: r.minOut, deadline: i.deadline, platformFeeBps: this.bps(i), ...(i.mev !== undefined ? { mev: i.mev } : {}) };
     }
     hash(r, nonce) {
         const t = r.tx;

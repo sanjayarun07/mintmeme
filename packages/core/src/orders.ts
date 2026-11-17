@@ -6,6 +6,7 @@ export interface SupplyInfo { source: string; circulating?: bigint; total?: bigi
 export interface Order {
   id: string; userId: string; walletId: string; chain: string; token: string; quoteToken: string; kind: OrderKind;
   amount: bigint;                       // sell: token amount; buy: quote-token budget
+  mev?: boolean;                        // private sending for this order's trades (undefined: the account default)
   triggerPriceE18?: bigint;             // quote units per token, 1e18 fixed-point
   trailBps?: number; ocoGroup?: string; expiresAt: number;
   /** Opt-in slippage chase: each failed attempt retries with stepBps more slippage, never above maxBps. Without it, retries keep the original slippage. */
@@ -108,7 +109,7 @@ export class OrderManager {
       const sell = o.kind !== 'limit_buy';
       this.run({ idempotencyKey: `order:${o.id}:a${o.attempts}`, userId: o.userId, walletId: o.walletId, chain: o.chain,
         tokenIn: sell ? o.token : o.quoteToken, tokenOut: sell ? o.quoteToken : o.token, amountIn: o.amount, minOut: 0n,
-        slippageBps: slippageFor(o), deadline: this.now() + 120, maxFeeBps: 200, venues: o.venues, origin: 'order' });
+        slippageBps: slippageFor(o), deadline: this.now() + 120, maxFeeBps: 200, venues: o.venues, origin: 'order', ...(o.mev !== undefined ? { mev: o.mev } : {}) });
     }
     return fired;
   }

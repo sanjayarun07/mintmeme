@@ -12,7 +12,8 @@ import { randomBytes } from 'node:crypto';
 import type { Backend } from '../../packages/core/src/index.ts';
 import { PrivyApi, verifySignature, looksLikeMint } from '../../packages/sol/src/index.ts';
 import type { PrivyConfig } from '../../packages/sol/src/index.ts';
-import { createSolanaTrader, jupiterSolUsd } from '../../packages/sdk/src/solana.ts';
+import { createSolanaTrader, jupiterSolUsd, toUnits } from '../../packages/sdk/src/solana.ts';
+import type { JitoOptions } from '../../packages/sol/src/index.ts';
 import { SdkError } from '../../packages/sdk/src/wire.ts';
 import type { Account } from './node.ts';
 import type { Route } from '../api/server.ts';
@@ -20,15 +21,21 @@ import type { Route } from '../api/server.ts';
 export interface SolLink { address: string; walletId: string; linkedAt: number }
 export const readLink = (b: Backend): SolLink | undefined => { try { const j = JSON.parse(b.read() ?? ''); return j && looksLikeMint(j.address) && typeof j.walletId === 'string' ? j : undefined; } catch { return undefined; } };
 type Status = { address?: string; active: boolean; why?: string };
+/** Per-user trading settings, in the user's Redis state. MEV protection is off by default: each protected trade pays a Jito tip. */
+export interface UserSettings { mevProtection: boolean; maxTipSol: string }
+export const DEFAULT_SETTINGS: UserSettings = { mevProtection: false, maxTipSol: '0.0001' };
+const MAX_TIP_SOL_CEILING = 1_000_000n;   // 0.001 SOL: a tip above this is refused, whatever the user asks
+export const readSettings = (b: Backend): UserSettings => { try { return { ...DEFAULT_SETTINGS, ...JSON.parse(b.read() ?? '{}') }; } catch { return { ...DEFAULT_SETTINGS }; } };
 /** Routes that spend or sell from the wallet (refused while the wallet is not active). */
 const TRADE_PATHS = /^\/v1\/(trades\/(buy|sell)$|orders\/[a-z-]+$|twap$|bulk\/(buy|sell)$)/;
 
 /** The account factory. A user with no linked (or no longer delegated) wallet still gets an account: reads work, every call that names a wallet is refused with the reason. */
-export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?: string[]; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void }) {
+export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?: string[]; /** Block-engine options for users who turn MEV protection on (region URL, uuid; tests pass a stand-in). */ jito?: JitoOptions; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void }) {
   const privy = new PrivyApi(c.privy), solUsd = c.solUsd ?? jupiterSolUsd(), status = new Map<string, Status>();
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
     const link = readLink(state('solwallet'));
-    const s = await createSolanaTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, caps: c.caps, venues: c.venues, solUsd, log: c.log });
+    const set = readSettings(state('settings')), mev = { enabled: set.mevProtection, maxTipLamports: toUnits(set.maxTipSol, 9, 'maxTipSol'), jito: c.jito };
+    const s = await createSolanaTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, caps: c.caps, venues: c.venues, solUsd, log: c.log });
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     return { trader: s.trader, prepare: async (raw: any, path: string) => {
       const trades = TRADE_PATHS.test(path); if (trades) s.refuseIfInactive();
@@ -62,6 +69,14 @@ export function linkRoutes(o: { privy: PrivyApi; state: (userId: string) => ((na
         if (!d.ok) throw new SdkError('not_delegated', d.why, 'In your app, call Privy useSigners().addSigners({ address, signers: [{ signerId, policyIds: [policyId] }] }) first.', 409);
         st(c.userId)('solwallet').write(JSON.stringify({ address, walletId: d.walletId, linkedAt: now() } satisfies SolLink));
         await o.reload(c.userId); return view(c.userId);
+      } },
+    { method: 'GET', path: '/v1/settings', scope: 'read', summary: 'Your trading settings (MEV protection)', run: c => readSettings(st(c.userId)('settings')) },
+    { method: 'PATCH', path: '/v1/settings', scope: 'trade', summary: 'Change trading settings. mevProtection: send trades privately through Jito with a tip (off by default). maxTipSol: the most one tip may cost (default 0.0001, at most 0.001)', body: 'mevProtection? (boolean), maxTipSol? (decimal string)',
+      run: async c => {
+        const cur = readSettings(st(c.userId)('settings')), b = c.body ?? {}, next: UserSettings = { ...cur };
+        if (b.mevProtection !== undefined) { if (typeof b.mevProtection !== 'boolean') throw new SdkError('bad_request', 'mevProtection must be true or false'); next.mevProtection = b.mevProtection; }
+        if (b.maxTipSol !== undefined) { const v = toUnits(b.maxTipSol, 9, 'maxTipSol'); if (v > MAX_TIP_SOL_CEILING || v < 1_000n) throw new SdkError('bad_amount', 'maxTipSol must be between 0.000001 and 0.001'); next.maxTipSol = String(b.maxTipSol); }
+        st(c.userId)('settings').write(JSON.stringify(next)); await o.reload(c.userId); return next;   // the account is rebuilt with the new sender: the next trade uses it
       } },
     { method: 'DELETE', path: '/v1/wallet', scope: 'trade', summary: 'Unlink the wallet: this server stops trading it (orders stay saved and are refused until a wallet is linked)',
       run: async c => { st(c.userId)('solwallet').write('{}'); await o.reload(c.userId); return view(c.userId); } },

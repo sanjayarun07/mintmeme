@@ -1,6 +1,6 @@
 import type { Backend } from '../../core/src/index.ts';
-import { SolanaChain, PrivyApi } from '../../sol/src/index.ts';
-import type { PrivyConfig, PriorityConfig } from '../../sol/src/index.ts';
+import { SolanaChain, PrivyApi, JitoSubmitter } from '../../sol/src/index.ts';
+import type { PrivyConfig, PriorityConfig, JitoOptions } from '../../sol/src/index.ts';
 import { Trader } from './trader.ts';
 export declare const WSOL_MINT = "So11111111111111111111111111111111111111112";
 /** Defaults: at most 0.05 SOL per buy and 0.25 SOL of buys per day. Lower them per user if you like; the Privy policy caps SOL transfers separately. */
@@ -30,6 +30,9 @@ export interface SolanaTraderOptions {
     walletId?: string;
     /** Priority fees (packages/sol/src/priorityfee.ts). Default on: 75th percentile of recent fees on the trade's accounts, at most 0.0001 SOL per transaction. false: off. */
     priority?: PriorityConfig | false;
+    /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
+     *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
+    mevProtection?: boolean | MevOptions;
     log?: (m: string) => void;
 }
 export interface SolanaTrader {
@@ -59,3 +62,14 @@ export declare function jupiterSolUsd(ttlMs?: number): () => Promise<{
     at: number;
 } | null>;
 export declare function createSolanaTrader(o: SolanaTraderOptions): Promise<SolanaTrader>;
+/** MEV protection options. `enabled` (default true when you pass an object) is the account default; a trade's own `mevProtection` wins either way. The block-engine
+ *  settings apply whenever a trade goes privately, also when the default is off. */
+export interface MevOptions {
+    enabled?: boolean;
+    maxTipLamports?: bigint;
+    tipPercentile?: 25 | 50 | 75 | 95 | 99;
+    jito?: JitoOptions;
+}
+export declare const mevOn: (m: boolean | MevOptions | undefined) => boolean;
+/** The Jito submitter for a `mevProtection` setting (always built, so a single trade can ask for private sending). */
+export declare function mevSubmitter(m: boolean | MevOptions): JitoSubmitter;

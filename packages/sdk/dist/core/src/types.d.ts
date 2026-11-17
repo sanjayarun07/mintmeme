@@ -16,6 +16,8 @@ export interface Intent {
     maxFeeBps: number;
     venues: string[];
     origin: Origin;
+    /** Send this trade privately (MEV protection) when the chain supports it; undefined: the account's default. */
+    mev?: boolean;
 }
 export interface Quote {
     venue: string;

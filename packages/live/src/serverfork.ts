@@ -20,7 +20,15 @@ async function main() {
   const env = await startPumpValidator(key, 8991), rpc = new SolJsonRpc(env.url), ns = `memedesk-serverfork:${Date.now()}`, mint = env.mint;
   const seed = randomBytes(32), wallet = new DevSolSigner(), addr = wallet.add(seed), fp = fakePrivy({ seed });
   const API_KEY = 'alice-fork-key-0123456789abcdef', keys = [{ keyHash: createHash('sha256').update(API_KEY).digest('hex'), userId: 'alice' }];
-  const acc = solanaAccounts({ rpcUrl: env.url, privy: { ...fp.cfg, fetchFn: fp.fetchFn }, venues: ['pump'], solUsd: async () => ({ price: 150, at: Date.now() }) });
+  // a stand-in Jito block engine and tip floor: it records what it receives and forwards the transaction to the local validator (the real engine exists only on mainnet)
+  const tipAcct = new DevSolSigner().add(randomBytes(32)), jitoSeen: { url: string; method: string; raw?: string }[] = [];
+  const jitoFetch = (async (url: any, init: any = {}) => { const u = String(url), ok = (result: unknown) => new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result }), { status: 200 });
+    if (u.includes('tip_floor')) return new Response(JSON.stringify([{ landed_tips_75th_percentile: 0.00001 }]), { status: 200 });
+    const b = JSON.parse(init.body); jitoSeen.push({ url: u, method: b.method, raw: b.params?.[0] });
+    if (b.method === 'getTipAccounts') return ok([tipAcct]);
+    if (b.method === 'sendTransaction') return ok(await rpc.call('sendTransaction', [b.params[0], { encoding: 'base64', skipPreflight: true, maxRetries: 0 }]));
+    return new Response('{}', { status: 400 }); }) as typeof fetch;
+  const acc = solanaAccounts({ rpcUrl: env.url, privy: { ...fp.cfg, fetchFn: fp.fetchFn }, venues: ['pump'], jito: { url: 'http://jito.test', tipFloorUrl: 'http://jito.test/tip_floor', fetchFn: jitoFetch, minIntervalMs: 0 }, solUsd: async () => ({ price: 150, at: Date.now() }) });
   const nodes: { nd: Awaited<ReturnType<typeof createNode>>; url: string }[] = [];
   const mk = async () => { const port = await freePort(), url = `http://127.0.0.1:${port}`;
     const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: ns, publicUrl: url, keys, makeAccount: acc.make, extraRoutes: h => linkRoutes({ privy: acc.privy, status: acc.status, ...h }), leaseTtlMs: 3000, sweepMs: 1000, requireAof: false, log: () => {} });
@@ -59,6 +67,22 @@ async function main() {
     const h0 = await tokens(), sl = await cl(other.url).swap({ side: 'sell', mint, pct: 50, slippagePct: 10, key: 'fork-sell-half' });
     let sv: any = sl; for (let i = 0; i < 40 && !['finalized', 'failed', 'expired'].includes(sv.state); i++) { await sleep(1000); sv = (await call(other.url, 'POST', '/v1/trades/alice.fork-sell-half/advance')).j; }
     const h1 = await tokens(); check('S8 a sell of half the holding in plain units (pct: 50) lands and leaves about half', sv.state !== 'failed' && h1 < h0 && h1 >= h0 / 2n - 1n && h1 <= h0 / 2n + 1n, JSON.stringify({ state: sv.state, before: String(h0), after: String(h1), failure: sv.failure }));
+    // MEV protection on: the next buy goes privately to the (stand-in) block engine with a tip and the jitodontfront flag, and still lands
+    { const ta = await rpc.call<string>('requestAirdrop', [tipAcct, 1_000_000_000]); for (let i = 0; i < 80; i++) { const s: any = await rpc.call('getSignatureStatuses', [[ta]]); if (s.value[0]?.confirmationStatus) break; await sleep(250); }
+      const on = await cl(other.url).updateSettings({ mevProtection: true }), t4 = await tokens(), mb = await cl(other.url).swap({ side: 'buy', mint, sol: '0.01', slippagePct: 5, key: 'fork-mev-1' });
+      let mv: any = mb; for (let i = 0; i < 40 && !['finalized', 'failed', 'expired'].includes(mv.state); i++) { await sleep(1000); mv = (await call(other.url, 'POST', '/v1/trades/alice.fork-mev-1/advance')).j; }
+      const sent = jitoSeen.filter(x => x.method === 'sendTransaction'), lt2: any = mv.txHash ? await rpc.call('getTransaction', [mv.txHash, { encoding: 'json', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]) : null, keys: string[] = lt2?.transaction?.message?.accountKeys ?? [];
+      const ti = keys.indexOf(tipAcct), tipPaid = ti >= 0 ? lt2.meta.postBalances[ti] - lt2.meta.preBalances[ti] : 0;
+      check('S11 with MEV protection on, the buy is sent privately (sendTransaction?bundleOnly=true) with a 10,000-lamport tip from the tip floor and the jitodontfront flag, and lands', on.mevProtection === true && sent.length === 1 && /bundleOnly=true/.test(sent[0].url) && tipPaid === 10_000 && keys.includes('jitodontfront111111111111111111111111111111') && mv.state !== 'failed' && (await tokens()) > t4, JSON.stringify({ state: mv.state, sends: sent.length, tipPaid, flag: keys.includes('jitodontfront111111111111111111111111111111'), failure: mv.failure }));
+      // per trade: the setting is off now, so a plain buy goes publicly and a buy with mevProtection: true goes privately
+      const before = jitoSeen.filter(x => x.method === 'sendTransaction').length;
+      await cl(other.url).updateSettings({ mevProtection: false }); const pb = await cl(other.url).swap({ side: 'buy', mint, sol: '0.005', slippagePct: 5, key: 'fork-pub-1' });
+      const settle = async (k: string, v: any) => { for (let i = 0; i < 40 && !['finalized', 'failed', 'expired'].includes(v.state); i++) { await sleep(1000); v = (await call(other.url, 'POST', `/v1/trades/alice.${k}/advance`)).j; } return v; };
+      const pbF = await settle('fork-pub-1', pb);   // let it land first: both buys move the same curve, and a buy priced before the other lands can exceed its slippage
+      const afterPublic = jitoSeen.filter(x => x.method === 'sendTransaction').length, xb = await cl(other.url).swap({ side: 'buy', mint, sol: '0.005', slippagePct: 5, key: 'fork-mev-2', mevProtection: true });
+      const afterPrivate = jitoSeen.filter(x => x.method === 'sendTransaction').length;
+      const xbF = await settle('fork-mev-2', xb);
+      check('S12 per trade: with the setting off a buy goes publicly, and one with mevProtection: true goes privately', afterPublic === before && afterPrivate === before + 1 && pbF.state === 'finalized' && xbF.state === 'finalized', JSON.stringify({ before, afterPublic, afterPrivate, pub: pbF.state, priv: xbF.state, f2: xbF.failure, h2: (xbF.history ?? []).map((h: any) => h.state + (h.note ? ":" + String(h.note).slice(0, 120) : "")) })); }
     // revoked in Privy: nothing is signed, nothing is sent
     fp.state.delegated = false; const t2 = await tokens(), sb = fp.state.signed;
     const rb = await call(other.url, 'POST', '/v1/trades/buy', { walletId: addr, token: mint, amount: '10000000', slippageBps: 500, key: 'fork-buy-revoked' });

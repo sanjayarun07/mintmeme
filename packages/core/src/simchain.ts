@@ -8,6 +8,8 @@ export interface SimTx {
   hash: string; wallet: string; nonce: number; venue: string; tokenIn: string; tokenOut: string;
   amountIn: bigint; minOut: bigint; deadline: number; platformFeeBps: number;
   raw?: string;                   // networked chains: signed raw transaction (persisted for write-ahead + identical resubmit)
+  /** Private sending (MEV protection): undefined = the chain's default. A chain that sent it privately records true here, so a resend after a restart takes the same path. */
+  mev?: boolean;
   kind?: 'swap' | 'noop' | 'approve';   // approve: networked chains only; spender below
   spender?: string;   // noop: consumes the nonce, pays gas, moves nothing (cancel/replace)
 }

@@ -114,7 +114,7 @@ export class Trader {
         const tok = idOf(p.token, 'token');
         return { idempotencyKey: p.key ? idOf(p.key, 'key') : `m-${randomUUID()}`, userId: this.userId, walletId: idOf(p.walletId, 'walletId'), chain: this.chain.id, tokenIn: sell ? tok : this.quoteToken, tokenOut: sell ? this.quoteToken : tok,
             amountIn: p.amount, minOut: p.minOut === undefined ? 0n : amount(p.minOut, 'minOut', { allowZero: true }), slippageBps: this.slip(p.slippageBps), deadline: this.chain.time + (p.deadlineS === undefined ? 120 : int(p.deadlineS, 'deadlineS', 10, 3600)),
-            maxFeeBps: p.maxFeeBps === undefined ? 200 : int(p.maxFeeBps, 'maxFeeBps', 0, 1000), venues: this.c.venues, origin: p.origin ?? 'manual' };
+            maxFeeBps: p.maxFeeBps === undefined ? 200 : int(p.maxFeeBps, 'maxFeeBps', 0, 1000), venues: this.c.venues, origin: p.origin ?? 'manual', ...mevOf(p.mevProtection) };
     }
     /** What a market trade would return right now, from the best authorized venue. Nothing is sent. */
     async quote(p) {
@@ -194,7 +194,7 @@ export class Trader {
         const o = { id: idv, userId: this.userId, walletId: idOf(p.walletId, 'walletId'), chain: this.chain.id, token: idOf(p.token, 'token'), quoteToken: this.quoteToken, kind, amount: amount(p.amount, 'amount'),
             expiresAt: this.chain.time + (p.ttlS === undefined ? d.orderTtlS : int(p.ttlS, 'ttlS', 60, 365 * 86_400)), maxQuoteAgeMs: p.maxQuoteAgeMs === undefined ? d.maxQuoteAgeMs : int(p.maxQuoteAgeMs, 'maxQuoteAgeMs', 100, 600_000),
             minLiquidity: p.minLiquidity === undefined ? d.minLiquidity : amount(p.minLiquidity, 'minLiquidity', { allowZero: true }), maxDeviationBps: p.maxDeviationBps === undefined ? d.maxDeviationBps : int(p.maxDeviationBps, 'maxDeviationBps', 0, 10_000),
-            maxAttempts: p.maxAttempts === undefined ? d.maxAttempts : int(p.maxAttempts, 'maxAttempts', 1, 10), slippageBps: this.slip(p.slippageBps), venues: this.c.venues, status: 'active', attempts: 0 };
+            maxAttempts: p.maxAttempts === undefined ? d.maxAttempts : int(p.maxAttempts, 'maxAttempts', 1, 10), slippageBps: this.slip(p.slippageBps), venues: this.c.venues, status: 'active', attempts: 0, ...mevOf(p.mevProtection) };
         if (o.token === o.quoteToken)
             throw new SdkError('bad_request', 'token and quote token are the same');
         if (p.chase) { // slippage chase: validated, capped, and given enough attempts to reach its cap (at most 10)
@@ -624,3 +624,7 @@ export class Trader {
     }
 }
 function view(r) { return { key: r.key, state: r.state, walletId: r.intent.walletId, origin: r.intent.origin, tokenIn: r.intent.tokenIn, tokenOut: r.intent.tokenOut, amountIn: r.intent.amountIn, fill: r.fill, venue: r.quote?.venue, txHash: r.tx?.hash, failure: r.failure, history: r.history.map(h => ({ ...h })) }; }
+/** Per-trade MEV protection: true sends this trade privately, false publicly, absent uses the account's default (createSolanaTrader `mevProtection`). */
+function mevOf(v) { if (v === undefined || v === null)
+    return {}; if (typeof v !== 'boolean')
+    throw new SdkError('bad_request', 'mevProtection must be true or false'); return { mev: v }; }

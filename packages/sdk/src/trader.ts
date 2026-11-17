@@ -112,11 +112,11 @@ export class Trader {
   private changed(key: string, sig: string) { if (this.seen.get(key) === sig) return false; this.seen.set(key, sig); return true; }
 
   // ───────────────────────── market trades ─────────────────────────
-  private intent(p: { key?: string; walletId: string; side: 'buy' | 'sell'; token: string; amount: bigint; slippageBps?: unknown; minOut?: unknown; deadlineS?: unknown; maxFeeBps?: unknown; origin?: Intent['origin'] }): Intent {
+  private intent(p: { key?: string; walletId: string; side: 'buy' | 'sell'; token: string; amount: bigint; slippageBps?: unknown; minOut?: unknown; deadlineS?: unknown; maxFeeBps?: unknown; mevProtection?: unknown; origin?: Intent['origin'] }): Intent {
     const sell = p.side === 'sell'; const tok = idOf(p.token, 'token');
     return { idempotencyKey: p.key ? idOf(p.key, 'key') : `m-${randomUUID()}`, userId: this.userId, walletId: idOf(p.walletId, 'walletId'), chain: this.chain.id, tokenIn: sell ? tok : this.quoteToken, tokenOut: sell ? this.quoteToken : tok,
       amountIn: p.amount, minOut: p.minOut === undefined ? 0n : amount(p.minOut, 'minOut', { allowZero: true }), slippageBps: this.slip(p.slippageBps), deadline: this.chain.time + (p.deadlineS === undefined ? 120 : int(p.deadlineS, 'deadlineS', 10, 3600)),
-      maxFeeBps: p.maxFeeBps === undefined ? 200 : int(p.maxFeeBps, 'maxFeeBps', 0, 1000), venues: this.c.venues, origin: p.origin ?? 'manual' };
+      maxFeeBps: p.maxFeeBps === undefined ? 200 : int(p.maxFeeBps, 'maxFeeBps', 0, 1000), venues: this.c.venues, origin: p.origin ?? 'manual', ...mevOf(p.mevProtection) };
   }
   /** What a market trade would return right now, from the best authorized venue. Nothing is sent. */
   async quote(p: { side: 'buy' | 'sell'; token: string; amount: Amount; slippageBps?: number; walletId?: string }): Promise<QuoteView> {
@@ -127,12 +127,12 @@ export class Trader {
     return { venue: r.best.venue, amountOut: r.best.amountOut, minOut: r.best.amountOut * BigInt(10_000 - i.slippageBps) / 10_000n, priceImpactBps: r.best.priceImpactBps, platformFee: fee, venueFee: r.best.venueFee, liquidity: r.best.liquidity, alternatives: r.all.slice(1).map(q => ({ venue: q.venue, amountOut: q.amountOut })) };
   }
   /** Market buy: spend `amount` of the quote token on `token`. Resolves when the engine has taken the trade as far as it can (finalized, failed, or waiting on the chain). */
-  async buy(p: { walletId: string; token: string; amount: Amount; slippageBps?: number; minOut?: Amount; key?: string; deadlineS?: number; maxFeeBps?: number }): Promise<TradeView> {
+  async buy(p: { walletId: string; token: string; amount: Amount; slippageBps?: number; minOut?: Amount; key?: string; mevProtection?: boolean; deadlineS?: number; maxFeeBps?: number }): Promise<TradeView> {
     if (this.paused) throw new SdkError('entries_paused', 'New buys are paused for this account.', 'Call resumeEntries() to allow buys again. Sells are never blocked.', 409);
     return this.trade(this.intent({ ...p, side: 'buy', amount: amount(p.amount, 'amount') }));
   }
   /** Market sell: `amount` of `token` for the quote token, or `pctBps` (1..10000) of the wallet's balance. */
-  async sell(p: { walletId: string; token: string; amount?: Amount; pctBps?: number; slippageBps?: number; minOut?: Amount; key?: string; deadlineS?: number; maxFeeBps?: number }): Promise<TradeView> {
+  async sell(p: { walletId: string; token: string; amount?: Amount; pctBps?: number; slippageBps?: number; minOut?: Amount; key?: string; mevProtection?: boolean; deadlineS?: number; maxFeeBps?: number }): Promise<TradeView> {
     const amt = await this.sellAmount(p.walletId, p.token, p.amount, p.pctBps);
     return this.trade(this.intent({ ...p, side: 'sell', amount: amt }));
   }
@@ -162,12 +162,12 @@ export class Trader {
   private record(r: TxRecord) { if (r.intent.userId === this.userId && r.fill && (r.state === 'finalized' || r.state === 'confirmed')) this.portfolio.recordTrade({ id: r.key, userId: this.userId, chain: r.intent.chain, tokenIn: r.intent.tokenIn, tokenOut: r.intent.tokenOut, venue: r.quote?.venue ?? '', state: r.state, fill: r.fill, ts: this.chain.time, origin: r.intent.origin }); }
 
   // ───────────────────────── price orders ─────────────────────────
-  private orderBase(p: { id?: string; walletId: string; token: string; amount: Amount; slippageBps?: number; ttlS?: number; maxDeviationBps?: number; maxAttempts?: number; maxQuoteAgeMs?: number; minLiquidity?: Amount; chase?: ChaseInput }, kind: OrderKind, oid?: string) {
+  private orderBase(p: { id?: string; walletId: string; token: string; amount: Amount; slippageBps?: number; mevProtection?: boolean; ttlS?: number; maxDeviationBps?: number; maxAttempts?: number; maxQuoteAgeMs?: number; minLiquidity?: Amount; chase?: ChaseInput }, kind: OrderKind, oid?: string) {
     const d = this.d(); const idv = oid ?? (p.id ? idOf(p.id) : `o-${randomUUID()}`);
     const o: Order = { id: idv, userId: this.userId, walletId: idOf(p.walletId, 'walletId'), chain: this.chain.id, token: idOf(p.token, 'token'), quoteToken: this.quoteToken, kind, amount: amount(p.amount, 'amount'),
       expiresAt: this.chain.time + (p.ttlS === undefined ? d.orderTtlS : int(p.ttlS, 'ttlS', 60, 365 * 86_400)), maxQuoteAgeMs: p.maxQuoteAgeMs === undefined ? d.maxQuoteAgeMs : int(p.maxQuoteAgeMs, 'maxQuoteAgeMs', 100, 600_000),
       minLiquidity: p.minLiquidity === undefined ? d.minLiquidity : amount(p.minLiquidity, 'minLiquidity', { allowZero: true }), maxDeviationBps: p.maxDeviationBps === undefined ? d.maxDeviationBps : int(p.maxDeviationBps, 'maxDeviationBps', 0, 10_000),
-      maxAttempts: p.maxAttempts === undefined ? d.maxAttempts : int(p.maxAttempts, 'maxAttempts', 1, 10), slippageBps: this.slip(p.slippageBps), venues: this.c.venues, status: 'active', attempts: 0 };
+      maxAttempts: p.maxAttempts === undefined ? d.maxAttempts : int(p.maxAttempts, 'maxAttempts', 1, 10), slippageBps: this.slip(p.slippageBps), venues: this.c.venues, status: 'active', attempts: 0, ...mevOf(p.mevProtection) };
     if (o.token === o.quoteToken) throw new SdkError('bad_request', 'token and quote token are the same');
     if (p.chase) {   // slippage chase: validated, capped, and given enough attempts to reach its cap (at most 10)
       const stepBps = int(p.chase.stepBps, 'chase.stepBps', 10, 1_000), maxBps = int(p.chase.maxBps, 'chase.maxBps', 0, 5_000);
@@ -371,6 +371,8 @@ export class Trader {
   }
 }
 export interface PriceOrderInput {
+  /** Send this order's trades privately (true) or publicly (false); absent: the account default. */
+  mevProtection?: boolean;
   id?: string; walletId: string; token: string;
   /** buy: quote-token budget. sell: token amount. Raw base units. */
   amount: Amount;
@@ -396,3 +398,5 @@ export interface TwapInput {
   limitPriceE18?: Amount; maxSliceImpactBps?: number; jitterPct?: number; onFailure?: 'continue' | 'stop';
 }
 function view(r: TxRecord): TradeView { return { key: r.key, state: r.state, walletId: r.intent.walletId, origin: r.intent.origin, tokenIn: r.intent.tokenIn, tokenOut: r.intent.tokenOut, amountIn: r.intent.amountIn, fill: r.fill, venue: r.quote?.venue, txHash: r.tx?.hash, failure: r.failure, history: r.history.map(h => ({ ...h })) }; }
+/** Per-trade MEV protection: true sends this trade privately, false publicly, absent uses the account's default (createSolanaTrader `mevProtection`). */
+function mevOf(v: unknown): { mev?: boolean } { if (v === undefined || v === null) return {}; if (typeof v !== 'boolean') throw new SdkError('bad_request', 'mevProtection must be true or false'); return { mev: v }; }

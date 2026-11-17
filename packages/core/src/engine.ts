@@ -247,7 +247,7 @@ export class Engine {
   private build(r: TxRecord): SimTx {
     const i = r.intent;
     return { hash: '', wallet: i.walletId, nonce: -1, venue: r.quote!.venue, tokenIn: i.tokenIn, tokenOut: i.tokenOut,
-      amountIn: i.amountIn, minOut: r.minOut!, deadline: i.deadline, platformFeeBps: this.bps(i) };
+      amountIn: i.amountIn, minOut: r.minOut!, deadline: i.deadline, platformFeeBps: this.bps(i), ...(i.mev !== undefined ? { mev: i.mev } : {}) };
   }
   private hash(r: TxRecord, nonce: number) {
     const t = r.tx!;

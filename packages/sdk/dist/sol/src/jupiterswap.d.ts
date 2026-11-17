@@ -102,7 +102,11 @@ export interface GateCtx {
     amountIn: bigint;
     allowedPrograms: Set<string>;
     maxPriorityLamports: bigint;
-    maxComputeUnits: number;
+    maxComputeUnits: number; /** The one tip transfer we added ourselves (Jito): exactly this destination and at most this amount. */
+    tip?: {
+        to: string;
+        maxLamports: bigint;
+    };
 }
 export interface GateResult {
     createdTokenAccounts: string[];
