@@ -12,6 +12,7 @@
 import type { SolRpcLike } from './tokensafety.ts';
 import { stockByMint, stockBySymbol } from './xstocks.ts';
 import type { IssuedAsset } from './tokensafety.ts';
+import { jupiterGet } from './jupiter.ts';
 
 export interface StockState { mint: string; decimals: number; /** Effective now, as a decimal string ("1" when the mint has no multiplier). */ multiplier: string; paused: boolean;
   /** A scheduled multiplier not yet in force, and when (unix seconds). */ next?: { multiplier: string; at: number } }
@@ -66,9 +67,8 @@ export class JupiterStockPrices {
     const now = (this.o.now ?? Date.now)(), ttl = this.o.ttlMs ?? 30_000, out = new Map<string, StockPrice>(), need: string[] = [];
     for (const m of mints) { const c = this.cache.get(m); if (c && now - c.at < ttl) out.set(m, c.p); else need.push(m); }
     if (need.length) try {
-      let res = await (this.o.fetchFn ?? fetch)(`${this.o.url ?? (this.o.apiKey ? 'https://api.jup.ag/price/v3' : 'https://lite-api.jup.ag/price/v3')}?ids=${need.join(',')}`, { headers: this.o.apiKey ? { 'x-api-key': this.o.apiKey } : {}, signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
-      // the key's quota used up (429) or the keyed host failing: the same public prices from the keyless host, so a stock trade is not refused for it
-      if (!res.ok && this.o.apiKey && !this.o.url && (res.status === 429 || res.status >= 500)) res = await (this.o.fetchFn ?? fetch)(`https://lite-api.jup.ag/price/v3?ids=${need.join(',')}`, { signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
+      // the key's quota used up (429) or the keyed host failing: jupiterGet asks the keyless host for the same public prices, so a stock trade is not refused for it
+      const res = await jupiterGet({ keyed: 'https://api.jup.ag/price/v3', keyless: 'https://lite-api.jup.ag/price/v3', query: `ids=${need.join(',')}`, url: this.o.url, apiKey: this.o.apiKey, fetchFn: this.o.fetchFn, timeoutMs: this.o.timeoutMs ?? 8000 });
       if (res.ok) { const j: any = await res.json();
         for (const m of need) { const r = j?.[m]; if (!r) continue; const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : undefined);
           const p: StockPrice = { usdPrice: n(r.usdPrice), stockPrice: n(r.stockData?.price) }; this.cache.set(m, { at: now, p }); out.set(m, p); } }

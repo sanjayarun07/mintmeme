@@ -1,19 +1,25 @@
 export const JUPITER_QUOTE_URL = 'https://lite-api.jup.ag/swap/v1/quote';
 /** With an API key (x-api-key): the keyed host, at the key's rate limit instead of the keyless one. */
 export const JUPITER_KEYED_QUOTE_URL = 'https://api.jup.ag/swap/v1/quote';
+/** GET from Jupiter: with an API key, the keyed host and x-api-key; if the key's quota is used up (429) or the keyed host fails (5xx), the same request (`query`) on the
+ *  keyless host. A custom `url` (tests, a proxy) is used as given, with no fallback. The failed response's body is released before the retry. */
+export async function jupiterGet(o) {
+    const f = o.fetchFn ?? fetch, opts = (key) => ({ headers: key ? { 'x-api-key': key } : {}, signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) }), at = (base) => `${base}?${o.query}`;
+    const res = await f(at(o.url ?? (o.apiKey ? o.keyed : o.keyless)), opts(o.apiKey));
+    if (res.ok || !o.apiKey || o.url || !(res.status === 429 || res.status >= 500))
+        return res;
+    try {
+        await res.body?.cancel?.();
+    }
+    catch { /* nothing to release */ }
+    return f(at(o.keyless), opts());
+}
 export async function fetchJupiterQuote(o) {
     const slip = o.slippageBps ?? 50;
     if (!(o.amount > 0n))
         throw new Error('amount must be positive');
-    const u = new URL(o.url ?? (o.apiKey ? JUPITER_KEYED_QUOTE_URL : JUPITER_QUOTE_URL));
-    u.search = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), slippageBps: String(slip), restrictIntermediateTokens: 'true' }).toString();
-    let res = await (o.fetchFn ?? fetch)(u.toString(), { headers: o.apiKey ? { 'x-api-key': o.apiKey } : {}, signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
-    // the key's quota used up (429) or the keyed host failing: the same quote from the keyless host
-    if (!res.ok && o.apiKey && !o.url && (res.status === 429 || res.status >= 500)) {
-        const k = new URL(JUPITER_QUOTE_URL);
-        k.search = u.search;
-        res = await (o.fetchFn ?? fetch)(k.toString(), { signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
-    }
+    const query = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), slippageBps: String(slip), restrictIntermediateTokens: 'true' }).toString();
+    const res = await jupiterGet({ keyed: JUPITER_KEYED_QUOTE_URL, keyless: JUPITER_QUOTE_URL, query, url: o.url, apiKey: o.apiKey, fetchFn: o.fetchFn, timeoutMs: o.timeoutMs });
     if (!res.ok)
         throw new Error(`Jupiter quote failed: HTTP ${res.status}`);
     const j = await res.json();

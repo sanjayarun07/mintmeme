@@ -181,6 +181,8 @@ export declare class SolanaChain implements ChainPort {
     private submitRfq;
     /** The landed signature for a hash: the hash itself for ordinary transactions; for RFQ trades /execute's signature, or the wallet's recent transaction that carries our signature. */
     private resolve;
+    /** Forget RFQ trades whose quote expired over a day ago: the engine has booked or failed them long since. */
+    private pruneRfq;
     /** The token program that owns each mint (classic Token unless the chain says Token-2022). Cached: a mint never changes program. */
     private tokenPrograms;
     private mintProgram;

@@ -190,11 +190,12 @@ async function quote(body: any, emit: (o: unknown) => void) {
     emit({ stage: 'decision', useRfq: reasons.every(r => r.ok), reasons });
     // a connected wallet may sign and execute THIS order: only if the gate accepted it and the simulation passed, and under the desk's size cap
     if (forWallet) {
-      const tradable = x.verdict.ok && sim.ok === true && usd <= MAX_USD, outSym = sym(mint), outDec = decOf(mint);
+      // the share-price check binds here as it does in the engine (rfqFillCheck): a fill priced far above the underlying share is never offered for signing
+      const priceOk = sh?.ok !== false, tradable = x.verdict.ok && sim.ok === true && priceOk && usd <= MAX_USD, outSym = sym(mint), outDec = decOf(mint);
       const summary = `Pay ${(Number(amount) / 10 ** payDec).toLocaleString('en-US', { maximumFractionDigits: payDec === 9 ? 4 : 2 })} ${paySym}, receive ${(Number(rfq.outAmount) / 10 ** outDec).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${outSym} from maker ${rfq.maker.slice(0, 4)}…${rfq.maker.slice(-4)}`;
       if (tradable) { prune(); PENDING.set(rfq.requestId, { message: Uint8Array.from(rfq.message), wallet: taker, expireAt: rfq.expireAt, usd, summary }); }
       emit({ stage: 'trade', tradable, summary, requestId: rfq.requestId, expireAt: rfq.expireAt, transaction: tradable ? Buffer.from(rfq.tx).toString('base64') : undefined,
-        why: tradable ? undefined : !x.verdict.ok ? 'The gate refused this transaction' : sim.ok !== true ? 'The simulation did not pass' : `This desk executes at most $${MAX_USD.toLocaleString('en-US')} per trade (RFQ_DESK_MAX_USD)` });
+        why: tradable ? undefined : !x.verdict.ok ? 'The gate refused this transaction' : sim.ok !== true ? 'The simulation did not pass' : !priceOk ? `The fill fails the share-price check (${sh!.why})` : `This desk executes at most $${MAX_USD.toLocaleString('en-US')} per trade (RFQ_DESK_MAX_USD)` });
     }
   } else emit({ stage: 'decision', useRfq: false, reasons: [{ ok: false, text: `No RFQ quote: ${rfq.none}` }] });
   emit({ stage: 'done' });

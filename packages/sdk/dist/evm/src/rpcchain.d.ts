@@ -139,5 +139,8 @@ export declare class EvmRpcChain implements ChainPort {
     lookup(hash: string): Promise<"included" | "none" | "pending">;
     confirmations(hash: string): Promise<number>;
     /** Receipt -> balance deltas for the wallet: ERC-20 Transfer logs, WETH Withdrawal logs from the router (native out), tx value and gas (native). */
+    /** What the wallet's OTHER transactions in block `n` cost it in ETH, when each can only have cost ETH (gas and L1 fee; a self-send gets its value back): an ERC-20 approve, or a self-send
+     *  (the engine's cancel). Any other transaction might have paid ETH in internally, so the Relay swap's ETH change cannot be separated: RpcError (looked at again later). */
+    private otherTxsCost;
     receipt(hash: string): Promise<Receipt | undefined>;
 }

@@ -1,4 +1,5 @@
 import { stockByMint, stockBySymbol } from './xstocks.js';
+import { jupiterGet } from './jupiter.js';
 /** Reads the mints (one getMultipleAccounts, jsonParsed). A mint that does not exist or is not a token mint is left out. `nowSec` decides which multiplier is in force. */
 export async function readStockStates(rpc, mints, nowSec = Math.floor(Date.now() / 1000)) {
     const out = new Map();
@@ -70,10 +71,8 @@ export class JupiterStockPrices {
         }
         if (need.length)
             try {
-                let res = await (this.o.fetchFn ?? fetch)(`${this.o.url ?? (this.o.apiKey ? 'https://api.jup.ag/price/v3' : 'https://lite-api.jup.ag/price/v3')}?ids=${need.join(',')}`, { headers: this.o.apiKey ? { 'x-api-key': this.o.apiKey } : {}, signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
-                // the key's quota used up (429) or the keyed host failing: the same public prices from the keyless host, so a stock trade is not refused for it
-                if (!res.ok && this.o.apiKey && !this.o.url && (res.status === 429 || res.status >= 500))
-                    res = await (this.o.fetchFn ?? fetch)(`https://lite-api.jup.ag/price/v3?ids=${need.join(',')}`, { signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
+                // the key's quota used up (429) or the keyed host failing: jupiterGet asks the keyless host for the same public prices, so a stock trade is not refused for it
+                const res = await jupiterGet({ keyed: 'https://api.jup.ag/price/v3', keyless: 'https://lite-api.jup.ag/price/v3', query: `ids=${need.join(',')}`, url: this.o.url, apiKey: this.o.apiKey, fetchFn: this.o.fetchFn, timeoutMs: this.o.timeoutMs ?? 8000 });
                 if (res.ok) {
                     const j = await res.json();
                     for (const m of need) {

@@ -19,6 +19,17 @@ export interface JupiterQuote {
 export declare const JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
 /** With an API key (x-api-key): the keyed host, at the key's rate limit instead of the keyless one. */
 export declare const JUPITER_KEYED_QUOTE_URL = "https://api.jup.ag/swap/v1/quote";
+/** GET from Jupiter: with an API key, the keyed host and x-api-key; if the key's quota is used up (429) or the keyed host fails (5xx), the same request (`query`) on the
+ *  keyless host. A custom `url` (tests, a proxy) is used as given, with no fallback. The failed response's body is released before the retry. */
+export declare function jupiterGet(o: {
+    keyed: string;
+    keyless: string;
+    query: string;
+    url?: string;
+    apiKey?: string;
+    fetchFn?: typeof fetch;
+    timeoutMs?: number;
+}): Promise<Response>;
 export declare function fetchJupiterQuote(o: {
     inputMint: string;
     outputMint: string;

@@ -228,6 +228,22 @@ export class EvmRpcChain implements ChainPort {
   }
 
   /** Receipt -> balance deltas for the wallet: ERC-20 Transfer logs, WETH Withdrawal logs from the router (native out), tx value and gas (native). */
+  /** What the wallet's OTHER transactions in block `n` cost it in ETH, when each can only have cost ETH (gas and L1 fee; a self-send gets its value back): an ERC-20 approve, or a self-send
+   *  (the engine's cancel). Any other transaction might have paid ETH in internally, so the Relay swap's ETH change cannot be separated: RpcError (looked at again later). */
+  private async otherTxsCost(wallet: string, n: bigint, ours: string, expected: bigint): Promise<bigint> {
+    const unclear = (why: string) => new RpcError(`the wallet sent ${expected + 1n} transactions in block ${n}: ${why}, so the swap's ETH change cannot be read on its own`);
+    let blk: any; try { blk = await this.rpc.call('eth_getBlockByNumber', [hex(n), true]); } catch (e) { throw unclear(`the block could not be read (${(e as Error).message})`); }
+    const others = ((blk?.transactions ?? []) as any[]).filter(x => typeof x === 'object' && lc(x.from ?? '') === wallet && lc(x.hash ?? '') !== ours);
+    if (BigInt(others.length) !== expected) throw unclear('not all of them were found in the block');
+    let cost = 0n;
+    for (const x of others) {
+      const input = String(x.input ?? '0x').toLowerCase(), self = lc(x.to ?? '') === wallet && input === '0x', approve = input.startsWith('0x095ea7b3') && big(x.value ?? '0x0') === 0n;
+      if (!self && !approve) throw unclear(`${x.hash} is neither an approval nor a self-send`);
+      const r: any = await this.rpc.call('eth_getTransactionReceipt', [x.hash]); if (!r) throw unclear(`${x.hash} has no receipt yet`);
+      cost += big(r.gasUsed) * big(r.effectiveGasPrice) + (typeof r.l1Fee === 'string' ? big(r.l1Fee) : 0n);   // a self-send's value comes straight back
+    }
+    return cost;
+  }
   async receipt(hash: string): Promise<Receipt | undefined> {
     const rc: any = await this.rpc.call('eth_getTransactionReceipt', [hash]); if (!rc) return undefined;
     const t: any = await this.rpc.call('eth_getTransactionByHash', [hash]); const wallet = lc(rc.from), weth = lc(this.cfg.weth);
@@ -244,14 +260,15 @@ export class EvmRpcChain implements ChainPort {
       else if (t0 === FEE_EVENT && this.cfg.feeRouter && addr === lc(this.cfg.feeRouter.address)) platformFee += big(l.data);   // router unwrapped WETH and forwarded the ETH
     }
     // Relay swaps: ETH paid out to the wallet is an internal transfer (no log), so the wallet's ETH change is read as its balance change across that block, which is exact
-    // when this was its only transaction there (gas, value and ETH received). Otherwise, or if the node no longer serves that state, the receipt is not booked yet (retried).
+    // when this was its only transaction there (gas, value and ETH received). When the wallet's other transactions in that block can only have cost it ETH (approvals and
+    // the engine's self-sends: their gas and L1 fee), those costs are added back. Anything else, or a node that no longer serves that state: not booked yet (retried).
     const K = this.cfg.relay ? this.relayK() : undefined, relayTx = !!K && [lc(K.router), lc(K.approvalProxy)].includes(lc(t.to ?? ''));
     if (relayTx) {
       if (t.input && t.input !== '0x') decodeRelaySwap(t.input);   // throws on anything that is not a Relay swap call
       const at = (m: string, b: bigint) => this.rpc.call<string>(m, [wallet, hex(b)]).then(big), n = big(rc.blockNumber);
       let txs: bigint; try { txs = await at('eth_getTransactionCount', n) - await at('eth_getTransactionCount', n - 1n); } catch (e) { throw new RpcError(`the wallet's state at block ${n} is not available yet: ${(e as Error).message}`); }
-      if (txs !== 1n) throw new RpcError(`the wallet sent ${txs} transactions in block ${n}: its ETH change cannot be attributed to this swap alone`);
-      deltas[NATIVE] = await at('eth_getBalance', n) - await at('eth_getBalance', n - 1n);
+      const othersCost = txs === 1n ? 0n : await this.otherTxsCost(wallet, n, lc(hash), txs - 1n);
+      deltas[NATIVE] = await at('eth_getBalance', n) - await at('eth_getBalance', n - 1n) + othersCost;
       return { hash, status: 'success', block, deltas, network: gas, platformFee: 0n, venueFee: 0n };
     }
     // the WETH wrapper leg of a native-in swap is router<->pair, never the wallet, so it does not appear above

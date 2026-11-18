@@ -62,10 +62,10 @@ test('relay client: parses a quote, and refuses another chain, signature steps, 
 // ---- the chain: a mock node answering what the Relay path asks (eth_simulateV1 with transfer logs, allowance, 0x registry, balances for receipts)
 const TRANSFER = bytesToHex(keccak256(new TextEncoder().encode('Transfer(address,address,uint256)'))), pad = (a: string) => '0x' + a.toLowerCase().slice(2).padStart(64, '0'), w32 = (n: bigint) => '0x' + n.toString(16).padStart(64, '0'), hx = (n: bigint | number) => '0x' + n.toString(16);
 const signer: RawSigner = { sign: r => '0x' + Buffer.from(JSON.stringify({ ...r, value: r.value.toString(), gasLimit: r.gasLimit.toString(), maxFeePerGas: r.maxFeePerGas.toString(), maxPriorityFeePerGas: r.maxPriorityFeePerGas.toString() })).toString('hex') };
-function world(o: { got?: bigint; spend?: bigint; extra?: [string, bigint]; settler?: string; allowance?: bigint; txsInBlock?: bigint; ok?: boolean; l1Fee?: bigint } = {}) {
+function world(o: { got?: bigint; spend?: bigint; extra?: [string, bigint]; settler?: string; allowance?: bigint; txsInBlock?: bigint; ok?: boolean; l1Fee?: bigint; blockTxs?: any[] } = {}) {
   const b = Q('buy-kyber'), s = Q('sell'), W = b.wallet.toLowerCase(), TOK = b.tokenOut.toLowerCase(), calls: string[] = [];
   const rpc = { call: async (m: string, p: any[] = []): Promise<any> => { calls.push(m);
-    if (m === 'eth_getBlockByNumber') return { number: hx(100), timestamp: hx(1_800_000_000) }; if (m === 'eth_gasPrice') return hx(10_000_000n);
+    if (m === 'eth_getBlockByNumber') return { number: hx(100), timestamp: hx(1_800_000_000), ...(p[1] === true ? { transactions: o.blockTxs ?? [] } : {}) }; if (m === 'eth_gasPrice') return hx(10_000_000n);
     if (m === 'eth_call') { const q = p[0]; if (q.data.startsWith('0xdd62ed3e')) return w32(o.allowance ?? 0n); if (q.to === ZEROX.deployer) return pad(o.settler ?? '0x' + '00'.repeat(20)); throw new Error('unscripted eth_call'); }
     if (m === 'eth_simulateV1') { const cs = p[0].blockStateCalls[0].calls as any[], last = cs[cs.length - 1], sell = last.to === RELAY_BASE.approvalProxy;
       const logs = sell ? [{ address: TOK, topics: [TRANSFER, pad(W), pad(RELAY_BASE.approvalProxy)], data: w32(o.spend ?? s.amountIn) }, { address: KYBER.native, topics: [TRANSFER, pad(RELAY_BASE.router), pad(W)], data: w32(o.got ?? s.minimumOut) }]
@@ -133,6 +133,15 @@ test('chain: a Relay sell\'s receipt books the ETH received from the wallet\'s b
   const { chain, TOK, s } = world(); const r = (await chain.receipt('0xh'))!;
   assert.equal(r.status, 'success'); assert.equal(r.deltas[TOK], -s.amountIn); assert.equal(r.deltas[NATIVE], 4_000_000_000_000n, 'ETH in, net of gas, from the balance change'); assert.equal(r.venueFee, 0n);
   await assert.rejects(world({ txsInBlock: 2n }).chain.receipt('0xh'), (e: Error) => e instanceof RpcError && /2 transactions in block/.test(e.message));
+});
+
+test('chain: a Relay sell sharing its block with the wallet\'s approval (another trade) books, adding back that approval\'s gas; any other transaction keeps it unbooked', async () => {
+  const W = Q('sell').wallet.toLowerCase(), TOK = Q('buy-kyber').tokenOut.toLowerCase();
+  const approve = { hash: '0xa1', from: W, to: TOK, value: '0x0', input: '0x095ea7b3' + '00'.repeat(64) }, ours = { hash: '0xh', from: W, to: RELAY_BASE.approvalProxy, value: '0x0', input: '0x' };
+  const r = (await world({ txsInBlock: 2n, blockTxs: [approve, ours] }).chain.receipt('0xh'))!;
+  assert.equal(r.status, 'success'); assert.equal(r.deltas[NATIVE], 4_000_000_000_000n + 1_000_000n, 'the balance change plus the approval\'s gas (100,000 x 10 wei)');
+  const swap = { ...approve, hash: '0xb2', to: '0x' + '44'.repeat(20), input: '0x18cbafe5' };   // a V2 sell for ETH: it may have paid ETH in
+  await assert.rejects(world({ txsInBlock: 2n, blockTxs: [swap, ours] }).chain.receipt('0xh'), (e: Error) => e instanceof RpcError && /neither an approval nor a self-send/.test(e.message));
 });
 
 test('receipt: Base\'s L1 data fee (receipt l1Fee) is network cost, not trade spend (mainnet 2026-11-18 booked 21440716282 wei of it as spend)', async () => {

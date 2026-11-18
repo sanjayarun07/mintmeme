@@ -615,7 +615,7 @@ export class SolanaChain {
         // our platform fee is paid in SOL inside the transaction, which an RFQ transaction cannot carry
         if (tx.platformFeeBps && (tx.tokenIn !== NATIVE && tx.tokenOut !== NATIVE ? true : this.feeSplit(tx).each.length > 0))
             return no('the trade carries a platform fee, which an RFQ transaction cannot pay');
-        const [b, o] = [await fetchBuild({ ...j, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps: 50 }), await fetchRfqOrder({ ...z, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w })];
+        const [b, o] = await Promise.all([fetchBuild({ ...j, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps: 50 }), fetchRfqOrder({ ...z, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w })]);
         if ('none' in o)
             return no(o.none);
         const need = b.outAmount * BigInt(10_000 + z.marginBps) / 10000n;
@@ -672,6 +672,7 @@ export class SolanaChain {
             throw new JupiterRefused(`RFQ simulation pays ${got}, below the minimum ${tx.minOut}`);
         // the user's wallet signs its own slot (1); the maker signs slot 0 inside /execute
         const sig = await this.signer.sign(w, o.message), hash = base58(sig);
+        this.pruneRfq();
         this.rfq.set(hash, { requestId: o.requestId, expireAt: o.expireAt, wallet: w });
         this.rfqNote = `JupiterZ used: maker ${o.maker} pays ${o.outAmount} (/build ${b.outAmount}), quote expires at ${o.expireAt}`;
         return { raw: encodeRfqRaw(o.requestId, o.expireAt, rfqWire(o.message, 1, sig)), hash };
@@ -680,6 +681,8 @@ export class SolanaChain {
      *  (chain time past expireAt) and the transaction is not on chain; before that it is treated like a lost ack (RpcError), so the engine looks again instead of failing it. */
     async submitRfq(tx, z) {
         const e = this.rfq.get(tx.hash) ?? { requestId: z.requestId, expireAt: z.expireAt, wallet: tx.wallet };
+        if (!this.rfq.has(tx.hash))
+            this.pruneRfq();
         this.rfq.set(tx.hash, e);
         if (await this.resolve(tx.hash))
             return tx.hash; // already on chain (for example sent before a restart)
@@ -713,17 +716,26 @@ export class SolanaChain {
         if (e.landed && await this.status(e.landed))
             return e.landed;
         const list = await this.rpcCall('getSignaturesForAddress', [e.wallet, { limit: 100, commitment: 'confirmed' }]);
+        e.checked ??= new Set();
         for (const x of list ?? []) {
             if (typeof x?.blockTime === 'number' && (x.blockTime < e.expireAt - 180 || x.blockTime > e.expireAt + 180))
                 continue;
+            if (e.checked.has(x.signature))
+                continue; // fetched on an earlier poll and not ours: a transaction's signatures never change
             const t = await this.rpcCall('getTransaction', [x.signature, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);
             if ((t?.transaction?.signatures ?? []).includes(hash)) {
                 e.landed = x.signature;
                 return x.signature;
             }
+            if (t)
+                e.checked.add(x.signature);
         }
         return undefined;
     }
+    /** Forget RFQ trades whose quote expired over a day ago: the engine has booked or failed them long since. */
+    pruneRfq() { const cut = Math.floor(Date.now() / 1000) - 86_400; for (const [k, v] of this.rfq)
+        if (v.expireAt < cut)
+            this.rfq.delete(k); }
     /** The token program that owns each mint (classic Token unless the chain says Token-2022). Cached: a mint never changes program. */
     async tokenPrograms(mints) {
         const need = [...new Set(mints)].filter(m => !this.mintProgram.has(m)), info = need.length ? await this.accountsAt(need) : [];
