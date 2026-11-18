@@ -292,7 +292,7 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
       </div>
       <div class="panel" id="trade-panel">
         <div class="ph"><h2>Trade</h2><span class="badge" id="trade-badge">No wallet</span></div>
-        <div class="pb" id="trade-body"><p class="muted" style="margin:0">Connect a wallet to trade the firm quote from it. The quote is then built for your wallet, and the gate and simulation run on your own balances. Your wallet asks you to sign, and the desk sends only the exact transaction it checked.</p></div>
+        <div class="pb" id="privy-box" hidden style="border-bottom:1px solid var(--border)"></div><div class="pb" id="trade-body"><p class="muted" style="margin:0">Connect a wallet to trade the firm quote from it. The quote is then built for your wallet, and the gate and simulation run on your own balances. Your wallet asks you to sign, and the desk sends only the exact transaction it checked.</p></div>
       </div>
     </div>
 
@@ -546,35 +546,84 @@ const themeButton=$('#theme-toggle');
 function paintThemeButton(){const next=document.documentElement.dataset.theme==='dark'?'light':'dark';themeButton.setAttribute('aria-label',`Switch to ${next} theme`);$('#theme-label').textContent=next==='light'?'Light':'Dark';$('#theme-icon').textContent=next==='light'?'☀':'☾'}
 themeButton.onclick=()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;try{localStorage.setItem('rfq-desk-theme',next)}catch{}paintThemeButton()};
 paintThemeButton();
-/* ---------- wallet: connect an injected Solana wallet, sign only the checked quote ---------- */
-let WALLET = null, TRADE = null, tradeTimer;
-const providers = () => [
-  ['Phantom', window.phantom?.solana?.isPhantom ? window.phantom.solana : null],
-  ['Solflare', window.solflare?.isSolflare ? window.solflare : null],
-  ['Backpack', window.backpack?.isBackpack ? window.backpack : null],
-].filter(([, p]) => p);
+/* ---------- wallet: Privy (email, social or wallet login, including its embedded wallet) or any Solana wallet in this browser ----------
+   Browser wallets are found through the Wallet Standard (MetaMask with Solana, Phantom, Solflare, Backpack, ...), with the older injected API as a fallback.
+   Every wallet ends up as { name, address, sign(bytes) -> signed bytes }: the desk only ever asks it to sign the exact transaction the server checked. */
+let WALLET = null, TRADE = null, tradeTimer, CHOOSING = false;
+const STD = new Map();   // Wallet Standard wallets that can sign Solana transactions, by name
+const solAcct = a => (a?.chains ?? []).some(c => String(c).startsWith('solana:'));
+function registerStd(...ws) {
+  for (const w of ws) if (w?.features?.['standard:connect'] && w.features['solana:signTransaction'] && (w.chains ?? []).some(c => String(c).startsWith('solana:'))) STD.set(w.name, w);
+  if (CHOOSING) chooser(); return () => {};
+}
+window.addEventListener('wallet-standard:register-wallet', e => { try { e.detail?.({ register: registerStd }); } catch {} });
+try { window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', { detail: { register: registerStd } })); } catch {}
+const legacy = () => [['Phantom', window.phantom?.solana?.isPhantom ? window.phantom.solana : null], ['Solflare', window.solflare?.isSolflare ? window.solflare : null], ['Backpack', window.backpack?.isBackpack ? window.backpack : null]]
+  .filter(([n, p]) => p && !STD.has(n));
+const b64 = u => btoa(String.fromCharCode(...u)), unb64 = t => Uint8Array.from(atob(t), c => c.charCodeAt(0));
 const tb = () => $('#trade-body'), tbadge = (cls, txt) => { $('#trade-badge').className = 'badge ' + cls; $('#trade-badge').textContent = txt; };
-async function connectWith(name, p) {
-  try { await p.connect(); const address = p.publicKey?.toString(); if (!address) throw new Error('the wallet gave no address');
-    WALLET = { name, p, address }; $('#connect').textContent = `${name} ${short(address)}`; $('#mode-badge').className = 'badge rfq'; $('#mode-badge').textContent = 'Wallet connected';
-    $('#taker').value = address; $('#taker').disabled = true; tbadge('', 'Connected');
-    tb().innerHTML = `<p class="muted" style="margin:0">Request quotes. They are built for <span class="mono">${esc(short(address))}</span>, and you can sign the firm quote here if it passes every check.</p>`;
-    p.on?.('disconnect', disconnect);
-  } catch (e) { tb().innerHTML = `<p class="err" style="margin:0">${esc(name)} did not connect: ${esc(e.message ?? e)}</p>`; }
+
+function useWallet(name, address, sign, off) {
+  WALLET = { name, address, sign, off }; CHOOSING = false;
+  $('#connect').textContent = `${name} ${short(address)}`; $('#mode-badge').className = 'badge rfq'; $('#mode-badge').textContent = 'Wallet connected';
+  $('#taker').value = address; $('#taker').disabled = true; tbadge('', 'Connected');
+  tb().innerHTML = `<p class="muted" style="margin:0">Request quotes. They are built for <span class="mono">${esc(short(address))}</span>, and you can sign the firm quote here if it passes every check.</p>`;
+}
+async function connectStd(w, label = w.name) {
+  const r = await w.features['standard:connect'].connect(), accts = (r?.accounts?.length ? r.accounts : w.accounts) ?? [];
+  const acct = accts.find(solAcct) ?? accts[0]; if (!acct) throw new Error('the wallet shared no Solana account');
+  useWallet(label, acct.address, async bytes => {
+    const [o] = await w.features['solana:signTransaction'].signTransaction({ account: acct, transaction: bytes, chain: 'solana:mainnet' });
+    let t = o?.signedTransaction; if (t && t.length === 64) { const full = new Uint8Array(bytes); full.set(t, 1 + 64); t = full; }   // a bare signature: our slot is 1
+    return t;
+  }, () => w.features['standard:disconnect']?.disconnect?.());
+}
+async function connectLegacy(name, p) {
+  await p.connect(); const address = p.publicKey?.toString(); if (!address) throw new Error('the wallet gave no address');
+  useWallet(name, address, async bytes => {
+    if (!window.solanaWeb3) throw new Error('the signing library did not load; reload the page');
+    return (await p.signTransaction(solanaWeb3.VersionedTransaction.deserialize(bytes))).serialize();
+  }, () => p.disconnect?.());
+  p.on?.('disconnect', disconnect);
+}
+/* Privy: the bundle built for the Solana test UI (npm run build:privy). It renders its own login, and hands the page the user's Privy Solana wallets as Wallet Standard wallets. */
+let privyLoading;
+function connectPrivy() {
+  const box = $('#privy-box');
+  if (!CFG.privyAppId) { box.innerHTML = '<p class="err" style="margin:0">Privy is not set up on this desk: set PRIVY_APP_ID in .env and restart.</p>'; return; }
+  if (!CFG.privyBundle) { box.innerHTML = '<p class="err" style="margin:0">The Privy bundle is not built: run npm run build:privy, then restart.</p>'; return; }
+  box.hidden = false;
+  const mount = () => window.MintPrivy.mount(box, { appId: CFG.privyAppId, onWallets: ws => {
+    if (!ws.length) { if (WALLET?.name === 'Privy') disconnect(); return; }
+    if (!WALLET) connectStd(ws[0], 'Privy').catch(e => { tb().innerHTML = `<p class="err" style="margin:0">Privy did not connect: ${esc(e.message ?? e)}</p>`; });
+  } });
+  if (window.MintPrivy) return mount();
+  privyLoading ??= new Promise((ok, bad) => { const sc = document.createElement('script'); sc.src = '/privy.bundle.js'; sc.onload = ok; sc.onerror = () => bad(new Error('could not load /privy.bundle.js')); document.head.appendChild(sc); });
+  box.innerHTML = '<span class="muted">Loading Privy…</span>';
+  privyLoading.then(() => { box.innerHTML = ''; mount(); }, e => { box.innerHTML = `<p class="err" style="margin:0">${esc(e.message)}</p>`; });
+}
+function chooser() {
+  CHOOSING = true; tbadge('', 'Choose');
+  const std = [...STD.values()], old = legacy();
+  tb().innerHTML = `<span class="lbl">Connect with</span><div class="wallets">
+      <button type="button" class="btn ghost" data-k="privy" style="justify-content:flex-start">Privy: email, social or a wallet</button>
+      ${std.map((w, i) => `<button type="button" class="btn ghost" data-k="std" data-i="${i}" style="display:flex;align-items:center;gap:8px;justify-content:center">${w.icon ? `<img src="${esc(w.icon)}" alt="" width="18" height="18">` : ''}${esc(w.name)}</button>`).join('')}
+      ${old.map(([n], i) => `<button type="button" class="btn ghost" data-k="old" data-i="${i}">${esc(n)}</button>`).join('')}
+    </div>
+    ${std.length || old.length ? '' : '<p class="note">No Solana wallet found in this browser. MetaMask (with Solana turned on), Phantom, Solflare or Backpack appear here once installed.</p>'}
+    <p class="note">Privy needs this desk's address (${esc(location.origin)}) in your Privy app's allowed origins.</p>`;
+  tb().querySelectorAll('[data-k]').forEach(b => b.onclick = async () => {
+    const k = b.dataset.k, i = Number(b.dataset.i);
+    try { if (k === 'privy') return connectPrivy(); if (k === 'std') await connectStd(std[i]); else await connectLegacy(old[i][0], old[i][1]); }
+    catch (e) { tb().insertAdjacentHTML('beforeend', `<p class="err" style="margin:var(--s2) 0 0">${esc(b.textContent.trim())} did not connect: ${esc(e.message ?? e)}</p>`); }
+  });
 }
 function disconnect() {
-  try { WALLET?.p.disconnect?.(); } catch {}
-  WALLET = null; TRADE = null; clearInterval(tradeTimer); $('#connect').textContent = 'Connect wallet'; $('#mode-badge').className = 'badge'; $('#mode-badge').textContent = 'Read-only';
-  $('#taker').disabled = false; $('#taker').value = ''; tbadge('', 'No wallet'); tb().innerHTML = '<p class="muted" style="margin:0">Wallet disconnected.</p>';
+  try { WALLET?.off?.(); } catch {}
+  WALLET = null; TRADE = null; CHOOSING = false; clearInterval(tradeTimer); $('#connect').textContent = 'Connect wallet'; $('#mode-badge').className = 'badge'; $('#mode-badge').textContent = 'Read-only';
+  $('#taker').disabled = false; $('#taker').value = ''; tbadge('', 'No wallet'); tb().innerHTML = '<p class="muted" style="margin:0">Wallet disconnected. A Privy session stays signed in until you log out in the Privy box.</p>';
 }
-$('#connect').onclick = () => {
-  if (WALLET) return disconnect();
-  const ps = providers();
-  if (!ps.length) { tb().innerHTML = '<p style="margin:0">No Solana wallet extension found in this browser. Install Phantom, Solflare or Backpack, then reload.</p>'; tbadge('', 'No wallet'); return; }
-  if (ps.length === 1) return connectWith(ps[0][0], ps[0][1]);
-  tb().innerHTML = '<span class="lbl">Choose a wallet</span><div class="wallets">' + ps.map(([n], i) => `<button type="button" class="btn ghost" data-w="${i}">${esc(n)}</button>`).join('') + '</div>';
-  tb().querySelectorAll('[data-w]').forEach(b => b.onclick = () => { const [n, p] = ps[Number(b.dataset.w)]; connectWith(n, p); });
-};
+$('#connect').onclick = () => (WALLET ? disconnect() : chooser());
 function tradePanel(m) {
   TRADE = m; clearInterval(tradeTimer);
   if (!m.tradable) { tbadge('neg', 'Not tradable'); tb().innerHTML = `<p class="trade-sum">${esc(m.summary)}</p><p class="err" style="margin:0">${esc(m.why)}</p>`; return; }
@@ -591,12 +640,10 @@ function tradePanel(m) {
 }
 async function signAndExecute() {
   const b = $('#sign'), out = $('#trade-result'), m = TRADE; if (!m || !WALLET) return;
-  if (!window.solanaWeb3) { out.innerHTML = '<span class="err">The signing library did not load. Reload the page.</span>'; return; }
   b.disabled = true; b.textContent = `Waiting for ${WALLET.name}…`;
   let signed;
   try {
-    const vtx = solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(m.transaction), c => c.charCodeAt(0)));
-    const r = await WALLET.p.signTransaction(vtx); signed = btoa(String.fromCharCode(...r.serialize()));
+    const t = await WALLET.sign(unb64(m.transaction)); if (!t?.length) throw new Error('the wallet returned nothing'); signed = b64(t);
   } catch (e) { b.disabled = false; b.textContent = `Sign in ${WALLET.name} and execute`; out.innerHTML = `<span class="err">Not signed: ${esc(e.message ?? e)}. Nothing was sent.</span>`; return; }
   b.dataset.sent = '1'; b.textContent = 'Executing through Jupiter…';
   let r; try { r = await (await fetch('/api/execute', { method: 'POST', body: JSON.stringify({ requestId: m.requestId, signedTransaction: signed }) })).json(); }

@@ -10,6 +10,8 @@
  *    PG_URL              optional: postgres://user:pass@host:5432/db?sslmode=require   stored trade history and audit log (/v1/records/*, the status page)
  *    MAX_USERS_PER_APP=10000   end users one app key may create;  WEBHOOKS_ALLOW_HTTP=true only for local testing (http and private hosts as webhook targets)
  *    JUPITER_API_KEY     optional: Jupiter's API key (x-api-key) for route building, quotes and prices in MODE=solana-mainnet; keyless (about 1 request / 2 s) without it
+ *    SOLANA_MAX_TRADE_SOL=0.05  SOLANA_DAILY_CAP_SOL=0.25   the engine's SOL caps on buys per user (MODE=solana-mainnet); the Privy policy's sol-cap applies separately
+ *    JUPITERZ=off|on  JUPITERZ_MIN_SOL=100  JUPITERZ_MARGIN_BPS=20   JupiterZ market-maker (RFQ) fills for large Solana trades without a platform fee (docs/JUPITERZ.md)
  *    PLATFORM_FEE_WALLET + PLATFORM_FEE_BPS=0..100   the operator's fee on every real trade (paid in SOL);  APP_FEE_MAX_BPS=100   the most an app may set with PUT /v1/app/fees
  *  MODE: `practice` (simulated chain, fake funds), `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY)
  *        or `base-mainnet` (REAL funds on Base, Uniswap V2, plus Relay for tokens with no V2 pool (BASE_RELAY=off turns it off, RELAY_API_KEY): each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
@@ -43,6 +45,30 @@ export function parseKeyFile(text: string): ApiKey[] {
   return out;
 }
 
+/** JupiterZ RFQ fills (docs/JUPITERZ.md), off unless JUPITERZ=on. JUPITERZ_MIN_SOL (default 100): the smallest SOL side that asks market makers; JUPITERZ_MARGIN_BPS
+ *  (default 20): how much better than the normal route the firm quote must be. Trades that carry a platform fee never use RFQ (the fee is paid in SOL inside the
+ *  transaction, which an RFQ transaction cannot carry). The users' Privy policy must allow the Order Engine program (README → Solana policy rules). */
+export function jupiterzConfig(e: NodeJS.ProcessEnv): { minLamports: bigint; marginBps: number } | undefined {
+  const on = (e.JUPITERZ ?? 'off').trim().toLowerCase();
+  if (on !== 'on' && on !== 'off') throw new Error('JUPITERZ must be on or off');
+  if (on === 'off') return undefined;
+  let minLamports: bigint; try { minLamports = toUnits(e.JUPITERZ_MIN_SOL ?? '100', 9, 'JUPITERZ_MIN_SOL'); } catch (x) { throw new Error(`JUPITERZ_MIN_SOL: ${(x as Error).message}`); }
+  const marginBps = Number(e.JUPITERZ_MARGIN_BPS ?? 20);
+  if (!Number.isInteger(marginBps) || marginBps < 0 || marginBps > 1000) throw new Error('JUPITERZ_MARGIN_BPS must be a whole number from 0 to 1000');
+  return { minLamports, marginBps };
+}
+
+/** The engine's SOL caps on buys in MODE=solana-mainnet: SOLANA_MAX_TRADE_SOL per buy (default 0.05) and SOLANA_DAILY_CAP_SOL per user per day (default 0.25).
+ *  They limit what the server's signer is asked to sign; the users' Privy policy has its own `sol-cap` rule on plain SOL transfers (README → Solana policy rules), and a
+ *  normal Jupiter buy above that rule is refused by Privy whatever these caps say. With JUPITERZ=on, JUPITERZ_MIN_SOL above the per-buy cap would never be reached: refused. */
+export function solanaCaps(e: NodeJS.ProcessEnv, jupiterz?: { minLamports: bigint }): { maxTradeLamports: bigint; dailyCapLamports: bigint } {
+  const sol = (k: string, d: string) => { try { return toUnits(e[k]?.trim() || d, 9, k); } catch (x) { throw new Error(`${k}: ${(x as Error).message}`); } };
+  const caps = { maxTradeLamports: sol('SOLANA_MAX_TRADE_SOL', '0.05'), dailyCapLamports: sol('SOLANA_DAILY_CAP_SOL', '0.25') };
+  if (caps.dailyCapLamports < caps.maxTradeLamports) throw new Error('SOLANA_DAILY_CAP_SOL must be at least SOLANA_MAX_TRADE_SOL');
+  if (jupiterz && jupiterz.minLamports > caps.maxTradeLamports) throw new Error('JUPITERZ_MIN_SOL is above SOLANA_MAX_TRADE_SOL, so no trade could ever use JupiterZ: raise SOLANA_MAX_TRADE_SOL or lower JUPITERZ_MIN_SOL');
+  return caps;
+}
+
 /** MODE=solana-mainnet: real accounts signed through each user's Privy wallet (solaccount.ts). Needs the Privy settings and a Solana RPC. */
 export function solanaMode(e: NodeJS.ProcessEnv) {
   const rpcUrl = e.SOLANA_RPC_URL || (e.ALCHEMY_API_KEY ? `https://solana-mainnet.g.alchemy.com/v2/${e.ALCHEMY_API_KEY}` : '');
@@ -56,7 +82,8 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
   const appFee = (app: string) => { const h = cache.get(app); if (h && Date.now() - h.at < 30_000) return h.v; const v = readAppFee(fr, ns, app); cache.set(app, { at: Date.now(), v }); return v; };
   const fees = (userId: string): FeeRecipient[] => { const out: FeeRecipient[] = []; if (pbps > 0) out.push({ address: pw!, bps: pbps });
     const i = userId.indexOf(':'); if (i > 0) { const f = appFee(userId.slice(0, i)); if (f && f.bps > 0) out.push({ address: f.wallet, bps: f.bps }); } return out; };
-  const acc = solanaAccounts({ rpcUrl, privy: privy!, fees, jupiterApiKey: e.JUPITER_API_KEY?.trim() || undefined });
+  const jupiterz = jupiterzConfig(e), caps = solanaCaps(e, jupiterz);
+  const acc = solanaAccounts({ rpcUrl, privy: privy!, fees, caps, jupiterApiKey: e.JUPITER_API_KEY?.trim() || undefined, jupiterz });
   // status page checks: reachability of what real trading depends on (no secrets in what is shown)
   const statusChecks = [
     { name: 'Solana RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },

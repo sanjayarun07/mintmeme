@@ -46,6 +46,10 @@ export interface SolanaTraderOptions {
   /** Jupiter API key (optional; your key from Jupiter's portal). Sent as x-api-key on route building, quotes and SOL/USD, so trades are not held to the keyless
    *  rate limit (about one request every 2 seconds). Without it everything still works, keyless. */
   jupiterApiKey?: string;
+  /** JupiterZ RFQ fills for large orders (off when absent; docs/JUPITERZ.md). A trade whose SOL side is at least `minLamports` and carries no platform fee asks Jupiter's
+   *  market makers for a firm quote; it is used only when it beats the normal /build route by `marginBps`, passes the RFQ gate and the simulation, and `checkFill`
+   *  (the stock share-price check) does not refuse it. Otherwise the normal route runs. Signing still goes through Privy, whose policy must allow the Order Engine program. */
+  jupiterz?: { minLamports: bigint; marginBps: number; maxExpirySec?: number; checkFill?: (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }, outAmount: bigint) => Promise<string | undefined> };
   log?: (m: string) => void;
 }
 export interface SolanaTrader { trader: Trader; chain: SolanaChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
@@ -113,7 +117,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   if (!o.address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(o.address);   // throws when Privy is unreachable: nothing can be signed, so the caller should retry rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[o.address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
-  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.jupiterz ? { jupiterz: { ...o.jupiterz, ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}), log: (m: string) => { if (m) log(m); } } } : {}), ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (o.address) { owners.set(o.address, 'x'); policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });

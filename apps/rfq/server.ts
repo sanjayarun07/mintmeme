@@ -6,7 +6,7 @@
  *  live, and the trade is under RFQ_DESK_MAX_USD (default $1,500). Each gated order is executed at most once.
  *  Run: npm run rfq  (PORT, default 3700; SOL_RPC_URL or HELIUS_API_KEY for the node, else the public mainnet RPC; JUPITER_API_KEY optional, keyless is rate limited). */
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { SolJsonRpc, STOCKS_SOLANA, stockByMint, readStockStates, checkFillPrice, JupiterStockPrices, ataAddress, PROGRAMS, findProgramAddress, pubkeyBytes } from '../../packages/sol/src/index.ts';
 import { fetchBuild, parseMessage, resolveMessage, JupiterRefused } from '../../packages/sol/src/jupiterswap.ts';
 import { fetchRfqOrder, gateRfq, decodeFill, splitWire, executeRfq, JUPITERZ } from '../../packages/sol/src/jupiterz.ts';
@@ -50,6 +50,11 @@ for (const [kind, url] of NODES) { if (!url) continue; try { await new SolJsonRp
 const rpc: SolJsonRpc = new SolJsonRpc(rpcUrl), prices = new JupiterStockPrices();
 const FIXTURE = JSON.parse(readFileSync(new URL('../../packages/sol/test/jupiterzfixture.json', import.meta.url), 'utf8'));
 const html = () => readFileSync(new URL('./index.html', import.meta.url), 'utf8');
+/** Privy sign-in (embedded and external wallets): the bundle built for the Solana test UI (npm run build:privy writes apps/web/privy.bundle.js). Only the PUBLIC app id is sent to the page. */
+const PRIVY_BUNDLE = new URL('../web/privy.bundle.js', import.meta.url), PRIVY_APP_ID = process.env.PRIVY_APP_ID || null;
+/** Read-only methods Privy's approval screen may ask the node for (the same list as apps/web/server.ts). Nothing that sends. */
+const RPC_OK = new Set(['getLatestBlockhash', 'getBalance', 'getFeeForMessage', 'simulateTransaction', 'getAccountInfo', 'getMultipleAccounts', 'getTokenAccountsByOwner', 'getTokenAccountBalance', 'getSlot',
+  'getBlockHeight', 'isBlockhashValid', 'getMinimumBalanceForRentExemption', 'getRecentPrioritizationFees', 'getVersion', 'getEpochInfo']);
 
 /* Jupiter keyless access is rate limited: every Jupiter call goes through this queue. */
 let nextAt = 0; const GAP = API_KEY ? 150 : 2100;
@@ -269,8 +274,17 @@ const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, bad) => { 
 http.createServer(async (req, res) => {
   try {
     const u = new URL(req.url ?? '/', 'http://x');
-    if (req.method === 'GET' && u.pathname === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' }); res.end(html()); return; }
-    if (req.method === 'GET' && u.pathname === '/api/config') return json(res, 200, { maxUsd: MAX_USD, solUsd: await solPrice().catch(() => null), rpc: rpcKind, keyed: !!API_KEY, defaultTaker: DEFAULT_TAKER, orderEngine: JUPITERZ.orderEngine, stocks: STOCKS, tamper: Object.entries(TAMPER).map(([id, t]) => ({ id, label: t.label })) });
+    // Privy reads the page's opener policy with a HEAD request; same-origin-allow-popups lets wallet and social-login pop-ups talk back to the page
+    if ((req.method === 'GET' || req.method === 'HEAD') && u.pathname === '/') { res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'cross-origin-opener-policy': 'same-origin-allow-popups' }); res.end(req.method === 'HEAD' ? undefined : html()); return; }
+    if (req.method === 'GET' && u.pathname === '/privy.bundle.js') { if (!existsSync(PRIVY_BUNDLE)) return json(res, 404, { error: 'Privy bundle not built: npm run build:privy' }); res.writeHead(200, { 'content-type': 'text/javascript' }); res.end(readFileSync(PRIVY_BUNDLE)); return; }
+    if (req.method === 'POST' && u.pathname === '/api/sol/rpc') {
+      const body = await readBody(req), one = (b: any) => b && typeof b.method === 'string' && RPC_OK.has(b.method);
+      if (Array.isArray(body) ? !body.every(one) : !one(body)) return json(res, 403, { jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32601, message: 'method not allowed by this relay' } });
+      try { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }); res.writeHead(r.status, { 'content-type': 'application/json' }); res.end(await r.text()); }
+      catch { json(res, 502, { jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } }); }
+      return;
+    }
+    if (req.method === 'GET' && u.pathname === '/api/config') return json(res, 200, { privyAppId: PRIVY_APP_ID, privyBundle: existsSync(PRIVY_BUNDLE), maxUsd: MAX_USD, solUsd: await solPrice().catch(() => null), rpc: rpcKind, keyed: !!API_KEY, defaultTaker: DEFAULT_TAKER, orderEngine: JUPITERZ.orderEngine, stocks: STOCKS, tamper: Object.entries(TAMPER).map(([id, t]) => ({ id, label: t.label })) });
     if (req.method === 'POST' && u.pathname === '/api/quote') {
       const body = await readBody(req); res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
       const emit = (o: unknown) => res.write(JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? String(v) : v)) + '\n');

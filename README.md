@@ -140,13 +140,15 @@ Advanced → Smart wallets), which may cover option C without a separate provide
 
 | Rule name | Field source → field | Operator | Value | Action |
 |---|---|---|---|---|
-| `allowed-programs` | Solana program instruction → `programId` | in | `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`, `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`, `pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ`, `11111111111111111111111111111111`, `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`, `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`, `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`, `ComputeBudget111111111111111111111111111111` | ALLOW |
+| `allowed-programs` | Solana program instruction → `programId` | in | `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`, `6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P`, `pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ`, `11111111111111111111111111111111`, `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`, `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`, `ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL`, `ComputeBudget111111111111111111111111111111`, `61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH` | ALLOW |
 | `sol-cap` | Solana system program instruction → `Transfer.lamports` | gt | `50000000` (0.05 SOL) | DENY |
 | `no-token-transfers` | Solana token program instruction → `instructionName` | in | `Transfer`, `TransferChecked` | DENY |
 
-The programs in the first rule are Jupiter v6, pump.fun, the pump.fun fee program, System, Token, Token-2022, Associated Token and Compute Budget. The second rule blocks
+The programs in the first rule are Jupiter v6, pump.fun, the pump.fun fee program, System, Token, Token-2022, Associated Token, Compute Budget and the JupiterZ Order Engine. The second rule blocks
 a plain SOL transfer above the per-trade cap. The third blocks moving tokens out directly; swaps move tokens inside the Jupiter and pump.fun programs, which are not checked
 instruction by instruction. The policy is attached to the server's signer only, not to the wallet itself, so the user's own transfers from the app are not limited by it.
+
+**JupiterZ (used only with `JUPITERZ=on` on the server).** The JupiterZ Order Engine program `61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH` is in the `allowed-programs` rule; it was added on 2026-11-18 with `scripts/privy-policy.ts --add-program`, which changes only that list and reads the policy back. Its fill is the only new top-level instruction in an RFQ transaction; the others are Compute Budget and Associated Token, which are already allowed. It moves the user's input and the maker's output inside the program, so `sol-cap` and `no-token-transfers` stay as they are. In an RFQ transaction the market maker pays the fee and signs first, and the user's wallet signs second. Until the program is added, Privy refuses those signatures and the trade takes the normal route. Research and the gate: docs/JUPITERZ.md.
 
 **Automatic trading on `/solana` (built).** With steps 1 to 5 in `.env`:
 1. Sign in with your Privy wallet.
@@ -161,7 +163,7 @@ Tests:
 - `apps/web/test/privyresume.test.ts` covers a restart: it resumes only while Privy still allows it, retries while Privy is unreachable, and never resumes after Stop.
 - Mainnet, 2026-11-17: a 0.005 SOL Bonk buy through Jupiter, signed by real Privy under this policy with no wallet prompt, finalized as tx `5HyLiXhuMp6fa7ocCa1s85xfc1CyFsNycbCQaq9nnGZC1FDDd3yKJ8Sn5HK4GEk9AXYTNW8nj3tk1seoTW88rxej`. The first try, with the rules on `signAndSendTransaction`, was refused by Privy and nothing was sent. A standing order (limit buy of 0.005 SOL with a USD trigger) then fired by itself, was signed by Privy and landed as tx `2TiNZtupHL8Cen3JLQCuwpGdV9fD64owbTkqZhDP7MVm9NpjnnMaHpGAuypwbnZaFXB2VHNb3sp1C8Hr5nmHJgcp`.
 
-Current state of this app (checked 2026-11-17): TEE enabled; one authorization key; policy `memedesk-solana-trading` with its three rules on `signTransaction`; smart wallets off; development mode.
+Current state of this app (checked 2026-11-17; policy read again 2026-11-18): TEE enabled; one authorization key; policy `memedesk-solana-trading` (no owner) with its three rules on `signTransaction`, `allowed-programs` now 9 programs including the JupiterZ Order Engine; smart wallets off; development mode. `scripts/privy-policy.ts` prints the live policy.
 
 **Base policy rules (step 6).** Method on every rule: **`eth_signTransaction`**. As on Solana, the server has Privy sign and sends the transaction itself, so a rule for `eth_sendTransaction` never applies. Linking checks this and says so.
 

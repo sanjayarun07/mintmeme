@@ -49,7 +49,8 @@ No. The maker's signature is added only during `/execute`, after the maker's las
 The server signs with `signTransaction`. Privy checks each top-level instruction against the `allowed-programs` rule.
 - The RFQ transaction's top-level programs are ComputeBudget, Associated Token (both allowed today) and the **Order Engine `61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH`, which is not allowed today**.
 - `sol-cap` (top-level System `Transfer` above 0.05 SOL) and `no-token-transfers` (top-level Token `Transfer`/`TransferChecked`) never fire. The SOL and tokens move inside the Order Engine's CPI, as they do inside Jupiter v6 today. So the per-trade cap on RFQ trades is the engine's own `caps`, not Privy's rule. That is the same as for Jupiter swaps today.
-- **Proposed change (for you to make; not made):** add `61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH` to `allowed-programs` in the `memedesk-solana-trading` policy. Until then Privy refuses every RFQ signature. Nothing reaches `/execute`, and the engine falls back to the normal `/build` route for that trade. `SolanaChain.rfqNote` records why.
+- **Made on 2026-11-18, at the user's request:** `61DFfeTKM7trxYcPQCM78bJ794ddZprZpAwAnLiwTpYH` is now in `allowed-programs` in the `memedesk-solana-trading` policy (`scripts/privy-policy.ts --add-program`: PATCH of that one rule, read back with 9 programs; the other two rules unchanged). A policy without it makes Privy refuse every RFQ signature: nothing reaches `/execute`, and the engine falls back to the normal `/build` route for that trade, with `SolanaChain.rfqNote` saying why.
+- **What this allows.** The server's signer may now sign Order Engine fills for wallets that carry this policy. The engine gates each one (exact input, output at least the minimum, to the user's own account, two signers) before asking Privy. Privy's `sol-cap` does not limit SOL moved inside the program, the same as inside Jupiter v6, so the per-trade SOL cap stays the engine's own `caps`.
 - **Not verified:** that Privy's `signTransaction` signs a transaction whose fee payer is another key. `PrivySolSigner` now takes the wallet's own slot from Privy's answer and checks it against the wallet key, so a wrong slot is refused rather than sent.
 
 ## Price comparison: `/build` vs RFQ, $100k buys (read-only)
@@ -135,7 +136,13 @@ A standalone, read-only app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http:/
 
 The node is the first of `SOL_RPC_URL`, Helius, Alchemy and the public RPC that answers. On 2026-11-18 the Helius key in `.env` answered HTTP 401, so the desk used Alchemy. `JUPITER_API_KEY` is optional; without it, calls are paced to Jupiter's keyless limit.
 
-**Trading from a connected wallet (desk).** "Connect wallet" works with Phantom, Solflare or Backpack, injected by their browser extension. The quote is then built for that wallet, so the gate and simulation run on its real balances.
+**Trading from a connected wallet (desk).** "Connect wallet" offers two kinds of wallet:
+- **Privy.** Email, social or wallet login, including the user's Privy embedded wallet. The desk uses the bundle built for the Solana test UI (`npm run build:privy`, then `apps/web/privy.bundle.js`) and the public `PRIVY_APP_ID`.
+- **Any Solana wallet in the browser.** These are found through the Wallet Standard (MetaMask with Solana turned on, Phantom, Solflare, Backpack), with the older injected API as a fallback.
+
+All of them sign through one function. Privy's approval screen reads balances through a read-only relay at `/api/sol/rpc`, using the same method allowlist as `apps/web`.
+
+Privy only renders its login on origins listed in the Privy app. On 2026-11-18 its frame policy allowed `localhost:3000` and `127.0.0.1:3500`, so the desk on port 3700 needs `http://localhost:3700` and `http://127.0.0.1:3700` added under Domains and clients. The other option is running the desk with `PORT=3000`. The quote is then built for that wallet, so the gate and simulation run on its real balances.
 - **Trade panel.** It shows the exact deal and the quote's countdown. If the engine would pass on the quote, it says why. "Sign in <wallet> and execute" hands Jupiter's transaction to the wallet, which signs slot 1.
 - **Server checks.** `POST /api/execute` forwards to Jupiter's `/execute` only if all of these hold:
   - the signed message is byte-for-byte the one the server gated and simulated for that wallet;
