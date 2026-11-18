@@ -35,12 +35,17 @@ The SDK adds **no trading logic**. Every order, bulk leg, TWAP slice, snipe and 
 | Bulk buy / bulk sell (up to 10 wallets) | `bulkBuy`, `bulkSell` | `POST /v1/bulk/buy`, `/sell` | Equal split, exact legs, or % of balance. |
 | TWAP (2 to 100 slices) | `twap`, `twapStatus`, `cancelTwap` | `POST/GET/DELETE /v1/twap` | |
 | Launch sniping | `addSnipe` | `GET/POST /v1/snipes` | Needs a launch source you supply (see 7.4). |
-| Copy trading | `addCopy` | `GET/POST /v1/copies` | Needs a leader source you supply (see 7.4). |
+| Copy trading | `addCopy`, `removeCopy` | `GET/POST /v1/copies`, `DELETE /v1/copies/:id` | The execution server in `MODE=solana-mainnet` supplies the leader source (section 4.10); elsewhere you supply one (see 7.4). |
 | Price alerts | `addPriceAlert` | `POST/DELETE /v1/alerts` | Delivered as events. |
 | Positions, P&L, history | `positions`, `history` | `GET /v1/positions`, `/history` | Unknown cost basis stays unknown. |
 | Pause new buys | `pauseEntries`, `resumeEntries` | `POST /v1/entries/pause`, `/resume` | Sells are never blocked. |
 | Unstick a wallet | `cancelStuck` | `POST /v1/wallets/:id/cancel-stuck` | No-op nonce replacement. |
 | Live events | `on` | `GET /v1/events` (SSE) | trade, order, bulk, twap, snipe, alert, error. |
+| Plain-unit trades and orders (real accounts) | client `swap`, `placeOrder`; `simpleBody` | same routes, with `mint`/`token`, `sol` or `eth`, `tokens`, `pct`, `priceUsd` | Execution server in `MODE=solana-mainnet` or `MODE=base-mainnet` (4.5, 4.5b). |
+| Link a Privy wallet | `wallet`, `linkStart`, `linkFinish`, `unlink`; `createSolanaTrader`, `createBaseTrader` | `GET/DELETE /v1/wallet`, `POST /v1/wallet/link/*` | Solana and Base. |
+| MEV protection, token safety settings | `settings`, `updateSettings`, `tokenSafety` | `GET/PATCH /v1/settings`, `GET /v1/tokens/:mint/safety` | Solana (4.7, 4.5). |
+| Tokenized stocks | `stocks`, `stock`; `stock`/`perShare` on trades | `GET /v1/stocks`, `/v1/stocks/:symbol` | Solana; buying off unless `STOCKS_ENABLED=1` (4.9). |
+| Apps, webhooks, fees, records | `forUser`, `setAppWebhook`, `setAppFees`, `recordTrades`, `auditLog` | `/v1/app/*`, `/v1/records/*` | 4.6, 4.8; records need `PG_URL`. |
 
 **Not in the SDK or API:** creating or importing wallets, withdrawals, bridging, subscriptions and billing. Some exist in `packages/core` but are only tested on the simulator and are not exposed here on purpose. Key custody is the host's job (section 9).
 
@@ -54,15 +59,15 @@ Support means a **chain port** (`ChainPort`) implementation plus a **venue** (a 
 |---|---|---|---|---|
 | **Practice chain** (`sim-evm`) | Constant-product pool (Uniswap-V2 style) and a bonding-curve model | `SimChain` | Locally tested, all features | No (fake funds). This is what the API serves out of the box. |
 | **Ethereum** | Uniswap V2 (WETH/USDC verified) | `EvmRpcChain` | Mainnet **read-only** verified (quotes, simulated buy leg). **Fork tested, including the SDK and HTTP API** (quote equals the router's `getAmountsOut`; market buy and sell over HTTP, idempotent retry, per-tx policy refusal, limit buy and sell, stop loss, bracket, trailing stop, bulk buy, TWAP, pause, restart):  buy, sell with automatic exact-amount approval, limit/TP/SL/bracket/trailing orders, bulk, TWAP, copy, sniping, restart and crash recovery, lost acknowledgements. | **Not done.** No funded mainnet wallet was ever used. |
-| **Solana** | Raydium AMM v4 (SOL/USDC); Jupiter Swap API routes | `SolanaChain` | Mainnet **read-only** verified (pool decode, quote, simulated swap). **Local validator tested** (pool cloned from mainnet): swap, orders, copy, sniping, bulk, and the **SDK and HTTP API** (quote equals the venue's quote; market buy and sell, idempotent retry, per-tx policy refusal, limit buy and sell, stop loss, bracket, trailing stop, bulk buy, TWAP, pause, restart). Jupiter execution: run on a local validator with cloned Raydium routes only; no devnet or mainnet execution. | **Not done.** |
+| **Solana** | Jupiter Swap API routes (every DEX Jupiter routes through, including CLMM and DLMM pools); pump.fun bonding curves; Raydium AMM v4 | `SolanaChain` | **Mainnet, small amounts, user-approved:** Jupiter buys signed by the user's Privy wallet, from `/solana` and through the execution server (`MODE=solana-mainnet`), a standing order that fired by itself, and a buy with priority fee and Jito MEV protection. Local validator: the SDK, HTTP API, two-node server, orders, copy, sniping, bulk, TWAP, restart. | **Yes, small amounts** (README → Custody plan) |
+| **Base** | Uniswap V2 (WETH pools); Relay for tokens with no or a thin V2 pool (Aerodrome, Uniswap V3/V4 underneath; e.g. Coinbase stock tokens) | `EvmRpcChain` + `PrivyEvmSigner` | **Mainnet, user-approved:** a 0.0002 ETH KEYCAT buy through the execution server (`MODE=base-mainnet`), signed by the user's Privy Ethereum wallet. Local Base fork: linking, buy, sell with approval, caps, a tampered or wrong-key signature refused, revocation (13 checks). Relay route: buy and sell on the fork (15 checks with those), every Relay transaction gated and simulated; not yet run on mainnet. | **Yes, small amounts.** Buys only so far (no mainnet sell or standing order yet). |
 | Ethereum | Uniswap V3 | none | Not implemented | No |
-| BNB Chain, Arbitrum, Avalanche, Sonic, Monad | PancakeSwap, Camelot, Trader Joe, others | none | Not implemented. A Uniswap-V2-style pool on another EVM chain would work with `EvmRpcChain` in principle, but no such chain has been run, and chain ids, routers and tokens are not recorded in this repo. | No |
-| Base, Robinhood Chain | | none | Deferred: addresses and ids not supplied yet. | No |
+| BNB Chain, Robinhood Chain, Arbitrum, Avalanche, Sonic, Monad | PancakeSwap V3, Uniswap V3/V4, others | none | Not implemented. Research for tokenized stocks on BNB and Robinhood Chain: [XSTOCKS.md](XSTOCKS.md). | No |
 | TON, Tron | | none | Only standalone family simulators exist; not wired to the engine. | No |
 
 **What "fork tested" means:** a local node (anvil, or a Solana test validator) started from a copy of mainnet state, with throwaway keys and fake balances. It exercises real contract code and real pool math. It does not prove behaviour under real mempool competition, MEV, real gas markets or real fills.
 
-**Pool models not supported yet:** concentrated liquidity (V3, Raydium CLMM, Orca whirlpools), DLMM (Meteora), stable pools, multi-hop routes. A token whose only liquidity is in one of those cannot be traded.
+**Pool models:** on Solana, Jupiter routes reach concentrated-liquidity, DLMM and multi-hop routes for us. On EVM chains only Uniswap-V2-style pools are supported today, so a Base or Ethereum token whose only liquidity is in V3/V4 or Aerodrome pools cannot be traded yet.
 
 ---
 
@@ -212,7 +217,7 @@ sandwich attacks but is not guaranteed". It works on Jupiter and pump.fun trades
 Defaults: Jupiter and pump.fun only, at most 0.05 SOL per buy and 0.25 SOL of buys per day (`caps` lowers or changes them), sells of held tokens not capped in SOL, SOL/USD
 from a Jupiter quote (`solUsd` replaces it). For many users in one process, share one `PrivyApi` and one `jupiterSolUsd()` across them.
 
-### 4.5b Real Base accounts (Privy Ethereum wallet, Uniswap V2)
+### 4.5b Real Base accounts (Privy Ethereum wallet, Uniswap V2 and Relay)
 
 Hosted: run the server with `MODE=base-mainnet` (docs/PRODUCTION_SERVER.md). The API is the same, with `eth` in place of `sol` and 0x token addresses:
 
@@ -233,7 +238,7 @@ await b.trader.buy(await b.simple('/v1/trades/buy', { token, eth: '0.001', slipp
 ```
 
 `PrivyEvmSigner` checks each signed transaction against the request and recovers its signer. Defaults: 0.01 ETH per buy and 0.05 ETH per day (`caps`).
-Uniswap V2 WETH pools only; no token safety check and no fee sharing on Base yet.
+Venues: Uniswap V2 WETH pools, and **Relay** for a token with no V2 pool or a thin one (under 1 WETH). Relay reaches Aerodrome and Uniswap V3/V4, so Coinbase's stock tokens (NVDAc…) and most Base memecoins. Every Relay transaction is decoded, checked against the trade and simulated before Privy signs; the Privy policy needs the three `relay-*` rules (README → Base policy rules). Relay takes a small fee (about 0.000003 ETH per trade). Server settings: `RELAY_API_KEY` (Relay's docs say keys are required from 2 Oct 2026), `BASE_RELAY=off` to turn it off. No token safety check and no fee sharing on Base yet.
 
 ### 4.6 Apps: one key for many users, and webhooks
 
@@ -280,7 +285,77 @@ the SOL received, computed on the guaranteed minimum output. The trade reports w
 - The user's `maxFeeBps` on a trade (default 200, 2%) caps the total: a trade with higher fees fails before anything is signed. Fee wallets must already hold SOL
   (a transfer to an empty account below the rent minimum would fail the trade).
 
+### 4.9 Tokenized stocks (Solana)
+
+Stock tokens from xStocks (TSLAx…), Ondo (TSLAon…) and Backpack (TSLA…) trade through Jupiter like any other token, with extra checks. Details and research: [XSTOCKS.md](XSTOCKS.md).
+
+- **Which ones.** A registry built from the issuers' own lists and verified on chain (`packages/sol/src/stocklist.generated.ts`, `npm run stocks:registry`): 3,106 mints,
+  of which 113 (100 different companies and funds) had at least $10k of Jupiter liquidity and priced within 3% of the share price at the last run.
+  `GET /v1/stocks` lists them (`all=true` for every mint, `q=TSLA`, `issuer=`); client `stocks()`.
+- **Off by default.** Buying is refused (`stocks_disabled` 403) unless the server runs with `STOCKS_ENABLED=1`. No issuer offers these tokens to US persons or other
+  restricted jurisdictions, so turn it on only behind your own eligibility checks. Selling what a wallet already holds always works.
+- **By ticker.** `token: "TSLAx"` (or `stock: "TSLAx"`, or the underlying `"TSLA"` for the first match) is replaced by the mint.
+- **In shares.** One token can be worth more than one share after dividends (the token's multiplier). With `perShare: true`, `priceUsd`, `tpUsd`, `slUsd` and `price` are
+  per share, and on sells `shares` is the amount to sell in shares; the server converts them with the live multiplier. Buys are sized in SOL (`sol`).
+- **Price check.** Every stock buy and sell is compared with the real share price before signing. A route more than 3% worse fails with `bad_price` 409, and a missing
+  share price with `no_reference_price` 503. This catches thin routes that Jupiter's price-impact figure does not show (Ondo on Solana once quoted about 3× the share price).
+  `allowRiskyToken: true` skips it for one trade.
+- **Issuer pause.** While an issuer pauses a token, it has no route: orders on it wait and resume when the pause ends.
+- `GET /v1/stocks/:symbol` (client `stock("TSLAx")`): the multiplier, pause state, share price, what the best route pays per share now, and your holding in shares.
+
+```ts
+await c.stocks({ q: 'NVDA' });                                                     // NVDAx, NVDAon, NVDA (Backpack)
+await c.swap({ side: 'buy', token: 'NVDAx', sol: '0.05', slippagePct: 1 });       // by ticker, plain units
+await c.placeOrder({ type: 'limit-buy', stock: 'TSLAx', sol: '0.05', perShare: true, priceUsd: '350' });   // buy for 0.05 SOL when TSLA is $350 per share or less
+await c.placeOrder({ type: 'take-profit', stock: 'TSLAx', perShare: true, shares: '0.01', priceUsd: '420' });   // sell 0.01 share at $420
+```
+
+Not done: no real-money stock trade has been made yet on Solana (all 113 passed a read-only mainnet buy check; on Base, NVDAc was bought through Relay, section 4.5b).
+Large orders: an engine path to JupiterZ market-maker fills (RFQ), with its own gate for the market maker's co-signature and USDC or SOL as the pay asset, is built
+but **off by default and not wired into the execution server** yet; a read-only RFQ Desk (`npm run rfq`) compares it with normal routes. Details, verification and what
+going live needs: [JUPITERZ.md](JUPITERZ.md).
+Stocks on Base, BNB Chain and Robinhood Chain are not tradable yet.
+
 ---
+
+### 4.10 Copy trading on the execution server (`MODE=solana-mainnet`)
+
+The server copies leader wallets on Solana for each user (`apps/server/solcopy.ts`). The leader source is `SolLeaderWatcher` (`packages/sol/src/leaderwatch.ts`): it reads the
+leaders' confirmed transactions and turns each into a swap from the leader's own balance changes, so it sees a swap on any DEX. The follower can copy it only where this server
+can trade the token (pump.fun curves and Jupiter routes); otherwise the copy rules skip it because they cannot price it. Copied trades go through the user's engine: Privy signs
+them within the same policy and SOL caps as a manual trade, and they show up in `GET /v1/trades?origin=copy` and on the event stream.
+
+`POST /v1/copies` (plain units; the linked wallet is always the follower):
+
+| Field | Meaning | Default |
+|---|---|---|
+| `leader` or `leaders` | One Solana address, or 1 to 10. Not your own wallet. | required |
+| `fixedSol` **or** `percent` | Exactly one sizing rule: the same SOL on every copied buy, or a percentage (0.01 to 1000) of the SOL the leader spent | required |
+| `maxPerTradeSol` | Most one copied buy may spend. Cannot be above the account's per-trade cap (default 0.05 SOL) | the account cap |
+| `dailySol` | Most this config spends on buys per day. Cannot be above the account's daily cap (default 0.25 SOL) | the account cap |
+| `maxPerTokenSol` | Most open exposure in one token | `dailySol` |
+| `allow` / `block` | Token mints (or stock tickers) to copy only / never | all / none |
+| `sides` | `both` (copy buys, follow the leader's sells of what was copied) or `buy` | `both` |
+| `exitMode` | `full-on-exit`, `proportional`, `full-on-any-sell`, `ignore` (section 6.7) | `full-on-exit` |
+| `slippagePct`, `cooldownS`, `maxPositions`, `minConfirmations`, `maxDeviationPct` | Slippage of each copy; seconds between buys of one token; open positions; slots before a leader trade counts; how far the price may have moved since the leader's fill | 5, 0, 10, 1, 15 |
+| `maxAgeSlots` | A leader buy older than this when first seen is not copied (after an outage the follower does not chase old trades) | 150 (about a minute) |
+| `trackOnly` | Run every rule and check, record what would be bought, send nothing | false |
+| `id` | Your name for it | generated |
+
+Unknown fields are refused. Answers and `GET /v1/copies` give the settings plus `running`, `lastError`, `inflight`, the last copy decisions (`decisions`: what was bought, sold or
+skipped and why) and `skippedByChecks` (leader buys refused by the checks below). `DELETE /v1/copies/:id` stops it: nothing more is copied, a copy already sent finishes on the
+chain, the tokens stay in the wallet, and the config's saved state is forgotten (the same id later starts from scratch).
+
+Rules:
+- **Never copies history.** Creating a config records where "now" is for each leader; only later trades count.
+- **Same checks as a manual buy**, run before the copy rules see a leader buy: token safety (4.7, the user's `tokenSafety` setting; `allowRiskyToken` does not exist for copies),
+  and for a registered tokenized stock the operator switch (`STOCKS_ENABLED`) and the fill-price check against the share price, at the amount the copy would spend. A check that
+  fails, or cannot run, skips that trade (fail closed). Leader sells of what was copied are followed without these checks; sells are never blocked.
+- **Survives restarts and failover.** The configs are in the user's Redis state (`copies`), each runner's attribution, in-flight trades and leader cursors in `copy-<id>`,
+  written before anything is sent. The node that takes the user over rebuilds them; a trade is never copied twice.
+- `POST /v1/entries/pause` stops copying (section 9); at most 10 configs per account.
+
+Verified on a local validator with two server nodes and a crash (`npm run verify:server-copy`, report in `docs/live-verification/`); not on mainnet.
 
 ## 5. How it works in the backend
 
@@ -443,7 +518,7 @@ The order stores `usdPrice` and, on every tick, its quote-token trigger is re-de
 
 - **Sniping** reacts only to **mined** launch events and current pool state. It is always after the launch transaction: no mempool inspection, no front-running. Before buying, the real buy is dry-run; a revert such as "trading not enabled" is waited out, never bypassed. Bounded by `maxSpend` (total per launch), `maxAttempts`, `delayBlocks`, `minLiquidity`, `maxTaxBps`, optional `maxValuation`. Exits (`exit.takeProfitBps`, `stopLossBps`, `trailingStopBps`) become price orders. On a networked chain only the buy is dry-run: honeypots and sell tax are **not** detected before buying; the report states this.
 - **Copy trading** mirrors a leader's confirmed swaps with caps (per leader, per token, daily), cooldown, max positions, exit modes (`proportional`, `full-on-exit`, `full-on-any-sell`, `ignore`), `trackOnly`, buy checks (market cap, liquidity, tax), duplicate-buy and price-impact guards. Attribution is exact: it only sells what it bought for that leader. A reorged leader trade flags the position `orphaned`; it does not sell automatically.
-- Both need a **source** (`LaunchSource` / `LeaderSource`) that fits your chain. The HTTP API lists them (`GET /v1/snipes`, `/v1/copies`) and returns `501 not_configured` for creation unless the host supplied `makeSnipe` / `makeCopy`.
+- Both need a **source** (`LaunchSource` / `LeaderSource`) that fits your chain. The HTTP API lists them (`GET /v1/snipes`, `/v1/copies`) and returns `501 not_configured` for creation unless the host supplied `makeSnipe` / `makeCopy`. The execution server in `MODE=solana-mainnet` supplies the copy source (section 4.10); `createApi` also takes `removeCopy` and `listCopies` so a host can keep configs in its own state.
 
 ---
 
@@ -522,6 +597,7 @@ Base path `/v1`. Auth: `Authorization: Bearer <key>`. Open routes: `GET /v1/heal
 | 413 | `too_large` | Body over 256 KB. |
 | 429 | `rate_limited` | Slow down. |
 | 501 | `not_configured` | Snipe or copy creation without a host-supplied source. |
+| 400 / 409 | `above_cap`, `too_many`, `wallet_not_active` | Copy configs (section 4.10): a cap above the account's limit; more than 10 configs; no wallet the server may sign for. |
 | 500 | `internal` | Retry; details are in the server log only. |
 
 A trade that the engine **refuses or that fails** (policy limit, simulation revert, on-chain revert) is returned with `200` and `state: "failed"` plus `failure`, because the request itself was valid and the record exists. Check `state`.
@@ -542,11 +618,12 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 | `POST /v1/alerts`; `DELETE /v1/alerts/:id` | Price alerts |
 | `GET /v1/positions`, `/v1/history` | Portfolio |
 | `POST /v1/entries/pause`, `/resume` | Pause new buys |
-| `GET /v1/snipes`, `/v1/copies`; `POST` (host-configured) | Sniping and copy trading |
+| `GET /v1/snipes`, `/v1/copies`; `POST` (host-configured); `DELETE /v1/copies/:id` | Sniping and copy trading. `MODE=solana-mainnet`: copy bodies and answers in section 4.10 |
 | `GET /v1/events` | Live events |
-| `GET /v1/wallet`; `POST /v1/wallet/link/start`, `/v1/wallet/link/finish`; `DELETE /v1/wallet` | Execution server in `MODE=solana-mainnet` only: link the user's Privy wallet (section 4.5 A), see whether it may trade now, unlink. Errors: `bad_signature` 401, `not_delegated` 409, `link_expired` 410, `privy_unavailable` 503; trades on an account whose wallet is not active: `wallet_not_active` 409 |
-| `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false) and `maxTipSol` (default 0.0001, at most 0.001). Any trade or order also takes `mevProtection: true|false` for itself |
-| `GET /v1/tokens/:mint/safety` | `MODE=solana-mainnet`: the token safety report (section 4.7). Buys of a blocked token fail with `unsafe_token` 409 unless `allowRiskyToken: true` or `tokenSafety` is warn/off |
+| `GET /v1/wallet`; `POST /v1/wallet/link/start`, `/v1/wallet/link/finish`; `DELETE /v1/wallet` | Execution server in `MODE=solana-mainnet` or `MODE=base-mainnet`: link the user's Privy wallet (sections 4.5 A and 4.5b; on Base the signature is a 0x `personal_sign`), see whether it may trade now, unlink. Errors: `bad_signature` 401, `not_delegated` 409, `link_expired` 410, `privy_unavailable` 503; trades on an account whose wallet is not active: `wallet_not_active` 409 |
+| `GET /v1/settings`; `PATCH /v1/settings` | `MODE=solana-mainnet` only: per-user `mevProtection` (default false), `maxTipSol` (default 0.0001, at most 0.001) and `tokenSafety` (block, warn or off; default block). Any trade or order also takes `mevProtection: true|false` for itself |
+| `GET /v1/tokens/:mint/safety` | `MODE=solana-mainnet`: the token safety report (section 4.7). Buys of a blocked token fail with `unsafe_token` 409 unless `allowRiskyToken: true` or `tokenSafety` is warn/off. Client `tokenSafety(mint)` |
+| `GET /v1/stocks`; `GET /v1/stocks/:symbol` | `MODE=solana-mainnet`: tokenized stocks (section 4.9). The list (query `all`, `q`, `issuer`, `limit`, `offset`; `buyEnabled` says whether this server allows buys) and one stock's multiplier, pause, share price, route price per share and your holding. Client `stocks()`, `stock(symbol)`. Trades take `token`/`stock` as a ticker, `perShare`, `shares` (sells). Errors: `stocks_disabled` 403, `bad_price` 409, `no_reference_price` 503, `not_found` 404 |
 | `GET /v1/records/trades`, `/v1/records/audit`; app keys: `/v1/app/records/trades`, `/v1/app/records/audit` | Servers with `PG_URL`: the stored trade history (one row per trade with its fill, newest first) and the audit log (every call that changed something, with secrets and signatures removed). Query: `limit` (up to 500), `before` to page back. Client: `recordTrades()`, `auditLog()`, `appRecordTrades()`, `appAuditLog()`. `not_configured` 501 without Postgres |
 | `GET`, `PUT`, `DELETE /v1/app/fees` | App keys: the app's own fee on its users' trades, `{ wallet, bps }`, at most APP_FEE_MAX_BPS (section 4.8) |
 | `GET`, `PUT`, `DELETE /v1/app/webhook`; `POST /v1/app/webhook/test`; `GET /v1/app/users` | App keys only (section 4.6): the app's signed webhook and its end users. With an app key every other route needs `X-User-Id` (`missing_user` 400 without it; `app_user_limit` 403 past MAX_USERS_PER_APP; `not_an_app_key` 403 for /v1/app with a user key) |
@@ -565,14 +642,13 @@ A trade that the engine **refuses or that fails** (policy limit, simulation reve
 
 ## 10. What is not done (read before trusting it with money)
 
-1. **Real funds only in small amounts on Solana, through the `/solana` UI** (KNOWN_LIMITATIONS.md, evidence levels): market trades, limit orders, the trading key, and
-   Privy automatic trading (a confirmed buy and a standing order that fired by itself, both signed by real Privy). Nothing on Ethereum mainnet. The execution server's real mode (`MODE=solana-mainnet`)
-   has been run on a local validator only.
+1. **Real funds only in small amounts** (KNOWN_LIMITATIONS.md, evidence levels). Solana: market trades, limit orders, the trading key and Privy automatic trading from `/solana`,
+   and buys through the execution server (`MODE=solana-mainnet`), including one with priority fee and Jito protection. Base: one 0.0002 ETH buy through the execution server
+   (`MODE=base-mainnet`). Not on mainnet yet: sells and standing orders through the server, failover, fee sharing, stock trades. Nothing on Ethereum mainnet.
 2. The **Trader and API layer** is verified on the practice chain, an **Ethereum** fork and a **Solana** local validator. Sniping and copy trading through the Trader were not part of those runs (their runners have their own fork and validator reports), and on Solana only the Raydium SOL/USDC pool was used, not Jupiter routes.
-3. **Custody:** Solana has a production-grade option in the SDK (`PrivySolSigner`: the user's own Privy wallet, server signing under a Privy policy), used by `/solana`.
-   The execution server uses it in `MODE=solana-mainnet` (verified on a local validator with two nodes and a Privy stand-in, not yet on mainnet). EVM has no real signer yet (ERC-4337 or Privy smart wallets are the plan, README → Custody plan).
-4. Only **Uniswap-V2-style pools** (Ethereum) and **Raydium AMM v4 / Jupiter routes** (Solana) are supported. No V3, CLMM, DLMM, stable pools or multi-hop routes.
-5. Triggers poll about once a second from pool **spot price**; there is no sub-second reaction, no private mempool and no MEV protection. Gas is not tuned (no fee bumping logic beyond replace-by-fee for cancels).
+3. **Custody:** the user's own Privy wallet, with the server signing under a Privy policy. On Solana that's `PrivySolSigner`, used by `/solana` and `MODE=solana-mainnet`. On Base it's `PrivyEvmSigner`, used by `MODE=base-mainnet`: every signed transaction is checked field by field and by its recovered signer. No unaudited key handling of our own, but also no independent security audit.
+4. **Venues:** EVM chains have **Uniswap-V2-style pools**, and on Base also **Relay** (same-chain swaps; Relay's cross-chain buys are not built). Relay is a third-party service: each transaction it returns is decoded and checked (pinned contracts, our wallet as the only recipient, a capped fee, an on-chain minimum) and simulated before signing. Solana has Jupiter routes (which reach CLMM, DLMM and multi-hop), pump.fun and Raydium AMM v4.
+5. Triggers poll about once a second from pool **spot price**; there is no sub-second reaction. Solana trades can go privately through Jito (MEV protection, opt-in) with a priority fee from recent fees; Base has no public mempool. EVM gas is not tuned beyond replace-by-fee for cancels.
 6. Sniping on a networked chain cannot see honeypots before buying; Solana discovery sees pool **creations** only, not later migrations.
 7. Rate limits and keys are in memory: a restart of the API process forgets the rate-limit counters, and keys come from the environment only (no rotation UI).
 8. Unaudited: the fee router contract, the whole codebase.

@@ -38,7 +38,7 @@ or `ALCHEMY_API_KEY` with Base enabled. Optional: `BASE_MAX_TRADE_ETH=0.01`, `BA
 Linking is the same routes as Solana: `/v1/wallet/link/start` and `/link/finish`. The signature is a `personal_sign` (0x, 65 bytes). The server recovers the signer from it, then asks Privy for the signer and the Base policy.
 
 Every transaction Privy signs is decoded and compared with what the engine built: destination, value, data, nonce, gas, fees and chain. Its signer is recovered from the signature and must be the
-linked wallet. Otherwise it is refused and nothing is sent. Trades route through Uniswap V2 WETH pools only (`no_route` otherwise). Local proof: `npm run verify:server-base`, 13 checks.
+linked wallet. Otherwise it is refused and nothing is sent. Trades route through Uniswap V2 WETH pools, and through Relay for tokens with no or a thin V2 pool (each Relay transaction decoded, checked and simulated before signing; `no_route` when neither has a route). Local proof: `npm run verify:server-base`, 15 checks including a Relay buy and sell.
 
 **Mainnet, 2026-11-18 (user-approved), the newer features together:** a 0.005 SOL Bonk buy through the API with `mevProtection: true`, finalized as tx
 `4EbzSNurPKE54KjuxFdZJKEMNGW9U9iYKWyG6GzVxRDNrsn4cj9EptYVhfd7DmoE5iGCfCFdt8iKowRXdTqHGm9j`: it passed the token safety check, was sent privately to Jito with a
@@ -133,7 +133,10 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS` | none, 0 | The operator's fee on every real trade, paid in SOL inside the trade (0 to 100 bps; SDK_AND_API.md 4.8). |
 | `APP_FEE_MAX_BPS` | 100 | The most an app may charge its users with `PUT /v1/app/fees`. |
 | `WEBHOOKS_ALLOW_HTTP` | false | Local testing only: allow http and private hosts as webhook targets. |
-| `MODE` | practice | `practice` (fake funds) or `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`). |
+| `STOCKS_ENABLED` | off | `1` lets users of a `solana-mainnet` server **buy** tokenized stocks (SDK_AND_API.md 4.9). Off: stock buys fail with `stocks_disabled` 403; sells always work. No issuer offers these tokens to US persons: enable only behind your own eligibility checks. |
+| `BASE_RPC_URL`, `PRIVY_BASE_POLICY_ID`, `BASE_MAX_TRADE_ETH`, `BASE_DAILY_CAP_ETH` | Alchemy, none, 0.01, 0.05 | `MODE=base-mainnet` (section above). |
+| `RELAY_API_KEY`, `BASE_RELAY` | none, on | `MODE=base-mainnet`: Relay's API key (needed for production; Relay's docs say from 2 Oct 2026), and `BASE_RELAY=off` to trade only Uniswap V2 pools. |
+| `MODE` | practice | `practice` (fake funds), `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`) or `base-mainnet` (real funds on Base, Privy Ethereum wallets; needs `PRIVY_BASE_POLICY_ID`). |
 
 **API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it
 (`x-memedesk-node`), so forwarding is visible. The page holds no secrets; the key stays in the browser tab.
@@ -171,7 +174,7 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 ## What is not done (read before trusting it with money)
 
-- **Real accounts: Solana and Base.** `MODE=solana-mainnet` (above): local validator, plus one small mainnet buy. Orders, failover and sells through the server have not run on mainnet. `MODE=base-mainnet`: a local Base fork with a Privy stand-in only, so far. Base is limited to Uniswap V2 pools, with no token safety check and no fee sharing. One server runs one mode.
+- **Real accounts: Solana and Base.** `MODE=solana-mainnet` (above): local validator, plus small mainnet buys. `MODE=base-mainnet`: a local Base fork with a Privy stand-in, plus one 0.0002 ETH mainnet buy (tx `0x431b6a…`). Orders, failover and sells through the server have not run on mainnet. Base is limited to Uniswap V2 pools, with no token safety check and no fee sharing. One server runs one mode.
   Server-held hot keys in files are not production custody.
 - **Postgres is a record, not the source of truth.** Redis holds running accounts; with `PG_URL`, trades and an audit log are copied to Postgres in the background (below). Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.

@@ -6,6 +6,23 @@ import type { Amount, PriceOrderInput, BulkInput, TwapInput, TraderEvent } from 
 /** `userId`: with an APP key, the end user every call acts for (sent as X-User-Id). Use `forUser` to get a client per end user. */
 export interface ClientOptions { baseUrl: string; apiKey: string; userId?: string; fetch?: typeof fetch; timeoutMs?: number }
 type J = any;
+/** A copy config for the execution server (MODE=solana-mainnet), in plain units. Exactly one of `fixedSol` or `percent`. Unknown fields are refused by the server. */
+export interface CopyInput {
+  /** One leader wallet, or `leaders` with 1 to 10. */ leader?: string; leaders?: string[];
+  /** The same SOL on every copied buy. */ fixedSol?: string; /** A share (0.01 to 1000 %) of the SOL the leader spent. */ percent?: number;
+  maxPerTradeSol?: string; dailySol?: string; maxPerTokenSol?: string;
+  /** Token mints or stock tickers to copy only / never. */ allow?: string[]; block?: string[];
+  sides?: 'both' | 'buy'; exitMode?: 'full-on-exit' | 'proportional' | 'full-on-any-sell' | 'ignore';
+  slippagePct?: number; cooldownS?: number; maxPositions?: number; minConfirmations?: number; maxDeviationPct?: number; maxAgeSlots?: number;
+  /** Run every rule and check, record what would be bought, send nothing. */ trackOnly?: boolean; id?: string;
+}
+/** Options on a trade or order for a tokenized stock (Solana). */
+export interface StockTradeOptions {
+  /** The stock by ticker instead of mint: "TSLAx", "TSLAon" or the underlying "TSLA". */ stock?: string;
+  /** true: `shares` is an amount in shares, and priceUsd / tpUsd / slUsd / price are per SHARE (converted with the token's multiplier). */ perShare?: boolean;
+  /** With perShare, on sells and sell orders: how many shares to sell (decimal string). Size buys with `sol`. */ shares?: string;
+  /** Skip the safety and share-price checks for this one trade. */ allowRiskyToken?: boolean;
+}
 export class MemeClient {
   constructor(private o: ClientOptions) { if (!o.apiKey) throw new SdkError('config', 'apiKey is required'); }
   private async req(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<J> {
@@ -39,11 +56,11 @@ export class MemeClient {
   overview() { return this.req('GET', '/v1/overview'); }
   // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
   /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
-  swap(p: { side: 'buy' | 'sell'; /** Solana mint */ mint?: string; /** Base: the 0x token address (mint works too) */ token?: string; sol?: string; /** Base (MODE=base-mainnet): ETH to spend */ eth?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string; /** this trade only: true = private (Jito), false = public; absent = your setting */ mevProtection?: boolean }) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
+  swap(p: { side: 'buy' | 'sell'; /** Solana mint, or a stock ticker such as "TSLAx" */ mint?: string; /** Base: the 0x token address (mint works too); Solana: a mint or a stock ticker */ token?: string; sol?: string; /** Base (MODE=base-mainnet): ETH to spend */ eth?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string; /** this trade only: true = private (Jito), false = public; absent = your setting */ mevProtection?: boolean } & StockTradeOptions) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
   /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
    *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
-  placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; mint: string; sol?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
-    trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number; mevProtection?: boolean }) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
+  placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; /** the token's mint (or `stock` with a ticker) */ mint?: string; sol?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
+    trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number; mevProtection?: boolean } & StockTradeOptions) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
   /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
   wallet() { return this.req('GET', '/v1/wallet'); }
   linkStart(address: string) { return this.req('POST', '/v1/wallet/link/start', { address }); }
@@ -51,7 +68,14 @@ export class MemeClient {
   unlink() { return this.req('DELETE', '/v1/wallet'); }
   /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */
   settings() { return this.req('GET', '/v1/settings'); }
-  updateSettings(p: { mevProtection?: boolean; maxTipSol?: string }) { return this.req('PATCH', '/v1/settings', p); }
+  updateSettings(p: { mevProtection?: boolean; maxTipSol?: string; /** buys of tokens that fail the safety check: block (default), warn or off */ tokenSafety?: 'block' | 'warn' | 'off' }) { return this.req('PATCH', '/v1/settings', p); }
+  /** Token safety report (MODE=solana-mainnet): freeze/mint authority, Token-2022 extensions, holder concentration, a sell route, 1-SOL impact, and a verdict. */
+  tokenSafety(mint: string) { return this.req('GET', `/v1/tokens/${enc(mint)}/safety`); }
+  // ── tokenized stocks on Solana (MODE=solana-mainnet; buying needs STOCKS_ENABLED=1 on the server; not for US persons) ──
+  /** Registered stocks (xStocks, Ondo, Backpack): by default the tradable ones, most liquid first. `all` lists every verified mint; `q` a ticker or underlying (TSLA). */
+  stocks(q: { all?: boolean; q?: string; issuer?: string; limit?: number; offset?: number } = {}) { return this.req('GET', '/v1/stocks' + qs(q)); }
+  /** One stock: shares per token (multiplier), issuer pause, the share price, what the best route pays per share now, and your holding in shares. */
+  stock(symbol: string) { return this.req('GET', `/v1/stocks/${enc(symbol)}`); }
   quote(p: { side: 'buy' | 'sell'; token: string; amount: Amount; slippageBps?: number }) { return this.req('POST', '/v1/quote', p); }
   /** `key` becomes the Idempotency-Key: retrying the same key never trades twice. */
   buy(p: { walletId: string; token: string; amount: Amount; slippageBps?: number; minOut?: Amount; key?: string; deadlineS?: number; maxFeeBps?: number }) { const { key, ...b } = p; return this.req('POST', '/v1/trades/buy', b, key ? { 'idempotency-key': key } : {}); }
@@ -85,8 +109,13 @@ export class MemeClient {
   resumeEntries() { return this.req('POST', '/v1/entries/resume', {}); }
   snipes() { return this.req('GET', '/v1/snipes'); }
   addSnipe(p: J) { return this.req('POST', '/v1/snipes', p); }
+  /** Copy configs with their state: running, lastError, inflight, the last decisions (bought, sold, skipped and why) and skippedByChecks. */
   copies() { return this.req('GET', '/v1/copies'); }
-  addCopy(p: J) { return this.req('POST', '/v1/copies', p); }
+  /** Follow leader wallets. On a `MODE=solana-mainnet` server: plain units, the linked wallet is the follower (docs/SDK_AND_API.md 4.10); copied buys pass the same token
+   *  safety and stock checks as manual buys, within the account's SOL caps. Elsewhere the host supplies the leader source and the body is the engine's CopyConfig. */
+  addCopy(p: CopyInput | J) { return this.req('POST', '/v1/copies', p); }
+  /** Stop a copy config: nothing more is copied; a copy already sent finishes; the tokens stay in the wallet. */
+  removeCopy(id: string) { return this.req('DELETE', `/v1/copies/${enc(id)}`); }
   /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
   async events(on: (e: TraderEvent) => void, signal?: AbortSignal): Promise<void> {
     const f = this.o.fetch ?? fetch, r = await f(this.o.baseUrl.replace(/\/$/, '') + '/v1/events', { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream' }, signal });

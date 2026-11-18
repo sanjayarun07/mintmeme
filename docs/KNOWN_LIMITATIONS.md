@@ -15,6 +15,8 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
   and a limit sell fired unattended by the trading key; trading-key funding from the wallet; Privy automatic trading (a confirmed Jupiter buy, tx `5HyLiX…`, and a limit buy
   with a USD trigger that fired by itself, tx `2TiNZtup…`, both signed by real Privy under the app's policy with no wallet prompt). Take profit, stop loss, trailing stop, bracket, TWAP and the slippage chase have
   NOT been run on mainnet. Nothing has been run on Ethereum mainnet.
+- **Execution server, real funds, small amounts:** Solana buys through the API (`MODE=solana-mainnet`, tx `3zMawg…`, and one with priority fee and Jito protection, tx `4EbzSN…`);
+  Base: one 0.0002 ETH KEYCAT buy (`MODE=base-mainnet`, tx `0x431b6a…`), signed by the user's Privy Ethereum wallet. No stock token has been traded with real funds.
 
 ## Execution
 1. A price order is a trigger, not a resting order: when it fires it takes the pool price within the slippage. Triggers use the best authorised pool's spot price at tick
@@ -47,12 +49,12 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
 14. Postgres (optional, `PG_URL`) keeps a trade history and an audit log copied in the background; it is not the source of truth (Redis is), and a crashed node loses its last unwritten second of records.
 
 ## SDK and HTTP API
-15. Tested on the practice chain, an Ethereum mainnet fork and a Solana validator. Snipe and copy creation over HTTP answer 501 unless the host supplies a launch or leader
-    source. No wallet creation, withdrawals, bridging or billing.
+15. Tested on the practice chain, an Ethereum mainnet fork and a Solana validator. Snipe creation over HTTP answers 501 unless the host supplies a launch source; copy creation
+    answers 501 too, except on the execution server in `MODE=solana-mainnet`, which supplies the leader source (copy trading over the API, SDK_AND_API.md 4.10; validator-tested, not on mainnet). No wallet creation, withdrawals, bridging or billing.
 16. The package archive `memedesk-sdk-0.1.0.tgz` is not rebuilt automatically: run `npm run pack:sdk` after source changes.
 
 ## Execution server (`apps/server`)
-17. Real accounts on Solana only (`MODE=solana-mainnet`, each user links a Privy wallet): local validator with two nodes, and one small mainnet buy through the API (tx `3zMawg…`). Orders, sells and failover through the server not yet on mainnet. EVM accounts are practice only. See `docs/PRODUCTION_SERVER.md` for what was measured
+17. Real accounts on Solana (`MODE=solana-mainnet`) and Base (`MODE=base-mainnet`); each user links a Privy wallet. Solana: local validator with two nodes, and small mainnet buys through the API. Base: local Base fork (15 checks) and one small mainnet buy; Uniswap V2 WETH pools and Relay (same-chain), no token safety check, no fee sharing on Base. Orders, sells and failover through the server not yet on mainnet. One server runs one mode. See `docs/PRODUCTION_SERVER.md` for what was measured
     (failover 1 s graceful, 15 s after a crash) and its other limits (per-node rate limits, no throughput test).
 
 ## Solana test UI (`/solana`)
@@ -70,6 +72,6 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
 ## Security
 22. The policy signer authorises with an in-process HMAC stand-in; it is not a security boundary. For Solana the signing key itself can be the user's Privy wallet
     (`PrivySolSigner`), where Privy enforces its own policy; the server's Privy app secret and authorization key are then the secrets to protect (`.env`, never committed).
-    EVM has no real signer yet.
+    On Base the signing key is the user's Privy Ethereum wallet (`PrivyEvmSigner`): each signed transaction is compared field by field with the request and its signer recovered.
 23. API keys are SHA-256 hashes in a file, with no rotation API. App keys (one key, many end users named in X-User-Id) and signed webhooks exist; webhooks are best effort (in-memory retries). The API and nodes speak plain HTTP; TLS belongs at the load balancer.
 24. No legal, compliance or KYC analysis exists.
