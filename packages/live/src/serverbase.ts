@@ -12,7 +12,7 @@ import { erc20 } from '../../evm/src/index.ts';
 import { createNode } from '../../../apps/server/node.ts';
 import { baseAccounts, baseLinkRoutes } from '../../../apps/server/baseaccount.ts';
 
-const KEYCAT = '0x9a26f5433671751c3276a065f57e5a02d2817973', ZORA = '0x1111111111166b7fe7bd91427724b487980afc69', PORT = 8671;
+const V2_ROUTER = '0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24', KEYCAT = '0x9a26f5433671751c3276a065f57e5a02d2817973', ZORA = '0x1111111111166b7fe7bd91427724b487980afc69', PORT = 8671;
 const freePort = () => new Promise<number>(ok => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); });
 async function main() {
   const key = process.env.ALCHEMY_API_KEY ?? '', upstream = process.env.BASE_RPC_URL || (key ? `https://base-mainnet.g.alchemy.com/v2/${key}` : '');
@@ -61,14 +61,19 @@ async function main() {
     // gated (pinned contracts, reviewed inner swap, on-chain minimum) and simulated with eth_simulateV1 on this fork before Privy is asked
     const zora = async () => { const q = erc20.balanceOf(ZORA, addr); return erc20.decodeUint(await node.call<string>('eth_call', [{ to: q.to, data: q.data }, 'latest'])); };
     // Relay quotes LIVE mainnet state while this fork is frozen at its start block, so a route can revert here ("inactive pair"): the simulation then refuses it and
-    // nothing is sent. A fresh quote may pick another route, so up to three attempts (each a new trade key).
-    const relayRun = async (path: string, body: any) => { let r: any; for (let i = 1; i <= 3; i++) { r = await run(path, { ...body, key: `${body.key}-${i}` }); if (r.t.state === 'finalized' || !/simulation|Relay quote/.test(r.t.failure ?? '')) break; await new Promise(ok => setTimeout(ok, 3000)); } return r; };
+    // nothing is sent. Relay also varies its inner route between quotes, and the gate refuses one through a contract it has not reviewed (fail closed; nothing is
+    // sent either). A fresh quote may pick another route, so up to five attempts (each a new trade key).
+    const relayRun = async (path: string, body: any) => { let r: any; for (let i = 1; i <= 5; i++) { r = await run(path, { ...body, key: `${body.key}-${i}` }); if (r.t.state === 'finalized' || !/simulation|Relay quote|not reviewed|the route approves/.test(r.t.failure ?? '')) break; await new Promise(ok => setTimeout(ok, 3000)); } return r; };
     const z1 = await zora(), rb = await relayRun('/v1/trades/buy', { token: ZORA, eth: '0.002', slippagePct: 3, key: 'rb1' }), z2 = await zora();
     const rtx: any = rb.t.txHash ? await node.call('eth_getTransactionByHash', [rb.t.txHash]) : null;
     check('B14 buy 0.002 ETH of ZORA (dust V2 pool): routed through Relay\'s router, gated and simulated, finalized, tokens arrived', rb.t.state === 'finalized' && z2 > z1 && String(rtx?.to).toLowerCase() === RELAY_ROUTER, `${rb.t.state} ${rb.t.failure ?? ''} to ${rtx?.to} tokens ${z1}->${z2}`);
     const signedR = fp.state.signed, eR = await eth(), rs = await relayRun('/v1/trades/sell', { token: ZORA, pct: 100, slippagePct: 5, key: 'rs1' }), eR2 = await eth();
     const stx: any = rs.t.txHash ? await node.call('eth_getTransactionByHash', [rs.t.txHash]) : null;
-    check('B15 sell 100% of ZORA through Relay: exact approval of its proxy + swap signed by Privy, tokens gone, ETH back', rs.t.state === 'finalized' && (await zora()) === 0n && eR2 > eR && fp.state.signed - signedR === 2 && String(stx?.to).toLowerCase() === RELAY_PROXY, `${rs.t.state} ${rs.t.failure ?? ''} to ${stx?.to} signed ${fp.state.signed - signedR} eth ${eR}->${eR2}`);
+    // The router takes the best quote of the token's venues: usually Relay, but at times the dust V2 pool quotes this small sell better, and then using it is right.
+    // Either way the sell must finalize with an exact approval + swap signed by Privy, tokens gone and ETH back, sent to that venue's contract. (The Relay sell path
+    // itself is also covered in packages/evm/test/relay.test.ts.)
+    const viaRelay = String(rs.t.venue ?? '').startsWith('relay'), wantTo = viaRelay ? RELAY_PROXY : V2_ROUTER;
+    check(`B15 sell 100% of ZORA (best venue: ${viaRelay ? 'Relay, through its approval proxy' : 'Uniswap V2, it quoted better'}): exact approval + swap signed by Privy, tokens gone, ETH back`, rs.t.state === 'finalized' && (await zora()) === 0n && eR2 > eR && fp.state.signed - signedR === 2 && String(stx?.to).toLowerCase() === wantTo, `${rs.t.state} ${rs.t.failure ?? ''} venue ${rs.t.venue} to ${stx?.to} signed ${fp.state.signed - signedR} eth ${eR}->${eR2}`);
     // the per-trade cap (0.01 ETH by default) is checked before Privy is asked
     const signedCap = fp.state.signed, c1 = await run('/v1/trades/buy', { token: KEYCAT, eth: '0.02', key: 'c1' });
     check('B8 a buy above the per-trade cap fails before signing: nothing sent', c1.t.state === 'failed' && !sent(c1.t) && fp.state.signed === signedCap, `${c1.t.state} ${c1.t.failure ?? JSON.stringify(c1.t)}`);

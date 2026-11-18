@@ -13,7 +13,7 @@ full web terminal, markets, indexer, more fork harnesses) is preserved in git ta
 | Part | Where | What it is | Guide |
 |---|---|---|---|
 | **SDK** | `packages/core`, `packages/sol`, `packages/evm`, `packages/sdk` | Execution engine + `Trader` + `MemeClient`. Solana (Jupiter, pump.fun, Raydium; tokenized stocks), Base and Ethereum (Uniswap V2). Real accounts signed by the user's own Privy wallet. | [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) |
-| **HTTP API** | `apps/api` | Every `Trader` method over HTTP/JSON with API keys, per-user isolation, rate limits, OpenAPI, live events. | [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §8 |
+| **HTTP API** | `apps/api` | Every `Trader` method over HTTP/JSON with API keys, per-user isolation, rate limits, OpenAPI, live events. | [`docs/HTTP_API.md`](docs/HTTP_API.md) (integration guide), [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §8 |
 | **Execution server** | `apps/server`, `deploy/server` | Identical nodes on one Redis: per-user ownership, forwarding, failover, health and metrics, Docker. Serves the API and `/console`. | [`docs/PRODUCTION_SERVER.md`](docs/PRODUCTION_SERVER.md) |
 | **RFQ Desk** | `apps/rfq` | Read-only desk for JupiterZ market-maker quotes on tokenized stocks: a firm quote with expiry, the decoded transaction and the gate's checks, a size ladder against normal routes. Never signs or sends (`npm run rfq`). | [`docs/JUPITERZ.md`](docs/JUPITERZ.md) |
 | **Solana test UI** | `apps/web`, `apps/privy` | `/solana`: sign in with your wallet (Wallet Standard or Privy), market and standing orders, trading key, holdings, history, kill switch. Mainnet, real funds. | [`docs/SOLANA_MAINNET_TEST_CHECKLIST.md`](docs/SOLANA_MAINNET_TEST_CHECKLIST.md) |
