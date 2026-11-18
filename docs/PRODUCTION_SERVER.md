@@ -30,6 +30,13 @@ and failover without a chain.
 as the API) and bought 0.005 SOL of Bonk through the API in plain units. Routed through Jupiter, signed by real Privy under the app's policy, finalized as tx
 `3zMawgRFnseC1daidQZMQarkmFvqHS6scJu5qgCeNAdwUhj95E8ee2SBv1FhTZbXSbWdoUDmwj9Py7dbvQ8tpQ8G` (wallet paid 0.005009668 SOL, received 154,813.93 Bonk).
 
+**Mainnet, 2026-11-18 (user-approved), the newer features together:** a 0.005 SOL Bonk buy through the API with `mevProtection: true`, finalized as tx
+`4EbzSNurPKE54KjuxFdZJKEMNGW9U9iYKWyG6GzVxRDNrsn4cj9EptYVhfd7DmoE5iGCfCFdt8iKowRXdTqHGm9j`: it passed the token safety check, was sent privately to Jito with a
+7,754-lamport tip (the tip floor's 75th percentile) to a Jito tip account and the `jitodontfront` flag, carried a compute-unit limit of 67,250 from simulation
+(56,191 used) at 10,000 micro-lamports per unit (672 lamports of priority fee), and was stored in Postgres with every state it went through and its audit entry.
+The first try was refused before signing: on a longer route the transaction would have been about 1,263 bytes, over the 1,232-byte limit. Too-large Jupiter routes
+are now asked again with fewer accounts (48, 36, 28) and refused only if none fits.
+
 ## How it works
 
 ```

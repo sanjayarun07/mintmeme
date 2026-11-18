@@ -56,6 +56,8 @@ export interface SolChainConfig { id: string; wsol: string; /** Raydium AMM v4 p
   submitter?: TxSubmitter }
 const FINAL = 32, TOKEN_ACCOUNT_SIZE = 165;
 
+/** Solana's limit on a signed transaction, and how a too-large Jupiter route is retried with fewer accounts. */
+export const TX_MAX_BYTES = 1232; const JUP_SIZE_MARGIN = 24, JUP_MAX_ACCOUNTS_STEPS = [48, 36, 28];
 export class SolanaChain implements ChainPort {
   id: string; family = 'solana'; time = 0; block = 0; finalityDepth: number;
   state = { venues: new Map<string, Venue>() };
@@ -189,7 +191,9 @@ export class SolanaChain implements ChainPort {
     return out;
   }
   /** Ask Jupiter for the route, compile it ourselves, run the safety gate on the exact bytes to be signed, then SIMULATE and check the wallet's balances. Throws JupiterRefused to stop. */
-  private async buildJupiter(tx: SimTx, v: JupiterVenue, extra?: Ix) {
+  /** `maxAccounts`: set when a route came out too large for one transaction and Jupiter is asked again for a simpler one (see the size check below). */
+  private async buildJupiter(tx: SimTx, v: JupiterVenue, extra?: Ix, maxAccounts?: number): Promise<{ message: Uint8Array; simulatedOut: bigint; quotedOut: bigint; labels: string[] }> {
+    const original = tx;
     // a Jito tip (submitter.ts) travels inside the swap transaction; the gate allows exactly this transfer and no other
     const tipIx: JIx | undefined = extra ? { programId: extra.program, accounts: extra.keys.map(k => ({ pubkey: k.pubkey, isSigner: !!k.signer, isWritable: !!k.writable })), data: extra.data } : undefined;
     const tip = extra && extra.program === PROGRAMS.system && extra.data.length === 12 ? { to: extra.keys[1].pubkey, maxLamports: Buffer.from(extra.data).readBigUInt64LE(4) } : undefined;
@@ -201,7 +205,7 @@ export class SolanaChain implements ChainPort {
     const feeIxs: JIx[] = fee.each.map(e => { const x = systemTransfer(w, e.to, e.lamports); return { programId: x.program, accounts: x.keys.map(k => ({ pubkey: k.pubkey, isSigner: !!k.signer, isWritable: !!k.writable })), data: x.data }; });
     if (!v.supports(tx.tokenIn, tx.tokenOut)) throw new JupiterRefused('this Jupiter venue does not cover that pair');
     const allowed = await fetchRoutableProgramIds(j);
-    const ask = (slippageBps: number) => fetchBuild({ ...j, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps });
+    const ask = (slippageBps: number) => fetchBuild({ ...j, ...(maxAccounts ? { maxAccounts } : {}), inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps });
     // Slippage is set so Jupiter's OWN minimum output is at least the engine's minOut: tighter than the engine allows is fine, looser never is.
     let b = await ask(50);
     if (b.outAmount < tx.minOut) throw new JupiterRefused(`Jupiter now quotes ${b.outAmount} out, below your minimum ${tx.minOut}: the price moved`);
@@ -216,6 +220,13 @@ export class SolanaChain implements ChainPort {
     const bh: any = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
     const body = [...(buying ? feeIxs : []), ...b.ixs, ...(buying ? [] : feeIxs), ...(tipIx ? [tipIx] : [])];
     let message = compileV0(w, body, b99(bh.value.blockhash), tables);
+    // A transaction is at most 1,232 bytes signed. Jupiter routes can come close on their own; our tip, fee and compute-budget instructions add up to about 100 bytes.
+    // Too large (with room for the compute-unit limit added below): ask Jupiter again for a route that touches fewer accounts, down to 28; then refuse.
+    if (1 + 64 + message.length + JUP_SIZE_MARGIN > TX_MAX_BYTES) {
+      const next = JUP_MAX_ACCOUNTS_STEPS.find(n => n < (maxAccounts ?? j.maxAccounts ?? 64));
+      if (next === undefined) throw new JupiterRefused(`every Jupiter route for this trade is too large for one transaction (${1 + 64 + message.length} bytes, the limit is ${TX_MAX_BYTES})`);
+      return this.buildJupiter(original, v, extra, next);
+    }
     if (tip && !parseMessage(message).staticKeys.includes(tip.to)) throw new JupiterRefused('the tip account ended up in a lookup table, where Jito ignores tips');
     const final = resolveMessage(parseMessage(message), tables);
     const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each });
@@ -248,6 +259,7 @@ export class SolanaChain implements ChainPort {
       message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...body.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
       gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each });
     }
+    if (1 + 64 + message.length > TX_MAX_BYTES) throw new JupiterRefused(`the transaction is ${1 + 64 + message.length} bytes, over the ${TX_MAX_BYTES}-byte limit`);
     return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
   }
 

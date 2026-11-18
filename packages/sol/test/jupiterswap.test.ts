@@ -133,3 +133,16 @@ test('chain: with no program allowlist from Jupiter we refuse rather than guess'
   const { c } = world(); (c as any).cfg.jupiter.fetchFn = (async (u: string) => ({ ok: true, status: 200, json: async () => (String(u).includes('program-id-to-label') ? { x: 'y' } : {}) })) as any;
   const r = await c.simulate(tx()); assert.equal(r.receipt.status, 'reverted'); assert.match(r.receipt.reason!, /too few programs/);
 });
+
+test('chain: a route too large for one transaction is asked for again with fewer accounts (48, 36, 28), and refused when none fits', async () => {
+  // a route whose swap instruction carries 700 bytes of data pushes the signed transaction past 1,232 bytes; with maxAccounts set, Jupiter "answers" with a small one
+  const wire = (ix: JIx) => ({ programId: ix.programId, data: Buffer.from(ix.data).toString('base64'), accounts: ix.accounts });
+  const big = (url: string) => !/maxAccounts=(36|28)/.test(url);
+  const w = world({ jup: url => { const b = world().build(); const r = route(); return { ...b, swapInstruction: wire({ ...r, data: new Uint8Array(big(url) ? 700 : 20) }) }; } });
+  const p = await w.c.prepare(tx({}));
+  const builds = w.fetched.filter(u => u.includes('/build'));
+  assert.ok(builds.some(u => !u.includes('maxAccounts')) && builds.some(u => u.includes('maxAccounts=48')) && builds.some(u => u.includes('maxAccounts=36')), builds.map(u => u.match(/maxAccounts=\d+/)?.[0] ?? 'default').join(' > '));
+  assert.ok(Buffer.from(p.raw, 'base64').length <= 1232, 'the signed transaction fits');
+  const never = world({ jup: () => { const b = world().build(); return { ...b, swapInstruction: wire({ ...route(), data: new Uint8Array(700) }) }; } });
+  await assert.rejects(never.c.prepare(tx({})), /every Jupiter route for this trade is too large/);
+});

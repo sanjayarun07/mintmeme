@@ -32,7 +32,10 @@ export class History {
   private timer?: ReturnType<typeof setInterval>; private flushing = false;
   stats = { written: 0, dropped: 0, errors: 0, lastError: '' as string, lastFlushAt: 0, buffered: 0 };
   constructor(url: string, private o: { flushMs?: number; maxBuffer?: number; log?: (m: string) => void } = {}) { this.pg = new PgClient(url); }
-  async start() { for (const s of SCHEMA) await this.pg.query(s); this.timer = setInterval(() => { void this.flush(); }, this.o.flushMs ?? 1000); this.timer.unref?.(); }
+  /** Create the tables. Nodes starting together take turns (an advisory lock): Postgres does not make concurrent "create table if not exists" safe. */
+  async start() {
+    await this.pg.query('select pg_advisory_lock(7140701)');
+    try { for (const s of SCHEMA) await this.pg.query(s); } finally { await this.pg.query('select pg_advisory_unlock(7140701)'); } this.timer = setInterval(() => { void this.flush(); }, this.o.flushMs ?? 1000); this.timer.unref?.(); }
   async stop() { clearInterval(this.timer); await this.flush(); await this.pg.close(); }
   /** Stop at once without writing what is buffered (what a crashed node looks like). */
   abort() { clearInterval(this.timer); void this.pg.close(); }

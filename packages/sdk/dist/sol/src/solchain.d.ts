@@ -63,6 +63,8 @@ export interface SolChainConfig {
     /** How signed transactions are sent (default: the node's sendTransaction). A tip-paying submitter such as Jito adds its tip instruction to curve and Raydium transactions; Jupiter-built transactions are sent through the plain node instead (their instruction list is Jupiter's). */
     submitter?: TxSubmitter;
 }
+/** Solana's limit on a signed transaction, and how a too-large Jupiter route is retried with fewer accounts. */
+export declare const TX_MAX_BYTES = 1232;
 export declare class SolanaChain implements ChainPort {
     private rpc;
     private signer;
@@ -122,6 +124,7 @@ export declare class SolanaChain implements ChainPort {
     private jupVenue;
     private accountsAt;
     /** Ask Jupiter for the route, compile it ourselves, run the safety gate on the exact bytes to be signed, then SIMULATE and check the wallet's balances. Throws JupiterRefused to stop. */
+    /** `maxAccounts`: set when a route came out too large for one transaction and Jupiter is asked again for a simpler one (see the size check below). */
     private buildJupiter;
     simulate(tx: SimTx): Promise<{
         block: number;
