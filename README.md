@@ -6,7 +6,8 @@ Original code. Node 22.18+, no npm dependencies (Node runs the TypeScript direct
 full web terminal, markets, indexer, more fork harnesses) is preserved in git tag `v0.1.0-full-platform`.
 
 > **Read before using real money.** The SDK and the server have been verified on a simulated chain, local forks and local validators. Real-funds use so far is small
-> Solana mainnet trades (through the `/solana` test UI and the execution server) and one small Base buy through the execution server. Nothing has run on Ethereum mainnet. Limits and what is not done: [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
+> Solana mainnet trades (through the `/solana` test UI and the execution server, including one tokenized-stock buy, SPYx) and two small Base buys through the execution
+> server (KEYCAT on Uniswap V2, NVDAc through Relay). Nothing has run on Ethereum mainnet. Limits and what is not done: [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
 
 ## Contents
 
@@ -15,7 +16,7 @@ full web terminal, markets, indexer, more fork harnesses) is preserved in git ta
 | **SDK** | `packages/core`, `packages/sol`, `packages/evm`, `packages/sdk` | Execution engine + `Trader` + `MemeClient`. Solana (Jupiter, pump.fun, Raydium; tokenized stocks), Base and Ethereum (Uniswap V2). Real accounts signed by the user's own Privy wallet. | [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) |
 | **HTTP API** | `apps/api` | Every `Trader` method over HTTP/JSON with API keys, per-user isolation, rate limits, OpenAPI, live events. | [`docs/HTTP_API.md`](docs/HTTP_API.md) (integration guide), [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §8 |
 | **Execution server** | `apps/server`, `deploy/server` | Identical nodes on one Redis: per-user ownership, forwarding, failover, health and metrics, Docker. Serves the API and `/console`. | [`docs/PRODUCTION_SERVER.md`](docs/PRODUCTION_SERVER.md) |
-| **RFQ Desk** | `apps/rfq` | Read-only desk for JupiterZ market-maker quotes on tokenized stocks: a firm quote with expiry, the decoded transaction and the gate's checks, a size ladder against normal routes. Never signs or sends (`npm run rfq`). | [`docs/JUPITERZ.md`](docs/JUPITERZ.md) |
+| **RFQ Desk** | `apps/rfq` | Desk for JupiterZ market-maker quotes on tokenized stocks: a firm quote with expiry, the decoded transaction and the gate's checks, a size ladder against normal routes (`npm run rfq`). Read-only until you connect a wallet; then it can send a quote your wallet signed, if the gate, the simulation and the share-price check pass, up to `RFQ_DESK_MAX_USD` ($1,500 by default). The desk itself never signs. | [`docs/JUPITERZ.md`](docs/JUPITERZ.md) |
 | **Solana test UI** | `apps/web`, `apps/privy` | `/solana`: sign in with your wallet (Wallet Standard or Privy), market and standing orders, trading key, holdings, history, kill switch. Mainnet, real funds. | [`docs/SOLANA_MAINNET_TEST_CHECKLIST.md`](docs/SOLANA_MAINNET_TEST_CHECKLIST.md) |
 
 ## Setup
@@ -36,6 +37,9 @@ npm test                    # unit, HTTP and cluster tests (cluster tests need a
 | `REDIS_URL`, `NODE_PUBLIC_URL`, `API_KEYS_FILE` | execution server (`npm run server`) | See the server section. |
 | `PRIVY_APP_SECRET`, `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`, `PRIVY_SOLANA_POLICY_ID` | delegated signing: `/solana` automatic trading and `MODE=solana-mainnet` | Secrets: `.env` only. Steps in the custody section's setup checklist. |
 | `PRIVY_BASE_POLICY_ID`, `BASE_RPC_URL` | `MODE=base-mainnet` | The Base policy (custody section → Base policy rules). `BASE_RPC_URL` defaults to Alchemy with `ALCHEMY_API_KEY` (enable Base on the Alchemy app). |
+| `CHAINS` | execution server: several chains on one server | `solana,base,bnb,robinhood` (default first). Each chain needs its own settings (rows above and below). |
+| `PRIVY_BNB_POLICY_ID`, `BNB_RPC_URL`, `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_RPC_URL` | `bnb` / `robinhood` in `CHAINS` | Each chain's Privy policy (Base policy rules with that chain's V2 router and chain id). The RPCs default to Alchemy with `ALCHEMY_API_KEY` (enable BNB and Robinhood on the key). |
+| `BASE_AGGREGATOR`, `KYBER_CLIENT_ID` | Base: which aggregator routes tokens with no usable Uniswap V2 pool | `relay` (default) or `kyberswap`. KyberSwap needs no key; `KYBER_CLIENT_ID` is sent as its `x-client-id` (default `memedesk`). The Privy Base policy must allow the chosen aggregator (custody section → Base policy rules). |
 | `JUPITER_API_KEY`, `RELAY_API_KEY` | Jupiter (Solana routes, quotes, prices, JupiterZ, the RFQ Desk) and Relay (Base) | Optional but recommended: without them each service holds you to its keyless rate limit. Get them from Jupiter's and Relay's developer portals. |
 | `STOCKS_ENABLED` | buying tokenized stocks through `MODE=solana-mainnet` | Off by default. No issuer offers them to US persons: set `1` only behind your own eligibility checks. [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §4.9, [`docs/XSTOCKS.md`](docs/XSTOCKS.md). |
 
@@ -88,7 +92,10 @@ REDIS_URL=redis://127.0.0.1:6379 REDIS_REQUIRE_AOF=false API_KEYS_FILE=keys.txt 
 - **Measured** (3 nodes, one machine, local Redis): about 33 000–39 000 reads/s with p99 under 7 ms; 700–1 060 market buys/s; 3 000 standing orders watched with
   event-loop p99 under 4 ms; failover 1 s after a graceful stop, 15 s (the lease TTL) after a crash, for 200 users at once. Up to 300 users per node measured (the default cap).
   Details: [`docs/PRODUCTION_SERVER.md`](docs/PRODUCTION_SERVER.md).
-- **Practice only:** nodes build practice accounts (simulated chain, fake funds). Real-chain accounts follow the custody plan below.
+- **Chains:** `MODE=practice` (default, fake funds), `solana-mainnet` or `base-mainnet`, or several real chains at once with `CHAINS=solana,base,bnb,robinhood`: one
+  node group and one API key for all of them. Requests name the chain with `/v1/<chain>/...` (`/v1/base/trades/buy`); paths without a chain go to the first one listed,
+  so single-chain clients keep working. Each chain has its own wallet link, Privy policy, caps and state. `GET /v1/chains` lists them; `MemeClient({ ..., chain: 'bnb' })`
+  or `client.forChain('bnb')`. Real-chain accounts follow the custody plan below. Details: [`docs/PRODUCTION_SERVER.md`](docs/PRODUCTION_SERVER.md) → Several chains.
 
 ## Use the Solana test UI (real funds)
 
@@ -115,8 +122,9 @@ The server needs a signer for each user before it can trade real funds. Chosen d
 
 | Chain | Approach | How it works | Status |
 |---|---|---|---|
-| **Solana** | **Privy delegated signing** (option B) | The user's Privy wallet grants the app a limited, revocable permission ("session signer") with a policy: max per trade, allowed programs (Jupiter, pump.fun), expiry. The server asks Privy to sign within that policy; it never holds the key. Standing orders fire unattended. Replaces the trading key. | **Planned.** Not built yet. |
-| **Ethereum / EVM** | **ERC-4337 smart account with session keys** (option C) | The user owns a smart account; it grants the server a session key limited on chain (allowed contracts such as the Uniswap V2 router, token and amount limits, expiry). Even a stolen session key cannot exceed those on-chain limits. | **Planned.** Not built yet. |
+| **Solana** | **Privy delegated signing** (option B) | The user's Privy wallet grants the app a limited, revocable permission ("session signer") with a policy: max per trade, allowed programs (Jupiter, pump.fun), expiry. The server asks Privy to sign within that policy; it never holds the key. Standing orders fire unattended. Replaces the trading key. | **Built**, used on mainnet (`/solana` automatic trading, `MODE=solana-mainnet`). |
+| **Base (EVM)** | **Privy delegated signing**, the same way | The user's Privy Ethereum wallet adds the same server signer with the Base policy (`memedesk-base`: Uniswap V2 router, Relay's router and approval proxy, ETH caps). The server asks Privy for `eth_signTransaction`, checks every field of what comes back and recovers the signer before sending. | **Built**, used on mainnet (`MODE=base-mainnet`). BNB Chain and Robinhood Chain: not built. |
+| **Ethereum / EVM** | **ERC-4337 smart account with session keys** (option C) | The user owns a smart account; it grants the server a session key limited on chain (allowed contracts such as the Uniswap V2 router, token and amount limits, expiry). Even a stolen session key cannot exceed those on-chain limits. | **Not built.** An alternative to the Privy route above. |
 
 One Privy app serves both chains: each user can have a Privy wallet on Solana and on Ethereum, one server **authorization key** is added as the signer on both, and
 each chain gets its own **policy** (the dashboard's Policies list has a "Chain type" column). Privy also has its own ERC-4337 **smart wallets** (Wallet infrastructure →
@@ -133,7 +141,7 @@ Advanced → Smart wallets), which may cover option C without a separate provide
 | 3 | App settings → Basics → **API keys** | Copy the app secret. Optional: Basics → Advanced → **IP allowlist** with your servers' addresses, so only they can use it. | `PRIVY_APP_SECRET` |
 | 4 | App settings → Basics → **Domains and clients** | Add the UI addresses to the allowed origins: `http://localhost:3000`, `http://127.0.0.1:3500`, and your production URL. | – |
 | 5 | Wallet infrastructure → **Policies** → **New policy**: name `memedesk-solana`, chain type **SVM (Solana)**, owner empty → **Next: Create rule**. Add the three rules in the "Solana policy rules" table below, then **Create policy** and copy its ID. | Privy checks every top-level instruction of a transaction; each must be allowed, and any matching DENY wins. | `PRIVY_SOLANA_POLICY_ID` |
-| 6 | Policies → New policy: name `memedesk-base`, chain type **Ethereum**, owner empty. Add the two rules in the "Base policy rules" table below, then copy its ID. Only for `MODE=base-mainnet`. | The server signer may then sign only Uniswap V2 swaps on Base (chain 8453) up to 0.01 ETH, and approvals for that router. | `PRIVY_BASE_POLICY_ID` |
+| 6 | Policies → New policy: name `memedesk-base`, chain type **Ethereum**, owner empty. Add the seven rules in the "Base policy rules" table below, then copy its ID. Only for `MODE=base-mainnet`. | The server signer may then sign only Uniswap V2, Relay and KyberSwap swaps on Base (chain 8453), buys up to 0.01 ETH, and exact approvals for those contracts. | `PRIVY_BASE_POLICY_ID` |
 | 7 | top bar: **Upgrade to production** | Only when you go live with other users' funds. Development mode is fine for testing. | – |
 
 **Solana policy rules (step 5).** Use the same method on all three rules: **`signTransaction`**. The server has Privy sign and then sends the transaction itself, so a rule for any other method (such as `signAndSendTransaction`) never applies, and Privy denies every trade. "Allow automatic trading" checks this and says so.
@@ -171,16 +179,19 @@ Current state of this app (checked 2026-11-17; policy read again 2026-11-18): TE
 |---|---|---|
 | `uniswap-v2-swaps` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `to` eq `0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24`; Ethereum transaction → `value` lte `10000000000000000` (0.01 ETH in wei) | ALLOW |
 | `approve-router` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `value` eq `0`; Ethereum calldata → `approve.spender` eq `0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24`, with this ABI: `[{"type":"function","name":"approve","stateMutability":"nonpayable","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"name":"","type":"bool"}]}]` | ALLOW |
-
 | `relay-buys` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `to` eq `0x0729e2a4716d9f7dd17858d5d504426d228697f7`; Ethereum transaction → `value` lte `10000000000000000` (0.01 ETH in wei) | ALLOW |
 | `relay-sells` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `to` eq `0x5567954cd026cebfe486062cb75848e0f1c12e58`; Ethereum transaction → `value` eq `0` | ALLOW |
 | `approve-relay` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `value` eq `0`; Ethereum calldata → `approve.spender` eq `0x5567954cd026cebfe486062cb75848e0f1c12e58`, with the same `approve` ABI as `approve-router` | ALLOW |
+| `kyberswap-swaps` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `to` eq `0x6131b5fae19ea4f9d964eac0408e4408b66337b5`; Ethereum transaction → `value` lte `10000000000000000` (0.01 ETH in wei) | ALLOW |
+| `approve-kyberswap` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `value` eq `0`; Ethereum calldata → `approve.spender` eq `0x6131b5fae19ea4f9d964eac0408e4408b66337b5`, with the same `approve` ABI as `approve-router` | ALLOW |
 
 The three Relay rules (`relay-buys`, `relay-sells`, `approve-relay`) are for tokens with no Uniswap V2 pool, such as Coinbase's stock tokens, which the server routes through Relay (`packages/evm/src/relay.ts`):
 - **Buys** call Relay's router `0x0729e2a4…97f7`, sending the ETH as value.
 - **Sells** approve Relay's approval proxy `0x5567954c…2e58` for exactly the amount sold, then call the proxy with no value.
 
 Both addresses are Relay's v3.2 contracts for Base, as Relay's own `GET https://api.relay.link/chains` lists them. Every Relay transaction is also gated and simulated by the server before it asks Privy to sign. Without these rules, Privy refuses Relay trades and nothing is sent; `BASE_RELAY=off` stops the server asking.
+
+The two KyberSwap rules (`kyberswap-swaps`, `approve-kyberswap`) are for a server that routes those same tokens through **KyberSwap instead of Relay** (`BASE_AGGREGATOR=kyberswap`, `packages/evm/src/kyber.ts`). Buys and sells both call KyberSwap's router `MetaAggregationRouterV2` `0x6131b5fa…37b5` (18,312 bytes of code on Base): a buy sends the ETH as value, a sell first approves the router for exactly the amount sold. Before Privy is asked, the server decodes the router call and refuses anything but our pair, the exact input, our wallet as the receiver, no fee receivers and an on-chain minimum at least ours, then simulates it. Added to `memedesk-base` on 2026-11-18 (user-approved); the policy now has seven rules.
 
 The address in the first two rules is the Uniswap V2 Router02 on Base, read back on chain: its `factory()` is `0x8909dc15e40173ff4699343b6eb8132c65e18ec6` and its `WETH()` is `0x4200000000000000000000000000000000000006`. Anything else, including a plain ETH or token transfer, matches no rule and is denied. Selling needs the second rule: a sell first approves the router for exactly the amount sold. Not allowed, and therefore not available on Base: cancelling a pending transaction by replacement, which sends 0 ETH to the wallet itself.
 
@@ -193,14 +204,15 @@ The address in the first two rules is the Uniswap V2 Router02 on Base, read back
 The server checks every transaction Privy signs, field by field, against what it built, and recovers who signed it (`packages/sdk/src/base.ts`, `PrivyEvmSigner`). Caps: 0.01 ETH per buy and 0.05 ETH per day by default (`BASE_MAX_TRADE_ETH`, `BASE_DAILY_CAP_ETH`).
 
 Limits:
-- Only Uniswap V2 pools against WETH. Most Base memecoins trade mainly on Uniswap V3/V4 or Aerodrome, and those are not supported yet. A token without a V2 pool is refused with `no_route`.
+- Uniswap V2 pools against WETH directly. A token with no V2 pool, or only a thin one (most Base memecoins and Coinbase's stock tokens, on Uniswap V3/V4 or Aerodrome), goes through an aggregator instead: Relay by default, or KyberSwap with `BASE_AGGREGATOR=kyberswap`. Each aggregator transaction is gated (Relay: its pinned contracts and the reviewed inner swap contracts; KyberSwap: its pinned router and the decoded swap), then simulated with `eth_simulateV1`. A token with neither is refused with `no_route`.
+- A Relay sell's ETH is read from the wallet's balance change in its block. If the wallet's other transactions in that block are anything but approvals or self-sends, the trade waits instead of guessing.
 - No token safety check and no fee sharing on Base yet.
 - Base has no public mempool, so there is no MEV setting.
 
 Mainnet, 2026-11-18 (user-approved): a 0.0002 ETH KEYCAT buy through the execution server (`MODE=base-mainnet`) from the user's Privy embedded wallet, signed by real Privy under the `memedesk-base` policy and checked by `PrivyEvmSigner`, finalized as tx `0x431b6ace637580d2f7e054c1759036dce6b1b7cae482f657df41a6d5d96ca8d7` (Uniswap V2 router, 973.33 KEYCAT received, exactly as quoted; network fee 0.00000067 ETH).
 Then a 0.0005 ETH buy of NVDAc (Coinbase's tokenized NVIDIA) through **Relay** (`relay-buys` rule), gated and simulated before Privy signed, finalized as tx `0xce60b81b3d332a4620e5faa22833e918018c5625ed10c6b523aab8b249f857ea` (0.00561127 NVDAc received, 0.03% under the quote and above the minimum; fees about 0.000002 ETH). The first attempt was refused before signing because Relay's on-chain minimum came back 0.008% under ours; the server now asks Relay once more with tighter slippage in that case.
 
-Tested: `packages/sdk/test/base.test.ts`, and `npm run verify:server-base` (13 checks on a local Base fork with a Privy stand-in, buying and selling KEYCAT).
+Tested: `packages/sdk/test/base.test.ts`, `packages/sdk/test/baserelay.test.ts`, `packages/evm/test/relay.test.ts`, `packages/evm/test/kyber.test.ts` (real KyberSwap builds recorded on Base, and tampered copies), and `npm run verify:server-base` (15 checks on a local Base fork with a Privy stand-in: buying and selling KEYCAT on Uniswap V2, and ZORA through Relay; with `BASE_AGGREGATOR=kyberswap`, ZORA through KyberSwap: 15 of 15 on 2026-11-18).
 
 **B. EVM via ERC-4337, if not using Privy smart wallets:** choose the smart-account implementation (for example ZeroDev Kernel, Safe with ERC-7579 modules,
 Biconomy Nexus or Alchemy Account Kit), a bundler and paymaster provider (for example Pimlico, ZeroDev, Alchemy or Biconomy; their API key goes into `.env` as
@@ -211,17 +223,21 @@ Account, factory and entry-point addresses come from the providers' official pag
 - `/solana` automatic trading: **done** (above). It also resumes by itself after a server restart, once Privy confirms the wallet still allows it.
 - Execution server: `MODE=solana-mainnet`: **built**. Each API user links their Privy wallet (`/v1/wallet/link/*`) and the owner node signs through Privy (docs/PRODUCTION_SERVER.md, docs/SDK_AND_API.md 4.5). Run on a local validator with two nodes, and one small mainnet buy through the API (tx `3zMawg…`).
 
-Real funds so far: the `/solana` UI (wallet sign-in, Privy automatic trading, the capped trading key) on mainnet; the execution server's real mode on a local validator.
+- Execution server: `MODE=base-mainnet`: **built** (above), with two small mainnet buys.
+- Tokenized stocks on Solana through the execution server (`STOCKS_ENABLED=1`): **built**. Mainnet, 2026-11-18 (user-approved): a 0.01 SOL SPYx buy, signed by Privy under the Solana policy, finalized as tx `1FzsV6SULRiZEU9iEmoTznR5Yo2hmspqCkGHKWRGLgwqhWgypjf9a3QXZHEsm7HykuNvacPD5WTNSdCYWH7pVGx` (0.00100322 SPYx received; network fee 0.000016513 SOL). The route also opened two in-between token accounts (USDC and one other token) and left them empty; they were closed afterwards and their rent returned. The engine now closes such accounts inside the same trade.
+
+Real funds so far: the `/solana` UI (wallet sign-in, Privy automatic trading, the capped trading key) and the execution server on Solana mainnet (memecoins and one stock), and the execution server on Base mainnet.
 
 ## Test and verify
 
 | Command | What it checks | Needs |
 |---|---|---|
 | `npm run setup:check` | Which parts are configured: `.env` keys (values never printed), Redis and its AOF, Privy bundle, Privy signing keys and policies, test tools | – |
-| `npm test` | Unit, HTTP, cluster and server tests (379) | Redis for the cluster tests |
+| `npm test` | Unit, HTTP, cluster and server tests (479; the Postgres one is skipped without `PG_TEST_URL`) | Redis for the cluster tests |
 | `npm run verify:sol-guard` | The `/solana` back end on a local Solana validator, fake SOL: limits, kill switch, wallet sign-in and signing, orders, TWAP, trading key fund, use and return, Privy automatic trading with a Privy stand-in (62 checks) | `solana-test-validator`, `ALCHEMY_API_KEY` |
 | `npm run verify:server-sol` | The execution server in `MODE=solana-mainnet`: two nodes, local Redis, a local Solana validator and a Privy stand-in: linking, a forwarded buy and a sell in plain units, idempotency, caps, an order surviving an owner crash, revocation, priority fee on the transaction, MEV protection per account and per trade through a stand-in Jito block engine, token safety, fee sharing on a buy and a sell (15 checks; with `PG_TEST_URL` also the stored trade history, 16) | `solana-test-validator`, Redis, `ALCHEMY_API_KEY` |
-| `npm run verify:server-base` | The execution server in `MODE=base-mainnet` on a local anvil fork of Base, with a Privy stand-in: linking by `personal_sign` (and refusing another key's signature), a KEYCAT buy and a 100% sell with its exact approval, the ETH cap, a Privy answer that changes the transaction or comes from another key (refused, nothing sent), a removed signer, a token with no V2 pool (13 checks) | anvil, Redis, `ALCHEMY_API_KEY` with Base enabled (or `BASE_RPC_URL`) |
+| `npm run verify:server-base` | The execution server in `MODE=base-mainnet` on a local anvil fork of Base, with a Privy stand-in: linking by `personal_sign` (and refusing another key's signature), a KEYCAT buy and a 100% sell with its exact approval, the ETH cap, a Privy answer that changes the transaction or comes from another key (refused, nothing sent), a removed signer, a ZORA buy and 100% sell through Relay (router, then approval proxy), a token with neither a V2 pool nor a Relay route (15 checks). `BASE_AGGREGATOR=kyberswap` runs the same checks through KyberSwap's router | anvil, Redis, `ALCHEMY_API_KEY` with Base enabled (or `BASE_RPC_URL`) |
+| `npm run verify:server-multi` | One execution server with `CHAINS=solana,base,bnb,robinhood`: two nodes, one API key, a local Solana validator and anvil forks of Base, BNB and Robinhood Chain, Privy stand-ins: a wallet linked per chain, a buy on every chain through the non-owner node, the BNB quote equal to PancakeSwap's router, per-chain caps, failover with all four wallets, sells on the new owner | `ALCHEMY_API_KEY` (Base, BNB, Robinhood enabled), anvil, `solana-test-validator`, Redis |
 | `npm run verify:server-copy` | Copy trading on the execution server in `MODE=solana-mainnet`: two nodes, a local Solana validator, a Privy stand-in and a leader wallet: a copied buy and the leader's sell followed, checks before copied buys, caps, a node crash with the copy config restored and nothing copied twice, delete (11 checks) | `solana-test-validator`, Redis, `ALCHEMY_API_KEY` |
 | `npm run test:pg` | `npm test` plus the Postgres trade-history test (`apps/server/records.test.ts`), which drops and recreates its tables in `PG_TEST_URL`. Default: the `memedesk_test` database of a local Postgres container started with `docker run -d --name memedesk-pg -e POSTGRES_USER=memedesk -e POSTGRES_PASSWORD=memedesk-local-pw -e POSTGRES_DB=memedesk -p 127.0.0.1:55433:5432 -v memedesk-pg-data:/var/lib/postgresql/data postgres:16-alpine` and `docker exec memedesk-pg psql -U memedesk -c "create database memedesk_test"`. Never point it at a database you keep | Docker |
 | `npm run verify:evm` | The SDK `Trader` and HTTP API on a local Ethereum mainnet fork, real Uniswap V2 WETH/USDC pool, fake ETH: market buy and sell with approval, orders, bulk, TWAP, restart | `anvil`, `ALCHEMY_API_KEY` |
@@ -234,17 +250,18 @@ Reports from the fork and load runs are written to `docs/live-verification/`.
 
 ```
 packages/core     engine, order manager, runners (bulk, TWAP, snipe, copy), policy signer, Redis client, state backends
-packages/sol      Solana: chain port, Raydium, Jupiter swap, pump.fun, signers (dev, remote), search, mint checks
-packages/evm      EVM: JSON-RPC chain port, Uniswap V2 math and calldata, approvals, HTTP signer hook
+packages/sol      Solana: chain port, Raydium, Jupiter swap, JupiterZ (RFQ), pump.fun, tokenized stocks, signers (dev, remote, Privy), search, mint checks
+packages/evm      EVM: JSON-RPC chain port, Uniswap V2 math and calldata, Relay routes and their gate, approvals, secp256k1 signer recovery, HTTP signer hook
 packages/sdk      Trader, MemeClient, wire helpers, practice world; dist/ and the .tgz are the built package
 packages/live     fork-test harnesses kept: /solana (solguardfork), SDK on Ethereum (traderfork), and their helpers
 apps/api          HTTP API over the Trader
-apps/server       execution node: leases, forwarding, console, key tool, load test
+apps/server       execution node: leases, forwarding, console, key tool, load test; real accounts on Solana (solaccount) and Base (baseaccount)
+apps/rfq          RFQ Desk: JupiterZ quotes, the gate's view of them, and wallet-signed execution under a cap
 apps/web          /solana test UI: server, back end (solmainnet), guards, page scripts
 apps/privy        Privy login bundle (React, built separately)
 deploy/server     Dockerfile, docker-compose (Redis + 3 nodes + nginx), nginx.conf
-scripts           setup-check (what is configured and what is missing)
-docs              SDK and API guide, production server, known limitations, Solana test checklist, verification reports
+scripts           setup-check (what is configured and what is missing), privy-policy (read or extend a Privy policy)
+docs              SDK and API guide, HTTP API integration guide, production server, JupiterZ, tokenized stocks, known limitations, Solana test checklist, verification reports
 ```
 
 ## Safety rules this code follows

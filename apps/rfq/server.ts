@@ -1,4 +1,4 @@
-/** RFQ Desk: a standalone, READ-ONLY desk for JupiterZ market-maker quotes on Solana (docs/JUPITERZ.md).
+/** RFQ Desk: a standalone desk for JupiterZ market-maker quotes on Solana. Read-only until a wallet connects (docs/JUPITERZ.md).
  *  It asks Jupiter for a firm RFQ quote, the best other route and our own /build route; decodes the RFQ transaction; runs the same gate the engine runs before a wallet
  *  signs (packages/sol/src/jupiterz.ts gateRfq); simulates it against mainnet without signatures; and shows the engine's decision. The desk itself never signs.
  *  TRADING (optional): a browser wallet the user connects signs its own slot of a quote built for it; POST /api/execute forwards it to Jupiter /execute ONLY if the
@@ -13,6 +13,10 @@ import { fetchRfqOrder, gateRfq, decodeFill, splitWire, executeRfq, JUPITERZ } f
 import { verifySignature } from '../../packages/sol/src/signer.ts';
 import { base58 } from '../../packages/sol/src/tx.ts';
 import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
+import { RelayClient } from '../../packages/evm/src/relay.ts';
+import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
+import { EvmJsonRpc, baseEthUsd } from '../../packages/sdk/src/base.ts';
+import { NATIVE } from '../../packages/core/src/index.ts';
 
 const WSOL = 'So11111111111111111111111111111111111111112', USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 /** Quotes are asked for a wallet that holds enough SOL for the size (a public exchange wallet). Nothing is signed for it. */
@@ -171,6 +175,11 @@ async function quote(body: any, emit: (o: unknown) => void) {
     let x: Awaited<ReturnType<typeof xray>>;
     try { x = await xray(rfq.tx, { wallet: taker, maker: rfq.maker, inMint: payMint, outMint: mint, amountIn: amount, minOut }); }
     catch (e) { emit({ stage: 'decision', useRfq: false, reasons: [{ ok: false, text: `The transaction could not be checked (the node did not answer: ${(e as Error).message}), so it would not be signed` }] }); emit({ stage: 'done' }); return; }
+    // Jupiter's gasless mode: when the wallet cannot pay the rent of its new token account, Jupiter adds its own payer as a third signer to fund it. The gate still
+    // refuses any signer but the maker and the wallet; this only says why, in terms of what the wallet holds (mainnet 2026-11-18: 30 SOL asked of a wallet with 0.03 SOL)
+    const gasPayer = x.verdict.ok ? undefined : x.signers.find(s => s.who === 'Unknown' && x.instructions.some(i => i.program === PROGRAMS.ata && i.accounts[0]?.key === s.key))?.key;
+    const gasNote = gasPayer ? `Jupiter added its own payer (${short(gasPayer)}) to fund your new ${sym(mint)} account, which it does when the wallet cannot pay for it. The wallet holds ${heldTxt}${payMint === WSOL ? '' : ` and ${(Number(lamports) / 1e9).toLocaleString('en-US', { maximumFractionDigits: 4 })} SOL`}; this trade needs ${amt(amount, payMint)}. Only the maker and your wallet may sign, so this quote is refused: try a size the wallet can pay.` : undefined;
+    if (gasNote) x.verdict.reason = `${x.verdict.reason}. ${gasNote}`;
     emit({ stage: 'xray', ...x });
     const sim = await simulate(rfq.tx, taker, payMint, mint).catch(e => ({ ok: false, error: (e as Error).message, log: [] as string[] }));
     emit({ stage: 'sim', ...sim });
@@ -195,10 +204,92 @@ async function quote(body: any, emit: (o: unknown) => void) {
       const summary = `Pay ${(Number(amount) / 10 ** payDec).toLocaleString('en-US', { maximumFractionDigits: payDec === 9 ? 4 : 2 })} ${paySym}, receive ${(Number(rfq.outAmount) / 10 ** outDec).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${outSym} from maker ${rfq.maker.slice(0, 4)}…${rfq.maker.slice(-4)}`;
       if (tradable) { prune(); PENDING.set(rfq.requestId, { message: Uint8Array.from(rfq.message), wallet: taker, expireAt: rfq.expireAt, usd, summary }); }
       emit({ stage: 'trade', tradable, summary, requestId: rfq.requestId, expireAt: rfq.expireAt, transaction: tradable ? Buffer.from(rfq.tx).toString('base64') : undefined,
-        why: tradable ? undefined : !x.verdict.ok ? 'The gate refused this transaction' : sim.ok !== true ? 'The simulation did not pass' : !priceOk ? `The fill fails the share-price check (${sh!.why})` : `This desk executes at most $${MAX_USD.toLocaleString('en-US')} per trade (RFQ_DESK_MAX_USD)` });
+        why: tradable ? undefined : !x.verdict.ok ? (gasNote ? `The gate refused this transaction. ${gasNote}` : 'The gate refused this transaction') : sim.ok !== true ? 'The simulation did not pass' : !priceOk ? `The fill fails the share-price check (${sh!.why})` : `This desk executes at most $${MAX_USD.toLocaleString('en-US')} per trade (RFQ_DESK_MAX_USD)` });
     }
   } else emit({ stage: 'decision', useRfq: false, reasons: [{ ok: false, text: `No RFQ quote: ${rfq.none}` }] });
+  // after the decision, so these extra quotes never eat into the firm quote's short life
+  const vs = await venueQuotes(payMint, mint, amount).catch(() => []);
+  if (vs.length) emit({ stage: 'venues', venues: vs.map(v => ('out' in v && v.out ? { ...v, share: share(BigInt(v.out)) } : v)) });
   emit({ stage: 'done' });
+}
+
+/** More venues for the Routes table, quote-only (no taker, nothing to sign): each of Jupiter's /order routers on its own, and Jupiter's quote restricted to one DEX at a
+ *  time. They are prices to compare against, not routes this desk or the engine can trade. Labels as Jupiter's GET /swap/v1/program-id-to-label lists them (checked 2026-11-18). */
+const ROUTERS = [{ id: 'metis', name: 'Metis' }, { id: 'okx', name: 'OKX' }, { id: 'dflow', name: 'DFlow' }];
+// kept to four: with Kipseli, BisonFi and Manifest as well, one request made more Jupiter calls than the key allows per second and those three came back 429 (2026-11-18)
+const DEXES = ['Whirlpool', 'Raydium CLMM', 'Meteora DLMM', 'HumidiFi'];
+async function venueQuotes(inputMint: string, outputMint: string, amount: bigint) {
+  const hdr = API_KEY ? { 'x-api-key': API_KEY } : {}, all = [...ROUTERS.map(r => r.id), 'jupiterz'];
+  // paced like every Jupiter call here; a 429 (the key's per-second limit, hit when ten quotes go out together) is asked again after a pause, twice at most
+  const get = async (u: string) => { for (let a = 0; ; a++) { const x = await jup(async () => { const r = await fetch(u, { headers: hdr, signal: AbortSignal.timeout(15_000) }); return { status: r.status, j: (await r.json().catch(() => ({}))) as any }; });
+    if (x.status !== 429 || a >= 2) return x; await new Promise(r => setTimeout(r, 1200 * (a + 1))); } };
+  const viaRouter = ROUTERS.map(async r => {
+    const { status, j } = await get(`https://api.jup.ag/swap/v2/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&excludeRouters=${all.filter(x => x !== r.id).join(',')}`);
+    return j?.outAmount && j.router === r.id ? { id: r.id, name: r.name, kind: 'router', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.swapInfo?.label ?? '?')) }
+      : { id: r.id, name: r.name, kind: 'router', none: j?.error ? String(j.error).slice(0, 80) : j?.router ? `answered by ${j.router}` : `no quote (HTTP ${status})` };
+  });
+  const viaDex = DEXES.map(async d => {
+    const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount), slippageBps: '50', dexes: d, restrictIntermediateTokens: 'true' });
+    const { status, j } = await get(`${API_KEY ? 'https://api.jup.ag' : 'https://lite-api.jup.ag'}/swap/v1/quote?${q}`);
+    return j?.outAmount ? { id: 'dex-' + d.toLowerCase().replace(/\W+/g, '-'), name: `${d} only`, kind: 'dex', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.swapInfo?.label ?? '?')) }
+      : { id: 'dex-' + d.toLowerCase().replace(/\W+/g, '-'), name: `${d} only`, kind: 'dex', none: j?.error ? String(j.error).slice(0, 80) : `no route (HTTP ${status})` };
+  });
+  // venues asked directly, not through Jupiter: Raydium's own Trade API (keyless; GET transaction-v1.raydium.io/compute/swap-base-in, answered 2026-11-18).
+  // DFlow's and OKX's own APIs answered 403 and 401 without a key, so they appear only through Jupiter above.
+  const raydium = (async () => {
+    const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount), slippageBps: '50', txVersion: 'V0' });
+    try { const r = await fetch(`https://transaction-v1.raydium.io/compute/swap-base-in?${q}`, { signal: AbortSignal.timeout(15_000) }); const j: any = await r.json().catch(() => ({}));
+      const d = j?.data; return j?.success && d?.outputAmount && d.inputMint === inputMint && d.outputMint === outputMint && String(d.inputAmount) === String(amount)
+        ? { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', out: String(d.outputAmount), labels: [`${(d.routePlan ?? []).length || 1} Raydium pool${(d.routePlan ?? []).length > 1 ? 's' : ''}`] }
+        : { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', none: String(j?.msg ?? `no route (HTTP ${r.status})`).slice(0, 80) }; }
+    catch (e) { return { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', none: (e as Error).message.slice(0, 80) }; }
+  })();
+  // DFlow's own Trading API: GET /order without userPublicKey returns a quote only (inputMint, inAmount, outputMint, outAmount: https://pond.dflow.net/resources/trading-api/order/order).
+  // With DFLOW_API_KEY: the production host and x-api-key; without: the rate-limited developer host (https://pond.dflow.net/get-started/endpoints), which timed out (504) on 2026-11-18.
+  const dflow = (async () => {
+    const k = process.env.DFLOW_API_KEY?.trim(), host = k ? 'https://quote-api.dflow.net' : 'https://dev-quote-api.dflow.net', name = `DFlow (own API${k ? '' : ', developer host'})`;
+    const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount), slippageBps: '50' });
+    try { const r = await fetch(`${host}/order?${q}`, { headers: k ? { 'x-api-key': k } : {}, signal: AbortSignal.timeout(12_000) }); const j: any = await r.json().catch(() => ({}));
+      return r.ok && /^\d+$/.test(String(j?.outAmount ?? '')) && j.inputMint === inputMint && j.outputMint === outputMint && String(j.inAmount) === String(amount)
+        ? { id: 'dflow-api', name, kind: 'direct', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.venue ?? p?.label ?? '?')).slice(0, 6) }
+        : { id: 'dflow-api', name, kind: 'direct', none: String(j?.msg ?? j?.error ?? `no quote (HTTP ${r.status})`).slice(0, 80) }; }
+    catch (e) { return { id: 'dflow-api', name, kind: 'direct', none: (e as Error).name === 'TimeoutError' ? 'no answer within 12 s' : (e as Error).message.slice(0, 80) }; }
+  })();
+  return Promise.all([...viaRouter, ...viaDex, raydium, dflow]);
+}
+
+/* ---------------- Base: Coinbase stocks, price-only comparison of EVM aggregators ---------------- */
+// Read-only quotes for buying a Coinbase stock with ETH on Base. Relay is what the execution server trades through (gated and simulated there); KyberSwap, LI.FI and
+// OpenOcean are price references only. All four answered keyless on 2026-11-18 (docs/XSTOCKS.md, "Aggregators (EVM)"); their answers are checked for the same token
+// and amount before they are shown. Relay and LI.FI need a sender for a quote: a busy public Base wallet is used (nothing is signed or sent).
+const BASE_RPC = process.env.BASE_RPC_URL?.trim() || (process.env.ALCHEMY_API_KEY ? `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : 'https://mainnet.base.org');
+const baseRpc = new EvmJsonRpc(BASE_RPC), ethUsd = baseEthUsd(baseRpc), relay = new RelayClient({ chainId: 8453, apiKey: process.env.RELAY_API_KEY?.trim(), retries429: 1 });
+const BASE_TAKER = '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85', EEE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', ZERO = '0x0000000000000000000000000000000000000000';
+const baseDecimals = new Map<string, number>();
+async function baseQuote(body: any) {
+  const symbol = String(body.symbol ?? ''), token = BASE_STOCKS[symbol]; if (!token) throw new Error(`unknown Base stock ${symbol}`);
+  const eth = Number(body.eth); if (!(eth > 0 && eth <= 1000)) throw new Error('eth must be above 0 and at most 1000');
+  const amount = BigInt(Math.round(eth * 1e9)) * 1_000_000_000n, t = token.toLowerCase();
+  if (!baseDecimals.has(t)) baseDecimals.set(t, Number(BigInt(await baseRpc.call<string>('eth_call', [{ to: token, data: '0x313ce567' }, 'latest']))));
+  const decimals = baseDecimals.get(t)!, usd = await ethUsd().then(x => x?.price ?? null).catch(() => null);
+  const json = async (u: string, init?: RequestInit) => { const r = await fetch(u, { ...init, signal: AbortSignal.timeout(20_000) }); return { status: r.status, j: (await r.json().catch(() => ({}))) as any }; };
+  const row = (name: string, f: () => Promise<{ out: string; path: string }>) => f().then(x => ({ name, ...x }), e => ({ name, none: String((e as Error).message).slice(0, 100) }));
+  const venues = await Promise.all([
+    row('Relay (the server default)', async () => { const q = await relay.quote(BASE_TAKER, NATIVE, t, amount); return { out: String(q.amountOut), path: 'Relay same-chain swap' }; }),
+    row('KyberSwap (BASE_AGGREGATOR=kyberswap)', async () => { const { status, j } = await json(`https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${EEE}&tokenOut=${token}&amountIn=${amount}`, { headers: { 'x-client-id': 'memedesk' } });
+      const r = j?.data?.routeSummary; if (!r || String(r.tokenOut).toLowerCase() !== t || String(r.amountIn) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
+      return { out: String(r.amountOut), path: [...new Set((r.route ?? []).flat().map((x: any) => String(x?.exchange ?? '?')))].join(', ') }; }),
+    row('LI.FI', async () => { const { status, j } = await json(`https://li.quest/v1/quote?fromChain=8453&toChain=8453&fromToken=${ZERO}&toToken=${token}&fromAmount=${amount}&fromAddress=${BASE_TAKER}`);
+      if (!j?.estimate?.toAmount || String(j.action?.toToken?.address).toLowerCase() !== t || String(j.action?.fromAmount) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
+      return { out: String(j.estimate.toAmount), path: (j.includedSteps ?? []).map((s: any) => String(s?.toolDetails?.name ?? s?.tool ?? '?')).join(', ') || String(j.tool ?? '') }; }),
+    row('OpenOcean', async () => { const { status, j } = await json(`https://open-api.openocean.finance/v4/8453/quote?inTokenAddress=${EEE}&outTokenAddress=${token}&amountDecimals=${amount}&gasPriceDecimals=10000000`);
+      const d = j?.data; if (!d?.outAmount || String(d.outToken?.address).toLowerCase() !== t || String(d.inAmount) !== String(amount)) throw new Error(j?.message ?? j?.error ?? `no route (HTTP ${status})`);
+      return { out: String(d.outAmount), path: (d.dexes ?? []).filter((x: any) => x?.swapAmount && x.swapAmount !== '0').map((x: any) => String(x.dexCode)).slice(0, 4).join(', ') }; }),
+  ]);
+  // reference share price: Jupiter's stockData.price for a Solana stock of the same underlying (NVDAc -> NVDA -> NVDAx). One Coinbase token tracked one share on
+  // 2026-11-18 (0.5 ETH of NVDAc came to about $152 per token with NVDA at $151.8), so the per-token price is compared with it directly.
+  const sol = STOCKS.find(s => s.underlying === symbol.replace(/c$/, '')), refUsd = sol ? (await prices.get([sol.mint]).catch(() => new Map())).get(sol.mint)?.stockPrice ?? null : null;
+  return { symbol, token, decimals, eth, amount: String(amount), ethUsd: usd, refUsd, rpc: BASE_RPC.includes('alchemy') ? 'Alchemy' : BASE_RPC.includes('mainnet.base.org') ? 'mainnet.base.org' : 'BASE_RPC_URL', venues };
 }
 
 /** A quote-only /order (no taker: price only, no transaction), for the size ladder. `routers` excludes the others. */
@@ -285,16 +376,17 @@ http.createServer(async (req, res) => {
       catch { json(res, 502, { jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } }); }
       return;
     }
-    if (req.method === 'GET' && u.pathname === '/api/config') return json(res, 200, { privyAppId: PRIVY_APP_ID, privyBundle: existsSync(PRIVY_BUNDLE), maxUsd: MAX_USD, solUsd: await solPrice().catch(() => null), rpc: rpcKind, keyed: !!API_KEY, defaultTaker: DEFAULT_TAKER, orderEngine: JUPITERZ.orderEngine, stocks: STOCKS, tamper: Object.entries(TAMPER).map(([id, t]) => ({ id, label: t.label })) });
+    if (req.method === 'GET' && u.pathname === '/api/config') return json(res, 200, { privyAppId: PRIVY_APP_ID, privyBundle: existsSync(PRIVY_BUNDLE), maxUsd: MAX_USD, solUsd: await solPrice().catch(() => null), rpc: rpcKind, keyed: !!API_KEY, defaultTaker: DEFAULT_TAKER, orderEngine: JUPITERZ.orderEngine, stocks: STOCKS, baseStocks: Object.keys(BASE_STOCKS), tamper: Object.entries(TAMPER).map(([id, t]) => ({ id, label: t.label })) });
     if (req.method === 'POST' && u.pathname === '/api/quote') {
       const body = await readBody(req); res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
       const emit = (o: unknown) => res.write(JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? String(v) : v)) + '\n');
       try { await quote(body, emit); } catch (e) { emit({ stage: 'error', error: (e as Error).message }); } res.end(); return;
     }
+    if (req.method === 'POST' && u.pathname === '/api/base/quote') return json(res, 200, await baseQuote(await readBody(req)));
     if (req.method === 'POST' && u.pathname === '/api/ladder') return json(res, 200, await ladder(await readBody(req)));
     if (req.method === 'POST' && u.pathname === '/api/gate') return json(res, 200, await gate(await readBody(req)));
     if (req.method === 'POST' && u.pathname === '/api/execute') return json(res, 200, await execute(await readBody(req)));
     if (req.method === 'GET' && u.pathname === '/api/status') return json(res, 200, await status(String(u.searchParams.get('sig') ?? '')));
     json(res, 404, { error: 'not found' });
   } catch (e) { json(res, 400, { error: (e as Error).message }); }
-}).listen(PORT, '127.0.0.1', () => console.log(`RFQ Desk on http://127.0.0.1:${PORT} (read-only; node: ${rpcKind}${skipped.length ? ` after skipping ${skipped.join('; ')}` : ''}; Jupiter ${API_KEY ? 'with API key' : 'keyless, paced'})`));
+}).listen(PORT, '127.0.0.1', () => console.log(`RFQ Desk on http://127.0.0.1:${PORT} (desk never signs; trades only from a connected wallet, max $${MAX_USD}; node: ${rpcKind}${skipped.length ? ` after skipping ${skipped.join('; ')}` : ''}; Jupiter ${API_KEY ? 'with API key' : 'keyless, paced'})`));

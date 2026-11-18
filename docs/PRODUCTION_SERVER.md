@@ -47,6 +47,55 @@ linked wallet. Otherwise it is refused and nothing is sent. Trades route through
 The first try was refused before signing: on a longer route the transaction would have been about 1,263 bytes, over the 1,232-byte limit. Too-large Jupiter routes
 are now asked again with fewer accounts (48, 36, 28) and refused only if none fits.
 
+## Several chains on one server (`CHAINS=solana,base,bnb,robinhood`)
+
+One node group can serve every chain at once, so a user trades Solana, Base, BNB Chain and Robinhood Chain through the same nodes and the same API key.
+`CHAINS` lists the chains (`practice`, `solana`, `base`, `bnb`, `robinhood`; `apps/server/chains.ts`); `MODE` stays as a one-chain shorthand (`MODE=base-mainnet` is
+`CHAINS=base`). Each chain needs the settings of its own section (Solana and Base above, BNB and Robinhood below); a node names every missing one and refuses to start.
+
+- **One lease, one account per chain.** Each user is still owned by one node (one Redis lease). On that node the user has one account per chain: its own Trader,
+  wallet link, orders, journal, spend ledger, settings and copies. Leases, forwarding, failover, Redis, rate limits (one budget per key across chains), `/metrics`,
+  `/status` and webhooks are shared. A chain whose account cannot start (its RPC or Privy is down) answers `503 chain_unavailable` for that chain only and is
+  retried every 10 s by the sweep and the next request; the user's other chains keep running.
+- **Requests name the chain with a path prefix:** `/v1/<chain>/...`, for example `POST /v1/base/trades/buy`, `GET /v1/bnb/orders`, `GET /v1/robinhood/events`.
+  A path **without** a prefix goes to the **default chain**, the first one in `CHAINS`, so a single-chain server, its clients and its old paths keep working.
+  `GET /v1/chains` (no key) lists the chains and the default. `/v1/app/*` has no prefix (apps are the same on every chain). A known chain this server does not run
+  answers `404 chain_not_enabled`. The SDK client: `new MemeClient({ baseUrl, apiKey, chain: 'base' })` or `client.forChain('bnb')`.
+- **Wallets are linked per chain:** `POST /v1/base/wallet/link/start {address}` then `/v1/base/wallet/link/finish`, and the same under `/v1/solana/`, `/v1/bnb/`,
+  `/v1/robinhood/`. One Privy Ethereum wallet can be linked on every EVM chain; each link is checked against **that chain's** policy id
+  (`PRIVY_BASE_POLICY_ID`, `PRIVY_BNB_POLICY_ID`, `PRIVY_ROBINHOOD_POLICY_ID`), and the engine applies that chain's caps. The wallet's server signer must carry each of
+  those policy ids (`addSigners({ signers: [{ signerId, policyIds: [basePolicyId, bnbPolicyId, robinhoodPolicyId] }] })`); setting the same id in several variables also
+  works, with one Privy policy that has rules per chain id.
+- **State stays separate and old data still loads.** The default chain keeps the unprefixed Redis names it always had (`<ns>:u:<user>:engine`, `...:solwallet`); every
+  other chain is under `<ns>:u:<user>:@<chain>:<name>` (`@` cannot occur in an app end user's id, so the two never collide). The first start with `CHAINS` writes the default chain to `<ns>:chains:default`; a node whose first chain differs
+  refuses to start, because its unprefixed state belongs to the other chain. That first start also refuses a default chain when the namespace already holds another
+  chain's single-chain accounts (a `basewallet` written by a `MODE=base-mainnet` server), whether or not that chain is listed: list it first, or use another namespace. Two existing single-chain namespaces (for example
+  Solana on 3501 and Base on 3500) cannot be merged without copying the second one's keys under its chain prefix; keep the larger as the default and move the other.
+- **Every node of a group must run the same `CHAINS`.** A node that lacks a chain answers `404 chain_not_enabled` instead of forwarding, and a user owned by such a
+  node has that chain's orders unwatched. Roll a `CHAINS` change out to all nodes together (drain, restart).
+- **Postgres and webhooks** say the chain: trades have the `chain` column set, trade keys of non-default chains are stored as `<chain>/<key>`, and webhook events carry
+  `chain` when a server runs more than one. `GET /v1/records/trades` lists the user's trades on every chain (each row has `chain`), whichever prefix it is called with.
+- **The next EVM chain is configuration:** an entry in `CHAIN_SPECS` (`apps/server/chains.ts`: chain id, the env names of its RPC, Privy policy and caps, aggregator) and its
+  contracts in `EVM_NETWORKS` (`packages/sdk/src/base.ts`: V2 router and factory, wrapped native coin, a dollar pool for USD prices, pool fee, finality depth). No server
+  code changes.
+
+Verified: `apps/server/chains.test.ts` (routing, per-chain linking and state, forwarding and failover with two chains, the pinned default chain, the legacy-namespace refusal,
+a chain failing alone, one rate budget across chains); `npm run verify:server-multi`: two nodes serving Solana, Base, BNB and Robinhood forks for one key (below).
+
+## BNB Chain and Robinhood Chain (`CHAINS=...,bnb,robinhood`)
+
+The Base account code with another network's contracts (`EVM_NETWORKS` in packages/sdk/src/base.ts, every address read back from the chain on 2026-11-18):
+
+| Chain | Chain id | DEX | Wrapped native | USD price from | Env |
+|---|---|---|---|---|---|
+| BNB Chain | 56 | PancakeSwap V2 (router `0x10ed43c7…024e`, 0.25% pool fee) | WBNB | WBNB/USDT pool | `BNB_RPC_URL` (or `ALCHEMY_API_KEY` with BNB enabled), `PRIVY_BNB_POLICY_ID`, `BNB_MAX_TRADE_ETH=0.02`, `BNB_DAILY_CAP_ETH=0.1` (in BNB) |
+| Robinhood Chain | 4663 | Uniswap V2 (router `0x89e5db8b…9eba`) | WETH | WETH/USDG pool | `ROBINHOOD_RPC_URL` (or `ALCHEMY_API_KEY` with Robinhood enabled), `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_MAX_TRADE_ETH=0.01`, `ROBINHOOD_DAILY_CAP_ETH=0.05` |
+
+Plain units: `bnb` for BNB amounts on BNB Chain (`eth` on Base and Robinhood). Tokens trade only against their V2 pool with the wrapped native coin: Relay and KyberSwap
+are not wired on these chains (`no_route` otherwise). The quote venue is reported as `uniswap-v2` on both (PancakeSwap V2 is a Uniswap V2 fork with a 0.25% fee, which
+the quote math uses). Each chain's Privy policy must allow that chain's V2 router (swaps, value capped) and `approve(router)`, with its chain id (README → Base policy
+rules, with that chain's router). Not yet traded on either mainnet.
+
 ## How it works
 
 ```
@@ -141,6 +190,10 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `STOCKS_ENABLED` | off | `1` lets users of a `solana-mainnet` server **buy** tokenized stocks (SDK_AND_API.md 4.9). Off: stock buys fail with `stocks_disabled` 403; sells always work. No issuer offers these tokens to US persons: enable only behind your own eligibility checks. |
 | `BASE_RPC_URL`, `PRIVY_BASE_POLICY_ID`, `BASE_MAX_TRADE_ETH`, `BASE_DAILY_CAP_ETH` | Alchemy, none, 0.01, 0.05 | `MODE=base-mainnet` (section above). |
 | `RELAY_API_KEY`, `BASE_RELAY` | none, on | `MODE=base-mainnet`: Relay's API key (needed for production; Relay's docs say from 2 Oct 2026), and `BASE_RELAY=off` to trade only Uniswap V2 pools. |
+| `BASE_AGGREGATOR`, `KYBER_CLIENT_ID` | relay, memedesk | `MODE=base-mainnet`: `kyberswap` routes tokens with no usable V2 pool through KyberSwap's router instead of Relay (gated and simulated the same way; the Privy Base policy needs `kyberswap-swaps` and `approve-kyberswap`, README → Base policy rules). `KYBER_CLIENT_ID` is sent as KyberSwap's `x-client-id`. |
+| `CHAINS` | none | Several chains on one server, default first: `solana,base,bnb,robinhood` (section above). Wins over `MODE`. |
+| `BNB_RPC_URL`, `PRIVY_BNB_POLICY_ID`, `BNB_MAX_TRADE_ETH`, `BNB_DAILY_CAP_ETH` | Alchemy, none, 0.02, 0.1 | `bnb` in `CHAINS` (section above; caps in BNB). |
+| `ROBINHOOD_RPC_URL`, `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_MAX_TRADE_ETH`, `ROBINHOOD_DAILY_CAP_ETH` | Alchemy, none, 0.01, 0.05 | `robinhood` in `CHAINS`. |
 | `MODE` | practice | `practice` (fake funds), `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`) or `base-mainnet` (real funds on Base, Privy Ethereum wallets; needs `PRIVY_BASE_POLICY_ID`). |
 
 **API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it
@@ -151,8 +204,8 @@ needs a loopback peer AND a loopback `Host` (DNS rebinding) and nginx returns 40
 abort during a drain; one Redis call per sweep (`MGET`) and per renewal round (one script for all leases); forwarded event streams close upstream when the client leaves;
 a user re-claimed on the same node gets its event stream wired again.
 
-Endpoints besides the API: `/healthz` (process up), `/readyz` (Redis reachable and not draining; use for load-balancer health), `/metrics` (Prometheus text:
-users owned, requests, forwarded, forward errors, claims, leases lost, capacity refusals, draining). `nginx.conf` hides `/metrics` from the public entry: scrape each
+Endpoints besides the API: `/healthz` (process up, and the chains served), `/readyz` (Redis reachable and not draining; use for load-balancer health), `/metrics` (Prometheus text:
+users owned, requests, forwarded, forward errors, claims, leases lost, capacity refusals, chain accounts unavailable, draining). `nginx.conf` hides `/metrics` from the public entry: scrape each
 node on the private network.
 
 ## Trade history, audit log and the status page
@@ -179,7 +232,7 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 ## What is not done (read before trusting it with money)
 
-- **Real accounts: Solana and Base.** `MODE=solana-mainnet` (above): local validator, plus small mainnet buys. `MODE=base-mainnet`: a local Base fork with a Privy stand-in, plus one 0.0002 ETH mainnet buy (tx `0x431b6a…`). Orders, failover and sells through the server have not run on mainnet. Base is limited to Uniswap V2 pools, with no token safety check and no fee sharing. One server runs one mode.
+- **Real accounts: Solana and Base.** `MODE=solana-mainnet` (above): local validator, plus small mainnet buys. `MODE=base-mainnet`: a local Base fork with a Privy stand-in, plus one 0.0002 ETH mainnet buy (tx `0x431b6a…`). Orders, failover and sells through the server have not run on mainnet. Base is limited to Uniswap V2 pools plus Relay or KyberSwap, with no token safety check and no fee sharing; BNB Chain and Robinhood Chain to their V2 pools, local forks only so far. `PLATFORM_FEE_BPS` with `CHAINS` charges Solana trades only.
   Server-held hot keys in files are not production custody.
 - **Postgres is a record, not the source of truth.** Redis holds running accounts; with `PG_URL`, trades and an audit log are copied to Postgres in the background (below). Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.

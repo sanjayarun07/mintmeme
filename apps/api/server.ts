@@ -30,6 +30,8 @@ export interface ApiOptions {
   onChange?: (e: { userId: string; keyId: string; method: string; path: string; status: number; ms: number; body?: unknown; ip?: string }) => void;
   /** Runs before every route with the caller's body (a real chain learns the token here, or refuses early with an SdkError). */
   prepare?: (userId: string, body: any, path: string) => Promise<any> | any;
+  /** The rate-limit buckets, when several APIs must share one budget per key (the execution server's one API per chain). */
+  buckets?: Map<string, { tokens: number; at: number }>;
 }
 interface Ctx { t: Trader; userId: string; body: any; params: Record<string, string>; query: URLSearchParams; headers: http.IncomingHttpHeaders }
 export interface Route { method: string; path: string; scope: 'read' | 'trade'; summary: string; body?: string; run: (c: Ctx) => Promise<unknown> | unknown }
@@ -95,7 +97,7 @@ export function createApi(o: ApiOptions) {
     if (k.keyHash !== undefined) { if (!/^[0-9a-f]{64}$/i.test(k.keyHash)) throw new Error('keyHash must be 64 hex characters (SHA-256)'); return { h: Buffer.from(k.keyHash, 'hex'), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; }
     if (!k.key || k.key.length < 16) throw new Error('API keys must be at least 16 characters'); return { h: sha(k.key), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; });
   const rs = [...routes(o), ...(o.extraRoutes ?? [])], compiled = rs.map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
-  const buckets = new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new WeakSet<Trader>();   // per Trader: a user re-created on this node gets its new Trader wired
+  const buckets = o.buckets ?? new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new WeakSet<Trader>();   // per Trader: a user re-created on this node gets its new Trader wired
   const send = (res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(typeof body === 'string' ? body : toJson(body)); };
   const fail = (res: http.ServerResponse, e: unknown) => { if (e instanceof SdkError) return send(res, e.status || 400, { error: e.toJSON() }); send(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the server log.' } }); console.error('[api] internal error:', (e as Error)?.message); };
   const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, no) => { let n = 0; const ch: Buffer[] = []; req.on('data', d => { n += d.length; if (n > 256 * 1024) { no(new SdkError('too_large', 'request body is over 256 KB', undefined, 413)); req.destroy(); } else ch.push(d); }); req.on('end', () => { if (!n) return ok({}); try { const j = JSON.parse(Buffer.concat(ch).toString('utf8')); if (j === null || typeof j !== 'object' || Array.isArray(j)) throw 0; ok(j); } catch { no(new SdkError('bad_json', 'the body must be a JSON object', 'Send Content-Type: application/json with an object body.')); } }); req.on('error', no); });

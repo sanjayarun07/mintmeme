@@ -1,12 +1,13 @@
 /** THE EXECUTION SERVER IN MODE=base-mainnet, END TO END ON A LOCAL BASE FORK. A real node (Redis on 127.0.0.1:6379) runs the same account code as production
  *  (apps/server/baseaccount.ts); the chain is a loopback anvil forked from Base mainnet; Privy is the local stand-in (packages/evm/test/fakeprivyevm.ts: same request
  *  signing, the README's Base policy, signs with a throwaway key). Fake ETH, throwaway key, nothing reaches mainnet. The token is KEYCAT, one of the few Base memecoins
- *  with a deep Uniswap V2 WETH pool. usage: npm run verify:server-base (needs ALCHEMY_API_KEY with Base enabled, or BASE_RPC_URL, plus Foundry's anvil and Redis). */
+ *  with a deep Uniswap V2 WETH pool. BASE_AGGREGATOR=kyberswap runs the aggregator checks (B13-B15) through KyberSwap instead of Relay.
+ *  usage: npm run verify:server-base (needs ALCHEMY_API_KEY with Base enabled, or BASE_RPC_URL, plus Foundry's anvil and Redis). */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import net from 'node:net';
 import { startFork } from './forkenv.ts';
-import { fakePrivyEvm, RELAY_ROUTER, RELAY_PROXY } from '../../evm/test/fakeprivyevm.ts';
+import { fakePrivyEvm, RELAY_ROUTER, RELAY_PROXY, KYBER_ROUTER } from '../../evm/test/fakeprivyevm.ts';
 import { testKey, personalSign } from '../../evm/test/ecdsa.ts';
 import { erc20 } from '../../evm/src/index.ts';
 import { createNode } from '../../../apps/server/node.ts';
@@ -22,7 +23,9 @@ async function main() {
   const check = (name: string, pass: boolean, detail = '') => { checks.push({ name, pass, detail: red(detail) }); console.log(`${pass ? 'pass' : 'FAIL'}  ${name}${pass ? '' : '  -> ' + red(detail).slice(0, 400)}`); };
   const fp = fakePrivyEvm(), privySrv = await fp.listen(), addr = fp.address;
   const API_KEY = 'base-fork-key-0123456789abcdef', keys = [{ keyHash: createHash('sha256').update(API_KEY).digest('hex'), userId: 'bea' }], ns = `memedesk-serverbase:${Date.now()}`;
-  const acc = baseAccounts({ rpcUrl: node.url, privy: { ...fp.cfg, apiUrl: privySrv.url } });
+  const AGG = process.env.BASE_AGGREGATOR === 'kyberswap' ? 'kyberswap' as const : 'relay' as const, AGG_NAME = AGG === 'kyberswap' ? 'KyberSwap' : 'Relay';
+  const AGG_BUY_TO = AGG === 'kyberswap' ? KYBER_ROUTER : RELAY_ROUTER, AGG_SELL_TO = AGG === 'kyberswap' ? KYBER_ROUTER : RELAY_PROXY, AGG_SELL_VIA = AGG === 'kyberswap' ? 'KyberSwap, through its router' : 'Relay, through its approval proxy';
+  const acc = baseAccounts({ rpcUrl: node.url, privy: { ...fp.cfg, apiUrl: privySrv.url }, aggregator: AGG });
   const port = await freePort(), url = `http://127.0.0.1:${port}`;
   const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: ns, publicUrl: url, keys, makeAccount: acc.make, extraRoutes: h => baseLinkRoutes({ privy: acc.privy, status: acc.status, ...h }), leaseTtlMs: 3000, sweepMs: 1000, requireAof: false, log: () => {} });
   await nd.listen(port);
@@ -63,17 +66,18 @@ async function main() {
     // Relay quotes LIVE mainnet state while this fork is frozen at its start block, so a route can revert here ("inactive pair"): the simulation then refuses it and
     // nothing is sent. Relay also varies its inner route between quotes, and the gate refuses one through a contract it has not reviewed (fail closed; nothing is
     // sent either). A fresh quote may pick another route, so up to five attempts (each a new trade key).
-    const relayRun = async (path: string, body: any) => { let r: any; for (let i = 1; i <= 5; i++) { r = await run(path, { ...body, key: `${body.key}-${i}` }); if (r.t.state === 'finalized' || !/simulation|Relay quote|not reviewed|the route approves/.test(r.t.failure ?? '')) break; await new Promise(ok => setTimeout(ok, 3000)); } return r; };
+    const relayRun = async (path: string, body: any) => { let r: any; for (let i = 1; i <= 5; i++) { const before = fp.state.signed; r = await run(path, { ...body, key: `${body.key}-${i}` }); r.signedBefore = before; r.attempt = i; if (r.t.state === 'finalized' || !/simulation|Relay quote|KyberSwap|not reviewed|the route approves/.test(r.t.failure ?? '')) break; await new Promise(ok => setTimeout(ok, 3000)); } return r; };
     const z1 = await zora(), rb = await relayRun('/v1/trades/buy', { token: ZORA, eth: '0.002', slippagePct: 3, key: 'rb1' }), z2 = await zora();
     const rtx: any = rb.t.txHash ? await node.call('eth_getTransactionByHash', [rb.t.txHash]) : null;
-    check('B14 buy 0.002 ETH of ZORA (dust V2 pool): routed through Relay\'s router, gated and simulated, finalized, tokens arrived', rb.t.state === 'finalized' && z2 > z1 && String(rtx?.to).toLowerCase() === RELAY_ROUTER, `${rb.t.state} ${rb.t.failure ?? ''} to ${rtx?.to} tokens ${z1}->${z2}`);
+    check(`B14 buy 0.002 ETH of ZORA (dust V2 pool): routed through ${AGG_NAME}'s router, gated and simulated, finalized, tokens arrived`, rb.t.state === 'finalized' && z2 > z1 && String(rtx?.to).toLowerCase() === AGG_BUY_TO, `${rb.t.state} ${rb.t.failure ?? ''} to ${rtx?.to} tokens ${z1}->${z2}`);
+    // signatures are counted for the attempt that finalized: an earlier attempt refused before sending may already have approved (an approval is its own transaction)
     const signedR = fp.state.signed, eR = await eth(), rs = await relayRun('/v1/trades/sell', { token: ZORA, pct: 100, slippagePct: 5, key: 'rs1' }), eR2 = await eth();
     const stx: any = rs.t.txHash ? await node.call('eth_getTransactionByHash', [rs.t.txHash]) : null;
     // The router takes the best quote of the token's venues: usually Relay, but at times the dust V2 pool quotes this small sell better, and then using it is right.
     // Either way the sell must finalize with an exact approval + swap signed by Privy, tokens gone and ETH back, sent to that venue's contract. (The Relay sell path
     // itself is also covered in packages/evm/test/relay.test.ts.)
-    const viaRelay = String(rs.t.venue ?? '').startsWith('relay'), wantTo = viaRelay ? RELAY_PROXY : V2_ROUTER;
-    check(`B15 sell 100% of ZORA (best venue: ${viaRelay ? 'Relay, through its approval proxy' : 'Uniswap V2, it quoted better'}): exact approval + swap signed by Privy, tokens gone, ETH back`, rs.t.state === 'finalized' && (await zora()) === 0n && eR2 > eR && fp.state.signed - signedR === 2 && String(stx?.to).toLowerCase() === wantTo, `${rs.t.state} ${rs.t.failure ?? ''} venue ${rs.t.venue} to ${stx?.to} signed ${fp.state.signed - signedR} eth ${eR}->${eR2}`);
+    const viaRelay = /^(relay|kyber):/.test(String(rs.t.venue ?? '')), wantTo = viaRelay ? AGG_SELL_TO : V2_ROUTER;
+    check(`B15 sell 100% of ZORA (best venue: ${viaRelay ? AGG_SELL_VIA : 'Uniswap V2, it quoted better'}): exact approval + swap signed by Privy, tokens gone, ETH back`, rs.t.state === 'finalized' && (await zora()) === 0n && eR2 > eR && (fp.state.signed - rs.signedBefore === 2 || (rs.attempt > 1 && fp.state.signed - rs.signedBefore === 1)) && String(stx?.to).toLowerCase() === wantTo, `${rs.t.state} ${rs.t.failure ?? ''} venue ${rs.t.venue} to ${stx?.to} signed ${fp.state.signed - signedR} eth ${eR}->${eR2}`);
     // the per-trade cap (0.01 ETH by default) is checked before Privy is asked
     const signedCap = fp.state.signed, c1 = await run('/v1/trades/buy', { token: KEYCAT, eth: '0.02', key: 'c1' });
     check('B8 a buy above the per-trade cap fails before signing: nothing sent', c1.t.state === 'failed' && !sent(c1.t) && fp.state.signed === signedCap, `${c1.t.state} ${c1.t.failure ?? JSON.stringify(c1.t)}`);
@@ -90,14 +94,14 @@ async function main() {
     check('B12 relinking while the signer is removed is refused with the reason', rl.status === 409 && rl.j.error?.code === 'not_delegated', JSON.stringify(rl.j));
     // a token with no V2 pool is refused before anything else
     const np = await call('POST', '/v1/trades/buy', { token: '0x000000000000000000000000000000000000dEaD', eth: '0.001', key: 'n1' });
-    check('B13 a token with neither a Uniswap V2 WETH pool nor a Relay route is refused with the reason', np.status >= 400 && np.j.error?.code === 'no_route', JSON.stringify(np.j));
+    check(`B13 a token with neither a Uniswap V2 WETH pool nor a ${AGG_NAME} route is refused with the reason`, np.status >= 400 && np.j.error?.code === 'no_route', JSON.stringify(np.j));
   } catch (e) { check('run', false, (e as Error).stack ?? String(e)); }
   finally { await nd.drain().catch(() => {}); privySrv.close(); fork.stop(); }
   const pass = checks.every(c => c.pass);
-  const text = ['# Execution server, MODE=base-mainnet, on a local Base fork', '', `Run: ${new Date().toISOString()}`, 'Node: loopback anvil forked from Base mainnet; NOT mainnet. Fake ETH, throwaway key, Privy stand-in (same request signing, README Base policy).',
+  const text = ['# Execution server, MODE=base-mainnet, on a local Base fork', '', `Aggregator for tokens without a usable V2 pool: ${AGG_NAME} (BASE_AGGREGATOR=${AGG})`, '', `Run: ${new Date().toISOString()}`, 'Node: loopback anvil forked from Base mainnet; NOT mainnet. Fake ETH, throwaway key, Privy stand-in (same request signing, README Base policy).',
     `Result: **${pass ? 'PASS' : 'FAIL'}** (${checks.filter(c => c.pass).length}/${checks.length} checks)`, '', ...checks.map(c => `- ${c.pass ? 'pass' : 'FAIL'}: ${c.name}${c.pass ? '' : ` (${c.detail.slice(0, 300)})`}`), '',
     '## Not covered', '- Real Privy (its policy engine and TEE) and real Base: the one tiny mainnet trade the user approves covers them.', '- Uniswap V3/V4 and Aerodrome pools are not supported; only V2 WETH pools.'].join('\n');
-  mkdirSync('docs/live-verification', { recursive: true }); writeFileSync(`docs/live-verification/${new Date().toISOString().replace(/[:.]/g, '-')}-server-base.md`, red(text));
+  mkdirSync('docs/live-verification', { recursive: true }); writeFileSync(`docs/live-verification/${new Date().toISOString().replace(/[:.]/g, '-')}-server-base${AGG === 'kyberswap' ? '-kyberswap' : ''}.md`, red(text));
   console.log(`\n${pass ? 'PASS' : 'FAIL'} ${checks.filter(c => c.pass).length}/${checks.length}`); process.exit(pass ? 0 : 1);
 }
 void main();

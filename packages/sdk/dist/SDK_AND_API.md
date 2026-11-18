@@ -62,7 +62,9 @@ Support means a **chain port** (`ChainPort`) implementation plus a **venue** (a 
 | **Solana** | Jupiter Swap API routes (every DEX Jupiter routes through, including CLMM and DLMM pools); pump.fun bonding curves; Raydium AMM v4 | `SolanaChain` | **Mainnet, small amounts, user-approved:** Jupiter buys signed by the user's Privy wallet, from `/solana` and through the execution server (`MODE=solana-mainnet`), a standing order that fired by itself, and a buy with priority fee and Jito MEV protection. Local validator: the SDK, HTTP API, two-node server, orders, copy, sniping, bulk, TWAP, restart. | **Yes, small amounts** (README → Custody plan) |
 | **Base** | Uniswap V2 (WETH pools); Relay for tokens with no or a thin V2 pool (Aerodrome, Uniswap V3/V4 underneath; e.g. Coinbase stock tokens) | `EvmRpcChain` + `PrivyEvmSigner` | **Mainnet, user-approved:** a 0.0002 ETH KEYCAT buy through the execution server (`MODE=base-mainnet`), signed by the user's Privy Ethereum wallet. Local Base fork: linking, buy, sell with approval, caps, a tampered or wrong-key signature refused, revocation (13 checks). Relay route: buy and sell on the fork (15 checks with those), every Relay transaction gated and simulated; not yet run on mainnet. | **Yes, small amounts.** Buys only so far (no mainnet sell or standing order yet). |
 | Ethereum | Uniswap V3 | none | Not implemented | No |
-| BNB Chain, Robinhood Chain, Arbitrum, Avalanche, Sonic, Monad | PancakeSwap V3, Uniswap V3/V4, others | none | Not implemented. Research for tokenized stocks on BNB and Robinhood Chain: [XSTOCKS.md](XSTOCKS.md). | No |
+| **BNB Chain** | PancakeSwap V2 (WBNB pools, 0.25% fee) | `EvmRpcChain` + `PrivyEvmSigner` (`createBaseTrader({ network: 'bnb' })`) | **Fork tested through the execution server** (`npm run verify:server-multi`: buy and sell of USDT, the quote equal to PancakeSwap's own `getAmountsOut`, caps, failover). Not on mainnet yet. | Built; not traded on mainnet |
+| **Robinhood Chain** | Uniswap V2 (WETH pools) | `EvmRpcChain` + `PrivyEvmSigner` (`createBaseTrader({ network: 'robinhood' })`) | **Fork tested through the execution server** (`npm run verify:server-multi`: buy and sell of USDG, failover). Not on mainnet yet. | Built; not traded on mainnet |
+| BNB Chain and Robinhood Chain V3 pools, Arbitrum, Avalanche, Sonic, Monad | PancakeSwap V3, Uniswap V3/V4, others | none | Not implemented. Research for tokenized stocks on BNB and Robinhood Chain: [XSTOCKS.md](XSTOCKS.md). | No |
 | TON, Tron | | none | Only standalone family simulators exist; not wired to the engine. | No |
 
 **What "fork tested" means:** a local node (anvil, or a Solana test validator) started from a copy of mainnet state, with throwaway keys and fake balances. It exercises real contract code and real pool math. It does not prove behaviour under real mempool competition, MEV, real gas markets or real fills.
@@ -244,6 +246,25 @@ await b.trader.buy(await b.simple('/v1/trades/buy', { token, eth: '0.001', slipp
 `PrivyEvmSigner` checks each signed transaction against the request and recovers its signer. Defaults: 0.01 ETH per buy and 0.05 ETH per day (`caps`).
 Venues: Uniswap V2 WETH pools, and **Relay** for a token with no V2 pool or a thin one (under 1 WETH). Relay reaches Aerodrome and Uniswap V3/V4, so Coinbase's stock tokens (NVDAc…) and most Base memecoins. Every Relay transaction is decoded, checked against the trade and simulated before Privy signs; the Privy policy needs the three `relay-*` rules (README → Base policy rules). Relay takes a small fee (about 0.000003 ETH per trade). Server settings: `RELAY_API_KEY` (Relay's docs say keys are required from 2 Oct 2026), `BASE_RELAY=off` to turn it off. No token safety check and no fee sharing on Base yet.
 
+**KyberSwap instead of Relay.** `createBaseTrader({ ..., aggregator: 'kyberswap' })` (server: `BASE_AGGREGATOR=kyberswap`) routes the same tokens through KyberSwap's router (`packages/evm/src/kyber.ts`), keyless, with no fee of its own in the transaction. The server decodes each KyberSwap call and refuses anything but the exact trade (pinned router, our pair, the exact input, our wallet as the receiver, no fee receivers, an on-chain minimum at least ours), then simulates it before Privy signs. A sell approves exactly the amount sold to the router. The Privy policy needs `kyberswap-swaps` and `approve-kyberswap` (README → Base policy rules). One aggregator per server: switching does not strand trades already sent, whose receipts are read the same way either way.
+
+### 4.5c One server, several chains (`CHAINS=solana,base,bnb,robinhood`)
+
+The execution server can run every chain at once (docs/PRODUCTION_SERVER.md → Several chains). One API key then trades all of them; the path names the chain
+(`/v1/<chain>/...`), and a path without a chain goes to the server's default (first) chain, so single-chain clients keep working. In the client:
+
+```ts
+const c = new MemeClient({ baseUrl, apiKey });                // default chain
+const base = c.forChain('base'), bnb = c.forChain('bnb');    // or new MemeClient({ baseUrl, apiKey, chain: 'bnb' })
+console.log(await c.chains());                                // { default: 'solana', chains: [{ id: 'solana', prefix: '/v1/solana/', ... }, ...] }
+await base.swap({ side: 'buy', token: '0x9a26…7973', eth: '0.001', slippagePct: 3 });
+await bnb.swap({ side: 'buy', token: '0x55d3…7955', bnb: '0.01', slippagePct: 3 });   // BNB amounts are `bnb`
+```
+
+Each chain is its own account under the same user: its own wallet link (`/v1/<chain>/wallet/link/*`, each against that chain's Privy policy), orders, trades, caps
+and event stream. In your own backend the same trader runs on another EVM network with `createBaseTrader({ ..., network: 'bnb' })` (or `'robinhood'`); the contracts
+are in `EVM_NETWORKS` (packages/sdk/src/base.ts).
+
 ### 4.6 Apps: one key for many users, and webhooks
 
 An app with many users holds **one app key** (`npm run server:key -- <appId> app`, key file line `hash:<appId>:app`) and names the end user on every call in the
@@ -314,10 +335,13 @@ await c.placeOrder({ type: 'limit-buy', stock: 'TSLAx', sol: '0.05', perShare: t
 await c.placeOrder({ type: 'take-profit', stock: 'TSLAx', perShare: true, shares: '0.01', priceUsd: '420' });   // sell 0.01 share at $420
 ```
 
-Not done: no real-money stock trade has been made yet on Solana (all 113 passed a read-only mainnet buy check; on Base, NVDAc was bought through Relay, section 4.5b).
-Large orders: an engine path to JupiterZ market-maker fills (RFQ), with its own gate for the market maker's co-signature and USDC or SOL as the pay asset, is built
-but **off by default and not wired into the execution server** yet; a read-only RFQ Desk (`npm run rfq`) compares it with normal routes. Details, verification and what
-going live needs: [JUPITERZ.md](JUPITERZ.md).
+Real money: one stock buy on Solana, 2026-11-18 (user-approved): 0.01 SOL of SPYx through the execution server, signed by Privy, finalized as tx
+`1FzsV6SULRiZEU9iEmoTznR5Yo2hmspqCkGHKWRGLgwqhWgypjf9a3QXZHEsm7HykuNvacPD5WTNSdCYWH7pVGx` (0.00100322 SPYx). All 113 tradable stocks passed a read-only mainnet buy check;
+on Base, NVDAc was bought through Relay (section 4.5b). The Jupiter route for a stock can pass through other tokens: the engine closes the token accounts it opens for
+them in the same transaction, so their rent comes back (it keeps them only when closing would make the transaction too large or fail its simulation).
+Large orders: an engine path to JupiterZ market-maker fills (RFQ), with its own gate for the market maker's co-signature and USDC or SOL as the pay asset, is wired into
+the execution server and **off by default** (`JUPITERZ=on`, `JUPITERZ_MIN_SOL`, `JUPITERZ_MARGIN_BPS`; docs/PRODUCTION_SERVER.md). The RFQ Desk (`npm run rfq`) compares it
+with normal routes and can send a quote your wallet signed, under a cap. Details, verification and what is not verified: [JUPITERZ.md](JUPITERZ.md).
 Stocks on Base, BNB Chain and Robinhood Chain are not tradable yet.
 
 ---

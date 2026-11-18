@@ -11,3 +11,4 @@ export * from './httpsigner.ts';
 export * from './secp256k1.ts';
 export * from './aggregator.ts';
 export * from './relay.ts';
+export * from './kyber.ts';

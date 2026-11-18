@@ -11,6 +11,8 @@ import type { TestKey } from './ecdsa.ts';
 export const BASE_ROUTER = '0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24';
 /** Relay's v3.2 router and approval proxy on Base (README → Base policy rules, relay-*). */
 export const RELAY_ROUTER = '0x0729e2a4716d9f7dd17858d5d504426d228697f7', RELAY_PROXY = '0x5567954cd026cebfe486062cb75848e0f1c12e58';
+/** KyberSwap's MetaAggregationRouterV2 on Base (README → Base policy rules, kyberswap-*). */
+export const KYBER_ROUTER = '0x6131b5fae19ea4f9d964eac0408e4408b66337b5';
 export function fakePrivyEvm(o: { key?: TestKey; base?: string; signerId?: string; policyId?: string; capWei?: bigint; chainId?: number; router?: string } = {}) {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const cfg = { appId: 'app-test', appSecret: 'secret-test-0123456789abcdef0123456789abcdef', signerId: o.signerId ?? 'quorum-1', policyId: o.policyId ?? 'policy-base',
@@ -27,6 +29,9 @@ export function fakePrivyEvm(o: { key?: TestKey; base?: string; signerId?: strin
     if (to === RELAY_ROUTER) return value > cap ? 'value above the cap' : undefined;
     if (to === RELAY_PROXY) return value === 0n ? undefined : 'value must be 0';
     if (data.startsWith('0x095ea7b3') && value === 0n && '0x' + data.slice(34, 74) === RELAY_PROXY) return undefined;
+    // the README's KyberSwap rules (kyberswap-swaps, approve-kyberswap): KyberSwap's router (value capped), approve(router)
+    if (to === KYBER_ROUTER) return value > cap ? 'value above the cap' : undefined;
+    if (data.startsWith('0x095ea7b3') && value === 0n && '0x' + data.slice(34, 74) === KYBER_ROUTER) return undefined;
     return `destination ${to} is not allowed`;
   }
   async function handle(method: string, url: string, headers: Record<string, string>, body: string): Promise<{ status: number; json: unknown }> {

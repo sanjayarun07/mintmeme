@@ -8,6 +8,7 @@
  *   - Signing is injected (RawSigner). In this repo it is a dev-only signer for throwaway local keys; custody/HSM is out of scope. */
 import type { ChainPort, SimTx, Receipt, Venue } from '../../core/src/index.ts';
 import type { FeeSpec } from './v2.ts';
+import type { KyberClient } from './kyber.ts';
 import type { RelayClient, RelayContracts } from './relay.ts';
 /** Thrown by an RpcLike when the node answered with a JSON-RPC error object. Anything else thrown is treated as a transport failure (ack may be lost). */
 export declare class JsonRpcError extends Error {
@@ -63,6 +64,17 @@ export interface EvmRpcConfig {
             refAmount: bigint;
         }[];
     };
+    /** KyberSwap routes (kyber.ts) INSTEAD of Relay, for the same tokens: when set, it is the chain's aggregator. Every transaction is gated against KyberSwap's pinned
+     *  router and simulated with eth_simulateV1 before it is signed. */
+    kyber?: {
+        client: KyberClient;
+        refreshMs?: number;
+        pairs?: {
+            tokenIn: string;
+            tokenOut: string;
+            refAmount: bigint;
+        }[];
+    };
 }
 export declare function decodeRevert(data: string | undefined): string | undefined;
 export declare class EvmRpcChain implements ChainPort {
@@ -95,14 +107,27 @@ export declare class EvmRpcChain implements ChainPort {
     private aggAt;
     private settler?;
     private relayK;
-    /** The contract that must be approved for a token-in Relay swap (its approval proxy). */
+    /** The aggregator this chain uses for tokens without a usable V2 pool: KyberSwap when `kyber` is configured, otherwise Relay. One at a time. */
+    get aggKind(): 'relay' | 'kyberswap' | undefined;
+    private aggName;
+    private aggCfg;
+    /** The contract that must be approved for a token-in aggregator swap: KyberSwap's router, or Relay's approval proxy. */
     private aggRouter;
     private aggId;
+    /** A read-only reference quote (output for an exact input) from the configured aggregator. */
+    private aggRefQuote;
     /** Reference quotes for the configured pairs, at most every `refreshMs`. A pair that cannot be quoted has no venue until it can (orders on it wait). */
     private refreshAgg;
-    /** Make a token tradable through Relay: ETH -> token for `refWei`, and back for what that returned. Read-only (quotes). Returns false when there is no route. */
+    /** Make a token tradable through the aggregator: ETH -> token for `refWei`, and back for what that returned. Read-only (quotes). Returns false when there is no route. */
     addAggToken(token: string, refWei?: bigint): Promise<boolean>;
-    /** Quote the Relay swap for `tx`, gate it, check any 0x Settler against 0x's registry, and simulate it (with an exact approve first if the allowance is short). */
+    /** Slippage so that the aggregator's own on-chain minimum is at least the engine's: tighter than the engine allows is fine, looser never is. `reserve` keeps that share
+     *  of the room back, because each request comes back with a fresh quote that can be lower than the one the slippage was computed from. */
+    private slipFor;
+    /** The Relay swap for `tx`, gated (relay.ts gateRelay) and its 0x Settler, if any, checked against 0x's registry. */
+    private relaySwap;
+    /** The KyberSwap swap for `tx`: quoted, built for our wallet with slippage inside the engine's minimum, and gated (kyber.ts gateKyber). Same reserve and one retry as Relay. */
+    private kyberSwap;
+    /** Build the aggregator swap for `tx` (Relay or KyberSwap, by the venue), then simulate it on the exact bytes (with an exact approve first if the allowance is short). */
     private aggBuild;
     private aggVenue;
     balanceOf(wallet: string, token: string): Promise<bigint>;

@@ -127,6 +127,8 @@ td.wrap{white-space:normal}
 tbody tr:last-child td{border-bottom:0}
 td.sub{color:var(--muted);font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 tr.is-rfq td:first-child{box-shadow:inset 2px 0 0 var(--rfq)}
+tr.venue-head td{font-size:12px;color:var(--muted,#6b7280);padding-top:14px;border-top:1px solid currentColor}
+tr.is-venue td{opacity:.85}
 .pos{color:var(--pos)} .neg{color:var(--neg)}
 .name{font-weight:500}
 .skel{display:inline-block;height:10px;width:56px;border-radius:2px;background:var(--border);animation:pulse 1.2s ease-in-out infinite;vertical-align:middle}
@@ -202,6 +204,16 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
 .theme-toggle{display:inline-flex;align-items:center;gap:7px;padding:0 10px;height:30px;border:1px solid var(--border-strong);border-radius:8px;background:var(--card);color:var(--fg);font-size:12px;font-weight:600;white-space:nowrap}
 .theme-toggle:hover{border-color:var(--rfq);color:var(--rfq)}
 .theme-toggle span[aria-hidden]{font-size:14px;line-height:1}
+/* Wallet dropdown under the Connect button */
+.wal{position:relative}
+.wal-pop{position:absolute;right:0;top:calc(100% + 10px);width:min(340px,calc(100vw - 32px));background:var(--card);border:1px solid var(--border-strong);border-radius:10px;padding:var(--s4);box-shadow:0 12px 32px rgba(0,0,0,.28);z-index:10;white-space:normal;color:var(--fg);font-size:13px;display:grid;gap:var(--s3)}
+.wal-pop[hidden]{display:none}
+.wal-pop .wallets{display:grid;gap:var(--s2)}
+.wal-pop .wallets .btn{width:100%}
+.wal-pop .note{margin:0}
+.wal-pop #privy-box:empty{display:none}
+@media (max-width:1240px){.meta .hide-s{display:none}.meta{gap:var(--s3)}}
+@media (max-width:1060px){#mode-badge{display:none}}
 .page{padding-top:32px;padding-bottom:64px}
 .view-intro{display:flex;align-items:end;justify-content:space-between;gap:24px;margin-bottom:28px;padding:12px 0 0}
 .intro-kicker{display:flex;align-items:center;gap:10px;color:var(--rfq);font-size:10px;font-weight:700;letter-spacing:.16em;margin-bottom:12px}
@@ -250,9 +262,9 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
 <header class="top"><div class="top-in">
   <span class="brand">RFQ Desk</span>
   <nav class="tabs" aria-label="Views">
-    <a href="#quote" data-v="quote">Quote</a><a href="#ladder" data-v="ladder">Size ladder</a><a href="#lab" data-v="lab">Gate lab</a><a href="#how" data-v="how">How it works</a>
+    <a href="#quote" data-v="quote">Quote</a><a href="#ladder" data-v="ladder">Size ladder</a><a href="#lab" data-v="lab">Gate lab</a><a href="#base" data-v="base">Base</a><a href="#how" data-v="how">How it works</a>
   </nav>
-  <div class="meta"><span class="on hide-s" id="st-node">Node</span><span class="hide-s" id="st-jup">Jupiter</span><span class="hide-s" id="st-sol"></span><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><span aria-hidden="true" id="theme-icon">☀</span><span id="theme-label">Light</span></button><button class="btn sm ghost" id="connect" type="button">Connect wallet</button><span class="badge" id="mode-badge" title="The desk never signs. With a wallet connected, you can sign a checked quote in your wallet.">Read-only</span></div>
+  <div class="meta"><span class="on hide-s" id="st-node">Node</span><span class="hide-s" id="st-jup">Jupiter</span><span class="hide-s" id="st-sol"></span><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><span aria-hidden="true" id="theme-icon">☀</span><span id="theme-label">Light</span></button><div class="wal"><button class="btn sm ghost" id="connect" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="wallet-pop">Connect wallet</button><div class="wal-pop" id="wallet-pop" role="dialog" aria-label="Connect a wallet" hidden><div id="wallet-choices"></div><div id="privy-box" hidden></div></div></div><span class="badge" id="mode-badge" title="The desk never signs. With a wallet connected, you can sign a checked quote in your wallet.">Read-only</span></div>
 </div></header>
 
 <main class="page">
@@ -292,7 +304,7 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
       </div>
       <div class="panel" id="trade-panel">
         <div class="ph"><h2>Trade</h2><span class="badge" id="trade-badge">No wallet</span></div>
-        <div class="pb" id="privy-box" hidden style="border-bottom:1px solid var(--border)"></div><div class="pb" id="trade-body"><p class="muted" style="margin:0">Connect a wallet to trade the firm quote from it. The quote is then built for your wallet, and the gate and simulation run on your own balances. Your wallet asks you to sign, and the desk sends only the exact transaction it checked.</p></div>
+        <div class="pb" id="trade-body"><p class="muted" style="margin:0">Connect a wallet to trade the firm quote from it. The quote is then built for your wallet, and the gate and simulation run on your own balances. Your wallet asks you to sign, and the desk sends only the exact transaction it checked.</p></div>
       </div>
     </div>
 
@@ -335,6 +347,23 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
     </table></div>
   </div>
   <p class="foot">Each row asks Jupiter twice at the same moment for the same trade: once JupiterZ only (market makers), once every other router (on-chain routes). Difference is how much more or less the market maker pays; positive means RFQ is better. It shows where makers start quoting, where they win, and where their size runs out. Price-only quotes, no wallet needed. The stock is the one picked on the Quote tab.</p>
+</section>
+
+<!-- BASE -->
+<section class="view" id="v-base" aria-label="Base stocks" hidden>
+  <div class="panel">
+    <div class="ph"><h2>Coinbase stocks on Base <span class="muted" id="base-meta" style="font-weight:400"></span></h2></div>
+    <form class="pb" id="base-f" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
+      <div class="field" style="min-width:160px"><label for="base-sym">Stock</label><select class="ctl" id="base-sym"></select></div>
+      <div class="field" style="width:140px"><label for="base-eth">Pay (ETH)</label><input class="ctl" id="base-eth" inputmode="decimal" value="0.5"></div>
+      <button class="btn" id="base-go" type="submit">Compare</button>
+    </form>
+    <div class="tw"><table>
+      <thead><tr><th>Venue</th><th>Path</th><th class="num">Receive</th><th class="num">Per token</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
+      <tbody id="base-rows"><tr><td colspan="6" class="muted">Pick a stock and an amount, then Compare.</td></tr></tbody>
+    </table></div>
+  </div>
+  <p class="foot">Buying with ETH on Base, quote-only: nothing is signed or sent. The execution server trades through Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap (each transaction gated and simulated before signing). LI.FI and OpenOcean are price references only. Nothing is tradable on this page. The share price is Jupiter's for the same stock (NVDAc is compared with NVDA).</p>
 </section>
 
 <!-- GATE LAB -->
@@ -395,6 +424,7 @@ async function boot() {
   $('#st-node').textContent = CFG.rpc; $('#st-jup').textContent = CFG.keyed ? 'Jupiter API key' : 'Jupiter keyless';
   $('#mint').innerHTML = CFG.stocks.map(s => `<option value="${s.mint}">${esc(s.symbol)} · ${esc(s.issuer)}</option>`).join('');
   const t = CFG.stocks.find(s => s.symbol === 'TSLAx'); if (t) $('#mint').value = t.mint;
+  $('#base-sym').innerHTML = (CFG.baseStocks ?? []).map(s => `<option>${esc(s)}</option>`).join('');
   SOLUSD = CFG.solUsd ?? null; solMeta(); setUsd();
   $('#cases').innerHTML = CFG.tamper.map(c => `<li><button type="button" data-t="${c.id}" aria-pressed="false"><span>${esc(c.label)}</span>${icon('chev')}</button></li>`).join('');
   ladderRows(); route();
@@ -441,6 +471,7 @@ function stage(m) {
   if (m.stage === 'sim') sim(m, $('#gate-panel'));
   if (m.stage === 'decision') { S.decision = m; decision(m); }
   if (m.stage === 'trade') tradePanel(m);
+  if (m.stage === 'venues') venueRows(m.venues);
   if (m.stage === 'error') decision({ error: m.error });
 }
 function row(k, m, path) {
@@ -449,6 +480,33 @@ function row(k, m, path) {
     <td class="sub" title="${esc(txt)}">${esc(txt)}</td>
     <td class="num">${o ? n(tok(o), 4) : '–'}</td><td class="num">${o ? n(shr(o), 4) : '–'}</td>
     <td class="num">${o && ps ? usd(ps) : '–'}</td><td class="num" id="d-${k}">${o ? '<span class="skel"></span>' : '–'}</td>`;
+}
+/* ---------- Base: Coinbase stocks across EVM aggregators (quote-only) ---------- */
+$('#base-f').onsubmit = async e => {
+  e.preventDefault(); const eth = Number($('#base-eth').value.replace(/,/g, '')), body = $('#base-rows');
+  if (!(eth > 0)) { body.innerHTML = '<tr><td colspan="6" class="err">Enter an ETH amount above zero</td></tr>'; return; }
+  $('#base-go').disabled = true; $('#base-go').textContent = 'Asking…'; body.innerHTML = '<tr><td colspan="6"><span class="skel"></span></td></tr>';
+  try {
+    const r = await (await fetch('/api/base/quote', { method: 'POST', body: JSON.stringify({ symbol: $('#base-sym').value, eth }) })).json();
+    if (r.error) throw new Error(r.error);
+    const got = r.venues.filter(v => v.out), best = got.reduce((m, v) => (BigInt(v.out) > m ? BigInt(v.out) : m), 0n), sorted = [...got.sort((a, b) => (BigInt(b.out) > BigInt(a.out) ? 1 : -1)), ...r.venues.filter(v => !v.out)];
+    $('#base-meta').textContent = `${n(eth, 4)} ETH ≈ ${r.ethUsd ? usd(eth * r.ethUsd) : '?'} · share price ${r.refUsd ? usd(r.refUsd) : 'unknown'} · node ${r.rpc}`;
+    body.innerHTML = sorted.map(v => {
+      if (!v.out) return `<tr><td class="name">${esc(v.name)}</td><td class="sub" colspan="5">${esc(v.none ?? 'no quote')}</td></tr>`;
+      const toks = Number(v.out) / 10 ** r.decimals, per = r.ethUsd ? eth * r.ethUsd / toks : null, vsRef = per && r.refUsd ? (per / r.refUsd - 1) * 1e4 : null, vsBest = (Number(v.out) / Number(best) - 1) * 1e4;
+      return `<tr><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td><td class="num">${n(toks, 4)}</td><td class="num">${per ? usd(per) : '–'}</td>
+        <td class="num">${vsRef === null ? '–' : `<span class="${vsRef <= 0 ? 'pos' : 'neg'}">${bpsTxt(vsRef)}</span>`}</td><td class="num">${vsBest === 0 ? '<span class="muted">Best</span>' : `<span class="neg">${bpsTxt(vsBest)}</span>`}</td></tr>`;
+    }).join('');
+  } catch (err) { body.innerHTML = `<tr><td colspan="6" class="err">${esc(err.message)}</td></tr>`; }
+  $('#base-go').disabled = false; $('#base-go').textContent = 'Compare';
+};
+/** More venues, quote-only: each Jupiter router alone and Jupiter limited to one DEX. Prices to compare, not routes the desk can trade. Best first, then the ones without a quote. */
+function venueRows(vs) {
+  const b = S.build?.out, got = vs.filter(v => v.out).sort((x, y) => (BigInt(y.out) > BigInt(x.out) ? 1 : -1)), none = vs.filter(v => !v.out);
+  const vsTxt = o => { if (!b) return '–'; const bps = (Number(o) / Number(b) - 1) * 1e4; return `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`; };
+  const tr = v => `<tr class="is-venue"><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.none ?? v.labels?.join(', ') ?? '')}">${esc(v.none ?? v.labels?.join(', ') ?? '')}</td>
+    <td class="num">${v.out ? n(tok(v.out), 4) : '–'}</td><td class="num">${v.out ? n(shr(v.out), 4) : '–'}</td><td class="num">${v.out && v.share?.perShareUsd ? usd(v.share.perShareUsd) : '–'}</td><td class="num">${v.out ? vsTxt(v.out) : '–'}</td></tr>`;
+  $('#rows').insertAdjacentHTML('beforeend', `<tr class="venue-head"><td colspan="6">More venues, price only: each Jupiter router on its own (Metis, OKX, DFlow), Jupiter limited to one DEX, and Raydium's and DFlow's own APIs. Not tradable here.</td></tr>` + [...got, ...none].map(tr).join(''));
 }
 function delta(k) {
   const el = $('#d-' + k), x = S[k], b = S.build?.out; if (!el || !x?.out) return;
@@ -564,7 +622,7 @@ const b64 = u => btoa(String.fromCharCode(...u)), unb64 = t => Uint8Array.from(a
 const tb = () => $('#trade-body'), tbadge = (cls, txt) => { $('#trade-badge').className = 'badge ' + cls; $('#trade-badge').textContent = txt; };
 
 function useWallet(name, address, sign, off) {
-  WALLET = { name, address, sign, off }; CHOOSING = false;
+  WALLET = { name, address, sign, off }; closePop();
   $('#connect').textContent = `${name} ${short(address)}`; $('#mode-badge').className = 'badge rfq'; $('#mode-badge').textContent = 'Wallet connected';
   $('#taker').value = address; $('#taker').disabled = true; tbadge('', 'Connected');
   tb().innerHTML = `<p class="muted" style="margin:0">Request quotes. They are built for <span class="mono">${esc(short(address))}</span>, and you can sign the firm quote here if it passes every check.</p>`;
@@ -602,28 +660,41 @@ function connectPrivy() {
   box.innerHTML = '<span class="muted">Loading Privy…</span>';
   privyLoading.then(() => { box.innerHTML = ''; mount(); }, e => { box.innerHTML = `<p class="err" style="margin:0">${esc(e.message)}</p>`; });
 }
+const pop = () => $('#wallet-pop'), wc = () => $('#wallet-choices');
+function openPop() { pop().hidden = false; $('#connect').setAttribute('aria-expanded', 'true'); pop().querySelector('button')?.focus(); }
+function closePop() { pop().hidden = true; $('#connect').setAttribute('aria-expanded', 'false'); CHOOSING = false; }
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !pop().hidden) { closePop(); $('#connect').focus(); } });
+document.addEventListener('mousedown', e => { if (!pop().hidden && !e.target.closest('.wal')) closePop(); });
+function walletMenu() {
+  wc().innerHTML = `<span class="lbl">Connected</span><p style="margin:0"><b>${esc(WALLET.name)}</b> <span class="mono">${esc(short(WALLET.address))}</span></p>
+    <div class="wallets"><button type="button" class="btn ghost" id="w-off">Disconnect</button></div>`;
+  $('#w-off').onclick = () => { disconnect(); closePop(); };
+  openPop();
+}
 function chooser() {
-  CHOOSING = true; tbadge('', 'Choose');
+  CHOOSING = true;
   const std = [...STD.values()], old = legacy();
-  tb().innerHTML = `<span class="lbl">Connect with</span><div class="wallets">
+  wc().innerHTML = `<span class="lbl">Connect with</span><div class="wallets">
       <button type="button" class="btn ghost" data-k="privy" style="justify-content:flex-start">Privy: email, social or a wallet</button>
       ${std.map((w, i) => `<button type="button" class="btn ghost" data-k="std" data-i="${i}" style="display:flex;align-items:center;gap:8px;justify-content:center">${w.icon ? `<img src="${esc(w.icon)}" alt="" width="18" height="18">` : ''}${esc(w.name)}</button>`).join('')}
       ${old.map(([n], i) => `<button type="button" class="btn ghost" data-k="old" data-i="${i}">${esc(n)}</button>`).join('')}
     </div>
     ${std.length || old.length ? '' : '<p class="note">No Solana wallet found in this browser. MetaMask (with Solana turned on), Phantom, Solflare or Backpack appear here once installed.</p>'}
     <p class="note">Privy needs this desk's address (${esc(location.origin)}) in your Privy app's allowed origins.</p>`;
-  tb().querySelectorAll('[data-k]').forEach(b => b.onclick = async () => {
+  wc().querySelectorAll('[data-k]').forEach(b => b.onclick = async () => {
     const k = b.dataset.k, i = Number(b.dataset.i);
+    wc().querySelector('.err')?.remove();
     try { if (k === 'privy') return connectPrivy(); if (k === 'std') await connectStd(std[i]); else await connectLegacy(old[i][0], old[i][1]); }
-    catch (e) { tb().insertAdjacentHTML('beforeend', `<p class="err" style="margin:var(--s2) 0 0">${esc(b.textContent.trim())} did not connect: ${esc(e.message ?? e)}</p>`); }
+    catch (e) { wc().insertAdjacentHTML('beforeend', `<p class="err" style="margin:var(--s2) 0 0">${esc(b.textContent.trim())} did not connect: ${esc(e.message ?? e)}</p>`); }
   });
+  if (pop().hidden) openPop();
 }
 function disconnect() {
   try { WALLET?.off?.(); } catch {}
   WALLET = null; TRADE = null; CHOOSING = false; clearInterval(tradeTimer); $('#connect').textContent = 'Connect wallet'; $('#mode-badge').className = 'badge'; $('#mode-badge').textContent = 'Read-only';
   $('#taker').disabled = false; $('#taker').value = ''; tbadge('', 'No wallet'); tb().innerHTML = '<p class="muted" style="margin:0">Wallet disconnected. A Privy session stays signed in until you log out in the Privy box.</p>';
 }
-$('#connect').onclick = () => (WALLET ? disconnect() : chooser());
+$('#connect').onclick = () => (!pop().hidden ? closePop() : WALLET ? walletMenu() : chooser());
 function tradePanel(m) {
   TRADE = m; clearInterval(tradeTimer);
   if (!m.tradable) { tbadge('neg', 'Not tradable'); tb().innerHTML = `<p class="trade-sum">${esc(m.summary)}</p><p class="err" style="margin:0">${esc(m.why)}</p>`; return; }

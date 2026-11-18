@@ -167,7 +167,7 @@ An anvil fork cannot run Coinbase's tokens (they are B20 precompiles; `symbol()`
 
 How it plugs in:
 - **Base trader:** `createBaseTrader` adds Relay venues for a token with no V2 WETH pool, or with a thin one (under 1 WETH, `THIN_V2_WETH`; many tokens keep a dust V2 pair, e.g. ZORA with about 0.003 WETH). The router then takes the better quote. Tokens with a real V2 pool are unchanged, which keeps Relay API use low. Pass `relay: false` to turn it off.
-- **Server:** `MODE=base-mainnet` passes `RELAY_API_KEY` when it is set, and `BASE_RELAY=off` turns Relay off.
+- **Server:** `MODE=base-mainnet` passes `RELAY_API_KEY` when it is set, and `BASE_RELAY=off` turns Relay off. `BASE_AGGREGATOR=kyberswap` uses KyberSwap instead (`packages/evm/src/kyber.ts`, its own gate on the router call); for a 0.5 ETH TSLAc buy on 2026-11-18 KyberSwap quoted 16 bps more than Relay (RFQ Desk, Base tab).
 - **Outages:** if Relay is rate limited (HTTP 429), returns a 5xx error or can't be reached, or the node fails a simulation for a transient reason, the trade waits and is retried. A real refusal still fails it: no route, an unreviewed contract, a minimum too low, or a node without `eth_simulateV1`.
 - **Fork check:** `npm run verify:server-base` passed 15 of 15 (report `docs/live-verification/2026-11-18T12-49-37-045Z-server-base.md`). Two checks are new:
   - **B14:** a 0.002 ETH ZORA buy goes through Relay's router, from the real server code with the Privy stand-in applying the README's Relay rules (`relay-buys`, `relay-sells`, `approve-relay`).

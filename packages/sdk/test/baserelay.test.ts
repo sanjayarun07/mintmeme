@@ -26,7 +26,19 @@ test('Base trader: a token without a V2 pool gets Relay venues (both ways); with
   const vs = t.chain.venues(); assert.equal(vs.length, 2); assert.ok(vs.every(v => v.family === 'relay')); assert.ok(vs.some(v => v.supports(NATIVE, TOKEN)) && vs.some(v => v.supports(TOKEN, NATIVE)));
   assert.ok(asked.every(a => a.startsWith(p.address.toLowerCase())), 'reference quotes are asked for the user\'s own wallet');
   const off = await createBaseTrader({ userId: 'u', address: p.address, rpcUrl: 'http://rpc.test', privy, state: mem(), rpc, relay: false });
-  await assert.rejects(off.prepare(TOKEN), (e: any) => e.code === 'no_route' && /Relay routing is off/.test(e.message));
+  await assert.rejects(off.prepare(TOKEN), (e: any) => e.code === 'no_route' && /aggregator routing is off/.test(e.message));
   const none = await createBaseTrader({ userId: 'u', address: p.address, rpcUrl: 'http://rpc.test', privy, state: mem(), rpc, relay: { client: { quote: async () => { throw new Error('Relay quote failed: HTTP 400: no routes found'); } } as any } });
   await assert.rejects(none.prepare(TOKEN), (e: any) => e.code === 'no_route' && /no Relay route.*no routes found/.test(e.message));
+});
+
+test('Base trader with aggregator kyberswap: the same token gets KyberSwap venues instead of Relay ones, and the policy allows that venue family', async () => {
+  const p = fakePrivyEvm(), privy = new PrivyApi({ ...p.cfg, fetchFn: p.fetchFn, chainType: 'ethereum' }), asked: string[] = [];
+  const relayAsked: string[] = [], relay = { client: { quote: async () => { relayAsked.push('relay'); return quote; } } as any };
+  const kclient = { quote: async (tin: string, tout: string, amt: bigint) => { asked.push(`${tin}>${tout}:${amt}`); return { amountOut: BigInt(fx.amountOut), routeSummary: {}, path: ['aero-cl'] }; } } as any;
+  const t = await createBaseTrader({ userId: 'u', address: p.address, rpcUrl: 'http://rpc.test', privy, state: mem(), rpc, relay, aggregator: 'kyberswap', kyber: { client: kclient } });
+  await t.prepare(TOKEN);
+  const vs = t.chain.venues(); assert.equal(vs.length, 2); assert.ok(vs.every(v => v.family === 'kyberswap' && v.id.startsWith('kyber:')), vs.map(v => v.id).join(', '));
+  assert.equal(t.chain.aggKind, 'kyberswap'); assert.deepEqual(relayAsked, [], 'Relay is not asked at all'); assert.ok(asked.length >= 2, 'KyberSwap quoted both ways');
+  const none = await createBaseTrader({ userId: 'u', address: p.address, rpcUrl: 'http://rpc.test', privy, state: mem(), rpc, aggregator: 'kyberswap', kyber: { client: { quote: async () => { throw new Error('KyberSwap routes failed: HTTP 400: route not found'); } } as any } });
+  await assert.rejects(none.prepare(TOKEN), (e: any) => e.code === 'no_route' && /no KyberSwap route.*route not found/.test(e.message));
 });

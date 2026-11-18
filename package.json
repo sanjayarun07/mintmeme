@@ -16,6 +16,7 @@
     "build:privy": "cd apps/privy && npm install && npm run build",
     "verify:sol-guard": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/solguardfork.ts",
     "verify:server-base": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/serverbase.ts",
+    "verify:server-multi": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/servermulti.ts",
     "verify:server-sol": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/serverfork.ts",
     "verify:server-copy": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/servercopyfork.ts",
     "server:loadtest": "node --experimental-transform-types --no-warnings apps/server/loadtest.ts",

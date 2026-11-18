@@ -10,13 +10,33 @@ This is the guide for **third parties integrating the trading API**: apps, bots,
 
 ## 1. Environments
 
-The same API runs in three modes. Your operator tells you which one a URL serves.
+The same API runs in practice mode or on real chains. Your operator tells you which a URL serves; `GET /v1/chains` (no key) lists them.
 
 | Mode | What trades | Amounts in requests | Wallets |
 |---|---|---|---|
 | `practice` | A simulated chain with fake funds | Raw base units (strings of digits) | Two practice wallets per user: `w1`, `w2`; token `0xMEME` |
 | `solana-mainnet` | **Real funds** on Solana: Jupiter routes, pump.fun, tokenized stocks | **Plain units** (`"sol": "0.01"`) or raw units | The user's own Privy wallet, linked once (section 5) |
 | `base-mainnet` | **Real funds** on Base: Uniswap V2 and Relay | **Plain units** (`"eth": "0.001"`) or raw units | The user's own Privy Ethereum wallet, linked once |
+| `bnb` (in `CHAINS`) | **Real funds** on BNB Chain: PancakeSwap V2 | **Plain units** (`"bnb": "0.01"`) or raw units | The user's Privy Ethereum wallet, linked for BNB |
+| `robinhood` (in `CHAINS`) | **Real funds** on Robinhood Chain: Uniswap V2 | **Plain units** (`"eth": "0.001"`) or raw units | The user's Privy Ethereum wallet, linked for Robinhood |
+
+### One server, several chains
+
+A server can run several chains at once (`CHAINS=solana,base,bnb,robinhood`). Then **the path names the chain**: put `/<chain>` after `/v1`.
+
+```bash
+curl -s $BASE/v1/chains                                                     # {"default":"solana","chains":[{"id":"solana","prefix":"/v1/solana/",...},...]}
+curl -s -H "Authorization: Bearer $KEY" $BASE/v1/base/overview              # your Base account
+curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -H 'Idempotency-Key: bnb-001' \
+  -d '{"token":"0x55d398326f99059ff775485246999027b3197955","bnb":"0.01","slippagePct":3}' $BASE/v1/bnb/trades/buy
+```
+
+- A path **without** a chain goes to the server's **default chain** (the first one listed). Existing integrations keep working unchanged.
+- Your API key and rate limit are the same on every chain. Each chain is a separate account: its own wallet link (section 5, under `/v1/<chain>/wallet/...`),
+  orders, trades, positions, settings and event stream (`/v1/<chain>/events`). An order id or trade key on one chain is not visible on another.
+- App routes (`/v1/app/*`) have no chain. A chain the server does not run answers `404 chain_not_enabled`. A chain that is down for your account answers
+  `503 chain_unavailable` (retry after the `retry-after` seconds); your other chains are not affected.
+- Webhook events carry `"chain"` when the server runs several.
 
 The base URL is whatever the operator gives you, for example `https://api.example.com`. All paths start with `/v1`. The server speaks plain HTTP behind a TLS load balancer; always call it over HTTPS.
 
@@ -145,7 +165,7 @@ A cluster has several nodes. Any node accepts any request and forwards it to the
 
 ## 5. Linking a user's wallet (real-funds servers)
 
-On `solana-mainnet` and `base-mainnet` the server never holds the user's key. The user keeps their own Privy wallet and grants the server permission to sign trades **inside a policy** (allowed programs or contracts, a cap per trade). Until a wallet is linked, reads work and every trade answers `409 wallet_not_active` with the reason.
+On `solana-mainnet`, `base-mainnet` and every real chain of a multi-chain server the server never holds the user's key. On a multi-chain server each chain is linked on its own, under its prefix: `/v1/base/wallet/link/start`, `/v1/bnb/wallet/link/start` and so on (one Privy Ethereum wallet can be linked on every EVM chain; each is checked against that chain's policy). The user keeps their own Privy wallet and grants the server permission to sign trades **inside a policy** (allowed programs or contracts, a cap per trade). Until a wallet is linked, reads work and every trade answers `409 wallet_not_active` with the reason.
 
 Steps, done once per user:
 
@@ -255,7 +275,11 @@ A blocked buy answers `409 unsafe_token` with the reasons. Sells are never block
 
 ---
 
-## 8. Base specifics
+## 8. Base, BNB Chain and Robinhood Chain specifics
+
+- **BNB Chain** (`/v1/bnb/...`): PancakeSwap V2 pools against WBNB (0.25% pool fee), amounts in `bnb`; caps by default 0.02 BNB per buy, 0.1 BNB per day. Quotes report the venue as `uniswap-v2` (PancakeSwap V2 is a Uniswap V2 fork).
+- **Robinhood Chain** (`/v1/robinhood/...`): Uniswap V2 pools against WETH, amounts in `eth`; caps by default 0.01 ETH per buy, 0.05 ETH per day.
+- On both, a token without a V2 pool against the wrapped native coin answers `no_route` (no Relay or KyberSwap there yet). The rest of this section is Base.
 
 - **Venues:** Uniswap V2 pools against WETH, and **Relay** for tokens with no V2 pool or a thin one, such as Coinbase's tokenized stocks (NVDAc and others) and most Base memecoins. Every Relay transaction is decoded, checked and simulated before the user's wallet signs it.
 - **Caps:** by default at most 0.01 ETH per buy and 0.05 ETH per day (operator setting).
@@ -401,12 +425,13 @@ A trade that the engine **refuses or that fails** is not an HTTP error. You get 
 
 ## 15. Route reference
 
-Scopes: **R** = `read` or higher; **T** = `trade`; **A** = app key. Modes: all modes unless noted (**S** = `solana-mainnet`, **B** = `base-mainnet`).
+Scopes: **R** = `read` or higher; **T** = `trade`; **A** = app key. Modes: all modes unless noted (**S** = `solana-mainnet`, **B** = `base-mainnet`). On a multi-chain server every route except `/v1/app/*`, `/v1/health` and `/v1/chains` also exists as `/v1/<chain>/...` (section 1).
 
 | Method | Path | Scope | What it does |
 |---|---|---|---|
 | GET | `/v1/health` | none | `{"ok":true}` |
-| GET | `/v1/openapi.json` | none | The OpenAPI spec |
+| GET | `/v1/openapi.json` | none | The OpenAPI spec (`/v1/<chain>/openapi.json`: that chain's routes) |
+| GET | `/v1/chains` | none | The chains this server runs, the default chain and each one's path prefix |
 | GET | `/v1/overview` | R | Account state: chain, block, active orders, running jobs |
 | POST | `/v1/quote` | R | Best price for a market trade; nothing is sent |
 | POST | `/v1/trades/buy` | T | Market buy (send `Idempotency-Key`) |
@@ -451,6 +476,7 @@ The per-field details of each body are in `GET /v1/openapi.json` (each route's `
 ```ts
 import { MemeClient, verifyWebhook } from 'memedesk-sdk';
 const c = new MemeClient({ baseUrl: BASE, apiKey: KEY });            // app key: new MemeClient({ ... }).forUser('user-42')
+const bnb = c.forChain('bnb');                                        // multi-chain server: every call under /v1/bnb/ (or pass chain: 'bnb' above)
 const t = await c.swap({ side: 'buy', mint: '<mint>', sol: '0.01', slippagePct: 3, key: 'buy-002' });
 await c.placeOrder({ type: 'take-profit', mint: '<mint>', pct: 100, priceUsd: '0.0002' });
 const ok = await verifyWebhook(secret, rawBody, req.headers['x-memedesk-signature']);

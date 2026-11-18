@@ -6,13 +6,12 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { NATIVE } from '../../core/src/index.ts';
 import { EvmRpcChain, RelayClient, RELAY_BASE } from '../../evm/src/index.ts';
+import { BASE_STOCKS } from '../../evm/src/basestocks.ts';
 import { EvmJsonRpc, BASE } from '../../sdk/src/base.ts';
 
 const url = process.env.BASE_RPC_URL ?? 'https://mainnet.base.org', inner = new EvmJsonRpc(url), TAKER = (process.env.BASE_SIM_TAKER ?? '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85').toLowerCase();
 const rpc = { call: async <T = any>(m: string, p: unknown[] = []): Promise<T> => { if (m === 'eth_sendRawTransaction') throw new Error('read-only: sending is refused'); return inner.call<T>(m, p); } };
-const STOCKS: Record<string, string> = { NVDAc: '0xb20000000000000000000078ee7ce2fE4908108C', METAc: '0xb2000000000000000000008bC8786B856E61707C', AAPLc: '0xb200000000000000000000C2e324d24d7eEcd1fb',
-  GOOGLc: '0xb2000000000000000000002D0BA3164cc74f58B7', AMZNc: '0xb200000000000000000000d9192b6B456483C2E8', MSFTc: '0xB200000000000000000000Ab99cFa739E253872B', MSTRc: '0xb2000000000000000000004884b426556b92883d',
-  SNDKc: '0xb200000000000000000000397293Cb8cda9a10c5', SPCXc: '0xb2000000000000000000007b9fcbd005511aCBd5', TSLAc: '0xb2000000000000000000001e800a7f5189430cD0' };
+const STOCKS = BASE_STOCKS;
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms)), AMT = 2_000_000_000_000_000n, rows: string[] = [], results: Record<string, string> = {};
 const chain = new EvmRpcChain({ id: 'base-read', chainId: BASE.chainId, router: BASE.router, weth: BASE.weth, pools: [], relay: { client: new RelayClient({ chainId: 8453, apiKey: process.env.RELAY_API_KEY }), contracts: RELAY_BASE, refWallet: TAKER } },
   rpc, { sign: () => { throw new Error('read-only: signing is refused'); } });

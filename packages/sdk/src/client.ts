@@ -3,8 +3,10 @@
 import { SdkError, toJson } from './wire.ts';
 import type { Amount, PriceOrderInput, BulkInput, TwapInput, TraderEvent } from './trader.ts';
 
-/** `userId`: with an APP key, the end user every call acts for (sent as X-User-Id). Use `forUser` to get a client per end user. */
-export interface ClientOptions { baseUrl: string; apiKey: string; userId?: string; fetch?: typeof fetch; timeoutMs?: number }
+/** `userId`: with an APP key, the end user every call acts for (sent as X-User-Id). Use `forUser` to get a client per end user.
+ *  `chain`: on a server that runs several chains (CHAINS=solana,base), the chain every call is for: paths become /v1/<chain>/... (app routes have no chain). Without it,
+ *  calls go to the server's default chain. Use `forChain` for a client per chain, `chains()` for the list. */
+export interface ClientOptions { baseUrl: string; apiKey: string; userId?: string; chain?: string; fetch?: typeof fetch; timeoutMs?: number }
 type J = any;
 /** A copy config for the execution server (MODE=solana-mainnet), in plain units. Exactly one of `fixedSol` or `percent`. Unknown fields are refused by the server. */
 export interface CopyInput {
@@ -24,11 +26,13 @@ export interface StockTradeOptions {
   /** Skip the safety and share-price checks for this one trade. */ allowRiskyToken?: boolean;
 }
 export class MemeClient {
-  constructor(private o: ClientOptions) { if (!o.apiKey) throw new SdkError('config', 'apiKey is required'); }
+  constructor(private o: ClientOptions) { if (!o.apiKey) throw new SdkError('config', 'apiKey is required'); if (o.chain !== undefined && !/^[a-z][a-z0-9-]{1,23}$/.test(o.chain)) throw new SdkError('config', 'chain must be a chain id such as solana or base'); }
+  /** The URL of an API path, with this client's chain prefix (not on app routes or the chain list). */
+  private url(path: string) { const c = this.o.chain, p = c && path.startsWith('/v1/') && !path.startsWith('/v1/app/') && path !== '/v1/chains' ? `/v1/${c}/${path.slice(4)}` : path; return this.o.baseUrl.replace(/\/$/, '') + p; }
   private async req(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<J> {
     const f = this.o.fetch ?? fetch, ctl = new AbortController(), t = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 30_000);
     try {
-      const r = await f(this.o.baseUrl.replace(/\/$/, '') + path, { method, signal: ctl.signal, headers: { authorization: `Bearer ${this.o.apiKey}`, ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : toJson(body) });
+      const r = await f(this.url(path), { method, signal: ctl.signal, headers: { authorization: `Bearer ${this.o.apiKey}`, ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : toJson(body) });
       const j: J = await r.json().catch(() => ({}));
       if (!r.ok) throw new SdkError(j?.error?.code ?? 'http_' + r.status, j?.error?.message ?? `request failed with ${r.status}`, j?.error?.fix, r.status);
       return j;
@@ -36,6 +40,10 @@ export class MemeClient {
   }
   /** With an app key: the same client acting for another end user. */
   forUser(userId: string) { return new MemeClient({ ...this.o, userId }); }
+  /** The same client for another chain of a multi-chain server (`forChain('base')`). */
+  forChain(chain: string) { return new MemeClient({ ...this.o, chain }); }
+  /** The chains this server runs and its default chain (no key needed). */
+  chains(): Promise<{ default: string; chains: { id: string; label: string; prefix: string; default: boolean }[] }> { return this.req('GET', '/v1/chains'); }
   // ── app keys only: the app's webhook (signed POSTs of every end user's events) and its end users ──
   appWebhook() { return this.req('GET', '/v1/app/webhook'); }
   /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
@@ -56,10 +64,10 @@ export class MemeClient {
   overview() { return this.req('GET', '/v1/overview'); }
   // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
   /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
-  swap(p: { side: 'buy' | 'sell'; /** Solana mint, or a stock ticker such as "TSLAx" */ mint?: string; /** Base: the 0x token address (mint works too); Solana: a mint or a stock ticker */ token?: string; sol?: string; /** Base (MODE=base-mainnet): ETH to spend */ eth?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string; /** this trade only: true = private (Jito), false = public; absent = your setting */ mevProtection?: boolean } & StockTradeOptions) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
+  swap(p: { side: 'buy' | 'sell'; /** Solana mint, or a stock ticker such as "TSLAx" */ mint?: string; /** Base: the 0x token address (mint works too); Solana: a mint or a stock ticker */ token?: string; sol?: string; /** Base (MODE=base-mainnet): ETH to spend */ eth?: string; /** BNB Chain: BNB amounts */ bnb?: string; tokens?: string; pct?: number; slippagePct?: number; key?: string; /** this trade only: true = private (Jito), false = public; absent = your setting */ mevProtection?: boolean } & StockTradeOptions) { const { side, key, ...b } = p; return this.req('POST', `/v1/trades/${side === 'sell' ? 'sell' : 'buy'}`, b, key ? { 'idempotency-key': key } : {}); }
   /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
    *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
-  placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; /** the token's mint (or `stock` with a ticker) */ mint?: string; sol?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
+  placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; /** the token's mint (or `stock` with a ticker) */ mint?: string; sol?: string; /** Base, Robinhood: ETH amounts */ eth?: string; /** BNB Chain: BNB amounts */ bnb?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
     trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number; mevProtection?: boolean } & StockTradeOptions) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
   /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
   wallet() { return this.req('GET', '/v1/wallet'); }
@@ -118,7 +126,7 @@ export class MemeClient {
   removeCopy(id: string) { return this.req('DELETE', `/v1/copies/${enc(id)}`); }
   /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
   async events(on: (e: TraderEvent) => void, signal?: AbortSignal): Promise<void> {
-    const f = this.o.fetch ?? fetch, r = await f(this.o.baseUrl.replace(/\/$/, '') + '/v1/events', { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream' }, signal });
+    const f = this.o.fetch ?? fetch, r = await f(this.url('/v1/events'), { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream', ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}) }, signal });
     if (!r.ok || !r.body) throw new SdkError('http_' + r.status, `event stream refused (${r.status})`, undefined, r.status);
     const dec = new TextDecoder(); let buf = ''; for await (const chunk of r.body as any) { buf += dec.decode(chunk, { stream: true }); let i; while ((i = buf.indexOf('\n\n')) >= 0) { const block = buf.slice(0, i); buf = buf.slice(i + 2); const d = block.split('\n').find(l => l.startsWith('data: ')); if (d) { try { on(JSON.parse(d.slice(6))); } catch { /* ignore a bad frame */ } } } }
   }

@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.js';
-import { EvmRpcChain, JsonRpcError, mismatch, signerOf, isAddress, erc20, RelayClient, RELAY_BASE } from '../../evm/src/index.js';
+import { EvmRpcChain, JsonRpcError, mismatch, signerOf, isAddress, erc20, RelayClient, RELAY_BASE, KyberClient } from '../../evm/src/index.js';
 import { PrivyApi, SignRequestError } from '../../sol/src/index.js';
 import { Trader } from './trader.js';
 import { SdkError } from './wire.js';
@@ -21,6 +21,18 @@ import { simpleBody } from './solana.js';
 export const BASE = {
     chainId: 8453, router: '0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24', factory: '0x8909dc15e40173ff4699343b6eb8132c65e18ec6',
     weth: '0x4200000000000000000000000000000000000006', usdc: '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', wethUsdcPair: '0x88a43bbdf9d098eec7bceda4e2494615dfd9bb9c',
+};
+export const EVM_NETWORKS = {
+    base: { id: 'base', label: 'Base', engineChain: 'base-main', chainId: BASE.chainId, router: BASE.router, factory: BASE.factory, weth: BASE.weth, native: 'ETH', dex: 'Uniswap V2',
+        usd: { token: BASE.usdc, decimals: 6, pair: BASE.wethUsdcPair }, finalityDepth: 3, relay: true, kyberChain: 'base' },
+    // BNB Smart Chain, PancakeSwap V2 (0.25% pool fee) against WBNB; BNB/USD from the WBNB/USDT (Binance-Peg, 18 decimals) pool
+    bnb: { id: 'bnb', label: 'BNB Chain', engineChain: 'bnb-main', chainId: 56, router: '0x10ed43c718714eb63d5aa57b78b54704e256024e', factory: '0xca143ce32fe78f1f7019d7d551a6402fc5350c73',
+        weth: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c', native: 'BNB', dex: 'PancakeSwap V2', usd: { token: '0x55d398326f99059ff775485246999027b3197955', decimals: 18, pair: '0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae' },
+        fee: { num: 9975n, den: 10000n }, finalityDepth: 5, relay: false },
+    // Robinhood Chain (Arbitrum Nitro, ETH gas), Uniswap V2 against WETH; ETH/USD from the WETH/USDG (Paxos Global Dollar, 6 decimals) pool
+    robinhood: { id: 'robinhood', label: 'Robinhood Chain', engineChain: 'robinhood-main', chainId: 4663, router: '0x89e5db8b5aa49aa85ac63f691524311aeb649eba', factory: '0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f',
+        weth: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', native: 'ETH', dex: 'Uniswap V2', usd: { token: '0x5fc5360d0400a0fd4f2af552add042d716f1d168', decimals: 6, pair: '0x8803c117ccae7b5146297876c2a25df135141c4d' },
+        finalityDepth: 10, relay: false },
 };
 /** Defaults: at most 0.01 ETH per buy and 0.05 ETH of buys per day. The Privy policy should cap the value separately. */
 export const BASE_DEFAULT_CAPS = { maxTradeWei: 10n ** 16n, dailyCapWei: 5n * 10n ** 16n };
@@ -97,16 +109,16 @@ function backendLedger(b) {
     return { get: k => l.get(k), set: (k, v) => { l.set(k, v); b.write(l.snapshot()); } };
 }
 const word = (a) => a.slice(2).toLowerCase().padStart(64, '0');
-/** ETH/USD from the V2 WETH/USDC pool reserves on Base (one eth_call, cached). */
-export function baseEthUsd(rpc, ttlMs = 30_000) {
+/** ETH/USD from the V2 WETH/USDC pool reserves on Base (one eth_call, cached). `net`: another network's native coin against its dollar pool. */
+export function baseEthUsd(rpc, ttlMs = 30_000, net = EVM_NETWORKS.base) {
     let cache;
     return async () => {
         if (cache && Date.now() - cache.at < ttlMs)
             return cache;
         try {
-            const r = await rpc.call('eth_call', [{ to: BASE.wethUsdcPair, data: '0x0902f1ac' }, 'latest']), r0 = BigInt('0x' + r.slice(2, 66)), r1 = BigInt('0x' + r.slice(66, 130));
-            const [usdc, weth] = BASE.usdc < BASE.weth ? [r0, r1] : [r1, r0]; // token0 is the lower address
-            const v = (Number(usdc) / 1e6) / (Number(weth) / 1e18);
+            const r = await rpc.call('eth_call', [{ to: net.usd.pair, data: '0x0902f1ac' }, 'latest']), r0 = BigInt('0x' + r.slice(2, 66)), r1 = BigInt('0x' + r.slice(66, 130));
+            const [usdc, weth] = lc(net.usd.token) < lc(net.weth) ? [r0, r1] : [r1, r0]; // token0 is the lower address
+            const v = (Number(usdc) / 10 ** net.usd.decimals) / (Number(weth) / 1e18);
             if (v > 0 && Number.isFinite(v))
                 cache = { price: v, at: Date.now() };
         }
@@ -122,10 +134,18 @@ export async function createBaseTrader(o) {
     if (!o.state)
         mkdirSync(o.persistDir, { recursive: true });
     const state = o.state ?? ((n) => fileBackend(join(o.persistDir, `${n}.json`))), log = o.log ?? (() => { }), address = o.address ? lc(o.address) : undefined;
-    const privy = o.privy instanceof PrivyApi ? o.privy : new PrivyApi({ ...o.privy, chainType: 'ethereum' }), caps = o.caps ?? BASE_DEFAULT_CAPS, relayOn = o.relay !== false, venues = relayOn ? ['uniswap-v2', 'relay'] : ['uniswap-v2'];
-    const relayClient = o.relay === false ? undefined : (o.relay?.client ?? new RelayClient({ chainId: BASE.chainId, apiKey: o.relay?.apiKey }));
+    const net = typeof o.network === 'object' ? o.network : EVM_NETWORKS[o.network ?? 'base'];
+    if (!net)
+        throw new SdkError('config', `unknown EVM network ${String(o.network)}: one of ${Object.keys(EVM_NETWORKS).join(', ')}`);
+    const NET = net.label, W = net.native === 'ETH' ? 'WETH' : `W${net.native}`;
+    // aggregator routes: Relay is pinned to Base's contracts; KyberSwap needs its chain name. A network without either runs on its V2 pools only.
+    const relayOn = o.relay !== false && (o.aggregator === 'kyberswap' ? !!net.kyberChain : net.relay);
+    const privy = o.privy instanceof PrivyApi ? o.privy : new PrivyApi({ ...o.privy, chainType: 'ethereum' }), caps = o.caps ?? BASE_DEFAULT_CAPS;
+    const useKyber = relayOn && o.aggregator === 'kyberswap', aggName = useKyber ? 'KyberSwap' : 'Relay', venues = relayOn ? ['uniswap-v2', useKyber ? 'kyberswap' : 'relay'] : ['uniswap-v2'];
+    const relayOpt = o.relay === false ? undefined : o.relay, relayClient = !relayOn || useKyber ? undefined : relayOpt?.client ?? new RelayClient({ chainId: net.chainId, apiKey: relayOpt?.apiKey });
+    const kyberClient = useKyber ? (o.kyber?.client ?? new KyberClient({ chain: net.kyberChain, clientId: o.kyber?.clientId })) : undefined;
     if (privy.chainType !== 'ethereum')
-        throw new SdkError('config', 'createBaseTrader needs a PrivyApi with chainType ethereum (and your Base policy id)');
+        throw new SdkError('config', `createBaseTrader needs a PrivyApi with chainType ethereum (and your ${NET} policy id)`);
     let signable = new Map(), why;
     if (!address)
         why = 'No wallet is linked to this account.';
@@ -137,11 +157,11 @@ export async function createBaseTrader(o) {
             why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why;
     }
     const rpc = o.rpc ?? new EvmJsonRpc(o.rpcUrl);
-    const chain = new EvmRpcChain({ id: 'base-main', chainId: BASE.chainId, router: BASE.router, weth: BASE.weth, pools: [], finalityDepth: 3, ...(relayClient ? { relay: { client: relayClient, contracts: RELAY_BASE, refWallet: address } } : {}) }, rpc, new PrivyEvmSigner(privy, signable));
+    const chain = new EvmRpcChain({ id: net.engineChain, chainId: net.chainId, router: net.router, weth: net.weth, pools: [], finalityDepth: net.finalityDepth, ...(net.fee ? { fee: net.fee } : {}), ...(relayClient ? { relay: { client: relayClient, contracts: RELAY_BASE, refWallet: address } } : {}), ...(kyberClient ? { kyber: { client: kyberClient } } : {}) }, rpc, new PrivyEvmSigner(privy, signable));
     const policies = new Map(), owners = new Map();
     if (address) {
         owners.set(address, 'x');
-        policies.set(address, { userId: o.userId, chains: ['base-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeWei }, dailyLimit: { [NATIVE]: caps.dailyCapWei }, destinations: [], deviceSecret: randomBytes(16).toString('hex') });
+        policies.set(address, { userId: o.userId, chains: [net.engineChain], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeWei }, dailyLimit: { [NATIVE]: caps.dailyCapWei }, destinations: [], deviceSecret: randomBytes(16).toString('hex') });
     }
     const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });
     const decs = new Map(), added = new Set();
@@ -160,52 +180,52 @@ export async function createBaseTrader(o) {
         if (added.has(t))
             return;
         if (!isAddress(t))
-            throw new SdkError('bad_token', 'token must be a 0x token address on Base');
-        if (t === BASE.weth)
-            throw new SdkError('bad_token', 'WETH is ETH here: trade the token against ETH');
+            throw new SdkError('bad_token', `token must be a 0x token address on ${NET}`);
+        if (t === net.weth)
+            throw new SdkError('bad_token', `${W} is ${net.native} here: trade the token against ${net.native}`);
         let pair;
         try {
-            pair = '0x' + (await rpc.call('eth_call', [{ to: BASE.factory, data: '0xe6a43905' + word(BASE.weth) + word(t) }, 'latest'])).slice(26);
+            pair = '0x' + (await rpc.call('eth_call', [{ to: net.factory, data: '0xe6a43905' + word(net.weth) + word(t) }, 'latest'])).slice(26);
         }
         catch (e) {
             throw new SdkError('rpc_unavailable', `could not look up the pool: ${e.message}`, 'Retry shortly.', 503);
         }
-        if (/^0x0{40}$/.test(pair)) { // no V2 pool (Coinbase stocks, V3/V4/Aerodrome-only tokens): Relay routes, gated and simulated before signing (packages/evm/src/relay.ts)
+        if (/^0x0{40}$/.test(pair)) { // no V2 pool (Coinbase stocks, V3/V4/Aerodrome-only tokens): Relay or KyberSwap routes, gated and simulated before signing (relay.ts, kyber.ts)
             if (!relayOn)
-                throw new SdkError('no_route', 'this token has no Uniswap V2 pool against WETH on Base, and Relay routing is off', 'Check the address, or turn Relay on.');
+                throw new SdkError('no_route', `this token has no ${net.dex} pool against ${W} on ${NET}, and aggregator routing is ${net.relay || net.kyberChain ? 'off' : `not available on ${NET}`}`, net.relay || net.kyberChain ? 'Check the address, or turn Relay or KyberSwap on.' : 'Check the address.');
             let ok;
             try {
                 ok = await chain.addAggToken(t);
             }
             catch (e) {
-                throw new SdkError('rpc_unavailable', `could not ask Relay for a route: ${e.message}`, 'Retry shortly.', 503);
+                throw new SdkError('rpc_unavailable', `could not ask ${aggName} for a route: ${e.message}`, 'Retry shortly.', 503);
             }
             if (!ok)
-                throw new SdkError('no_route', `no Uniswap V2 pool and no Relay route for this token on Base${chain.aggError ? ` (${chain.aggError})` : ''}`, 'Check the address, or trade it elsewhere.');
+                throw new SdkError('no_route', `no ${net.dex} pool and no ${aggName} route for this token on ${NET}${chain.aggError ? ` (${chain.aggError})` : ''}`, 'Check the address, or trade it elsewhere.');
         }
         else
             chain.addPool({ id: `uniswap-v2:${t}`, pair });
         await chain.refresh('venues');
         await decimals(t);
         // a V2 pool holding less than THIN_V2_WETH is no market (many tokens keep a dust V2 pair while trading on V3/V4/Aerodrome): add Relay too; the Router takes the better quote
-        const v2 = chain.venues().find(v => v.id === `uniswap-v2:${t}`), wethRes = v2 ? (v2.token0 === BASE.weth ? v2.reserve0 : v2.reserve1) : 0n;
+        const v2 = chain.venues().find(v => v.id === `uniswap-v2:${t}`), wethRes = v2 ? (v2.token0 === net.weth ? v2.reserve0 : v2.reserve1) : 0n;
         if (relayOn && v2 && wethRes < THIN_V2_WETH)
-            await chain.addAggToken(t).catch(e => { log(`${o.userId}: ${t}: thin V2 pool and Relay failed: ${e.message}`); return false; });
+            await chain.addAggToken(t).catch(e => { log(`${o.userId}: ${t}: thin V2 pool and ${aggName} failed: ${e.message}`); return false; });
         added.add(t);
         for (const p of policies.values()) {
             p.maxPerTx[t] = BIG;
             p.dailyLimit[t] = BIG;
         }
     };
-    const usd = o.ethUsd ?? baseEthUsd(rpc);
+    const usd = o.ethUsd ?? baseEthUsd(rpc, 30_000, net);
     const trader = new Trader({ engine, chain, userId: o.userId, venues, state, usd: { quoteUsd: usd, quoteDecimals: 18, tokenDecimals: decimals, maxAgeMs: 120_000 },
         advanceChain: async () => { for (const x of trader.listOrders({ status: 'active' }))
             if (!added.has(lc(x.token)))
                 await prepare(x.token).catch(e => log(`${o.userId}: ${x.token}: ${e.message}`)); await chain.refresh('venues'); } });
     const active = signable.size > 0;
     const balance = async (t) => { const q = erc20.balanceOf(lc(t), address); return erc20.decodeUint(await rpc.call('eth_call', [{ to: q.to, data: q.data }, 'latest'])); };
-    const simple = async (path, body) => { const b = body && typeof body === 'object' && typeof body.token === 'string' && body.token !== NATIVE ? { ...body, token: lc(body.token) } : body; return simpleBody(path, b, { address, decimals, balance, native: { key: 'eth', decimals: 18 } }); };
+    const simple = async (path, body) => { const b = body && typeof body === 'object' && typeof body.token === 'string' && body.token !== NATIVE ? { ...body, token: lc(body.token) } : body; return simpleBody(path, b, { address, decimals, balance, native: { key: net.native.toLowerCase(), decimals: 18 } }); };
     return { trader, chain, active, why, prepare, simple, sync: async () => { await chain.refresh('venues'); },
         refuseIfInactive: () => { if (!active)
-            throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', 'Link a Privy wallet that allows this server (signer + Base policy).', 409); } };
+            throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', `Link a Privy wallet that allows this server (signer + ${NET} policy).`, 409); } };
 }

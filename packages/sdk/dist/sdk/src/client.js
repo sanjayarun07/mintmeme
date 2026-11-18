@@ -7,11 +7,15 @@ export class MemeClient {
         this.o = o;
         if (!o.apiKey)
             throw new SdkError('config', 'apiKey is required');
+        if (o.chain !== undefined && !/^[a-z][a-z0-9-]{1,23}$/.test(o.chain))
+            throw new SdkError('config', 'chain must be a chain id such as solana or base');
     }
+    /** The URL of an API path, with this client's chain prefix (not on app routes or the chain list). */
+    url(path) { const c = this.o.chain, p = c && path.startsWith('/v1/') && !path.startsWith('/v1/app/') && path !== '/v1/chains' ? `/v1/${c}/${path.slice(4)}` : path; return this.o.baseUrl.replace(/\/$/, '') + p; }
     async req(method, path, body, headers = {}) {
         const f = this.o.fetch ?? fetch, ctl = new AbortController(), t = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 30_000);
         try {
-            const r = await f(this.o.baseUrl.replace(/\/$/, '') + path, { method, signal: ctl.signal, headers: { authorization: `Bearer ${this.o.apiKey}`, ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : toJson(body) });
+            const r = await f(this.url(path), { method, signal: ctl.signal, headers: { authorization: `Bearer ${this.o.apiKey}`, ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}), ...(body === undefined ? {} : { 'content-type': 'application/json' }), ...headers }, body: body === undefined ? undefined : toJson(body) });
             const j = await r.json().catch(() => ({}));
             if (!r.ok)
                 throw new SdkError(j?.error?.code ?? 'http_' + r.status, j?.error?.message ?? `request failed with ${r.status}`, j?.error?.fix, r.status);
@@ -28,6 +32,10 @@ export class MemeClient {
     }
     /** With an app key: the same client acting for another end user. */
     forUser(userId) { return new MemeClient({ ...this.o, userId }); }
+    /** The same client for another chain of a multi-chain server (`forChain('base')`). */
+    forChain(chain) { return new MemeClient({ ...this.o, chain }); }
+    /** The chains this server runs and its default chain (no key needed). */
+    chains() { return this.req('GET', '/v1/chains'); }
     // ── app keys only: the app's webhook (signed POSTs of every end user's events) and its end users ──
     appWebhook() { return this.req('GET', '/v1/app/webhook'); }
     /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
@@ -109,7 +117,7 @@ export class MemeClient {
     removeCopy(id) { return this.req('DELETE', `/v1/copies/${enc(id)}`); }
     /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
     async events(on, signal) {
-        const f = this.o.fetch ?? fetch, r = await f(this.o.baseUrl.replace(/\/$/, '') + '/v1/events', { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream' }, signal });
+        const f = this.o.fetch ?? fetch, r = await f(this.url('/v1/events'), { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream', ...(this.o.userId ? { 'x-user-id': this.o.userId } : {}) }, signal });
         if (!r.ok || !r.body)
             throw new SdkError('http_' + r.status, `event stream refused (${r.status})`, undefined, r.status);
         const dec = new TextDecoder();

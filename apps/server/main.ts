@@ -13,14 +13,19 @@
  *    SOLANA_MAX_TRADE_SOL=0.05  SOLANA_DAILY_CAP_SOL=0.25   the engine's SOL caps on buys per user (MODE=solana-mainnet); the Privy policy's sol-cap applies separately
  *    JUPITERZ=off|on  JUPITERZ_MIN_SOL=100  JUPITERZ_MARGIN_BPS=20   JupiterZ market-maker (RFQ) fills for large Solana trades without a platform fee (docs/JUPITERZ.md)
  *    PLATFORM_FEE_WALLET + PLATFORM_FEE_BPS=0..100   the operator's fee on every real trade (paid in SOL);  APP_FEE_MAX_BPS=100   the most an app may set with PUT /v1/app/fees
+ *  CHAINS=solana,base   serve several chains from one node group (apps/server/chains.ts): each user gets an account per chain; requests name it with /v1/<chain>/...,
+ *                       and paths without a prefix go to the first chain listed. Each chain needs the settings its MODE below lists. MODE stays as the one-chain shorthand.
  *  MODE: `practice` (simulated chain, fake funds), `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY)
- *        or `base-mainnet` (REAL funds on Base, Uniswap V2, plus Relay for tokens with no V2 pool (BASE_RELAY=off turns it off, RELAY_API_KEY): each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
+ *        or `base-mainnet` (REAL funds on Base, Uniswap V2, plus Relay for tokens with no V2 pool (BASE_RELAY=off turns it off, RELAY_API_KEY; BASE_AGGREGATOR=kyberswap uses KyberSwap instead, KYBER_CLIENT_ID): each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
  *        PRIVY_AUTH_PRIVATE_KEY, PRIVY_BASE_POLICY_ID and BASE_RPC_URL or ALCHEMY_API_KEY with Base enabled). BASE_MAX_TRADE_ETH=0.01, BASE_DAILY_CAP_ETH=0.05. */
 import { readFileSync } from 'node:fs';
 import { createNode } from './node.ts';
+import type { ChainAccounts, ExtraRoutes } from './node.ts';
+import { parseChains, CHAIN_SPECS } from './chains.ts';
+import type { ChainSpec } from './chains.ts';
 import { practiceAccount } from './accounts.ts';
 import { solanaAccounts, linkRoutes } from './solaccount.ts';
-import { baseAccounts, baseLinkRoutes } from './baseaccount.ts';
+import { baseAccounts, baseLinkRoutes, walletState } from './baseaccount.ts';
 import { toUnits } from '../../packages/sdk/src/solana.ts';
 import { readAppFee } from './webhooks.ts';
 import type { AppFee } from './webhooks.ts';
@@ -90,47 +95,70 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
     { name: 'Privy', run: async () => { await fetch('https://api.privy.io', { signal: AbortSignal.timeout(5_000) }); } },
     { name: 'Jito block engine', run: async () => { const r = await fetch('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
   ];
-  return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, stock: acc.stock, stocksEnabled: acc.stocksEnabled, ...h }) };
+  return { statusChecks, makeAccount: acc.make, extraRoutes: (h => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, stock: acc.stock, stocksEnabled: acc.stocksEnabled, ...h })) as ExtraRoutes };
 }
 
-/** MODE=base-mainnet: real accounts on Base signed through each user's Privy Ethereum wallet (baseaccount.ts). */
-export function baseMode(e: NodeJS.ProcessEnv) {
-  const rpcUrl = e.BASE_RPC_URL || (e.ALCHEMY_API_KEY ? `https://base-mainnet.g.alchemy.com/v2/${e.ALCHEMY_API_KEY}` : '');
-  const c = { appId: e.PRIVY_APP_ID, appSecret: e.PRIVY_APP_SECRET, authKey: e.PRIVY_AUTH_PRIVATE_KEY, signerId: e.PRIVY_AUTH_KEY_ID, policyId: e.PRIVY_BASE_POLICY_ID };
-  const missing = [!rpcUrl && 'BASE_RPC_URL (or ALCHEMY_API_KEY)', ...Object.entries({ PRIVY_APP_ID: c.appId, PRIVY_APP_SECRET: c.appSecret, PRIVY_AUTH_PRIVATE_KEY: c.authKey, PRIVY_AUTH_KEY_ID: c.signerId, PRIVY_BASE_POLICY_ID: c.policyId }).filter(([, v]) => !v?.trim()).map(([k]) => k)].filter(Boolean);
-  if (missing.length) throw new Error(`MODE=base-mainnet needs ${missing.join(', ')} (README → Base with Privy).`);
-  if (e.PLATFORM_FEE_BPS && e.PLATFORM_FEE_BPS !== '0') throw new Error('PLATFORM_FEE_BPS is set, but fees are not collected on Base yet (no on-chain fee router): unset it for MODE=base-mainnet');
+/** An EVM chain from its spec (chains.ts): real accounts signed through each user's Privy Ethereum wallet (baseaccount.ts). MODE=base-mainnet is evmMode(base). */
+export function evmMode(spec: ChainSpec, e: NodeJS.ProcessEnv) {
+  const v = spec.evm; if (!v) throw new Error(`chain ${spec.id} is not an EVM chain`);
+  const rpcUrl = e[v.rpcEnv] || (e.ALCHEMY_API_KEY && v.alchemyNet ? `https://${v.alchemyNet}.g.alchemy.com/v2/${e.ALCHEMY_API_KEY}` : '');
+  const c = { appId: e.PRIVY_APP_ID, appSecret: e.PRIVY_APP_SECRET, authKey: e.PRIVY_AUTH_PRIVATE_KEY, signerId: e.PRIVY_AUTH_KEY_ID, policyId: e[v.policyEnv] };
+  const missing = [!rpcUrl && `${v.rpcEnv}${v.alchemyNet ? ' (or ALCHEMY_API_KEY)' : ''}`, ...Object.entries({ PRIVY_APP_ID: c.appId, PRIVY_APP_SECRET: c.appSecret, PRIVY_AUTH_PRIVATE_KEY: c.authKey, PRIVY_AUTH_KEY_ID: c.signerId, [v.policyEnv]: c.policyId }).filter(([, x]) => !x?.trim()).map(([k]) => k)].filter(Boolean);
+  if (missing.length) throw new Error(`${spec.id} needs ${missing.join(', ')} (README → Base with Privy).`);
+  // the platform fee is paid in SOL inside Solana trades; EVM chains have no fee router yet, so a fee set for a server with no Solana chain would never be charged
+  if (e.PLATFORM_FEE_BPS && e.PLATFORM_FEE_BPS !== '0' && !parseChains(e).some(s => s.kind === 'solana')) throw new Error(`PLATFORM_FEE_BPS is set, but fees are not collected on ${spec.label} yet (no on-chain fee router): unset it, or add solana to CHAINS (the fee is charged on Solana trades only)`);
   const eth = (k: string, d: string) => { try { return toUnits(e[k] ?? d, 18, k); } catch (x) { throw new Error((x as Error).message); } };
-  const caps = { maxTradeWei: eth('BASE_MAX_TRADE_ETH', '0.01'), dailyCapWei: eth('BASE_DAILY_CAP_ETH', '0.05') };
-  // Relay routes for tokens without a Uniswap V2 pool (Coinbase stocks): on unless BASE_RELAY=off; RELAY_API_KEY is sent when set (Relay's docs require one for quotes)
-  const relay = e.BASE_RELAY === 'off' ? false as const : { apiKey: e.RELAY_API_KEY?.trim() || undefined };
-  const acc = baseAccounts({ rpcUrl, privy: { ...(c as Record<keyof typeof c, string>), apiUrl: e.PRIVY_API_URL || undefined }, caps, relay });
+  const caps = { maxTradeWei: eth(`${v.capsPrefix}_MAX_TRADE_ETH`, v.maxTradeDefault), dailyCapWei: eth(`${v.capsPrefix}_DAILY_CAP_ETH`, v.dailyCapDefault) };
+  if (caps.dailyCapWei < caps.maxTradeWei) throw new Error(`${v.capsPrefix}_DAILY_CAP_ETH must be at least ${v.capsPrefix}_MAX_TRADE_ETH`);
+  // Relay routes for tokens without a direct pool (Coinbase stocks on Base): on unless <relayEnv>=off; the Relay API key is sent when set (Relay's docs require one for quotes)
+  const relay = !v.relayEnv || e[v.relayEnv] === 'off' ? false as const : { apiKey: (v.relayKeyEnv && e[v.relayKeyEnv]?.trim()) || undefined };
+  // which aggregator routes tokens with no direct pool: relay (default) or kyberswap (KYBER_CLIENT_ID is sent as x-client-id)
+  const agg = ((v.aggregatorEnv && e[v.aggregatorEnv]?.trim().toLowerCase()) || 'relay') as 'relay' | 'kyberswap';
+  if (agg !== 'relay' && agg !== 'kyberswap') throw new Error(`${v.aggregatorEnv} must be relay or kyberswap`);
+  const acc = baseAccounts({ rpcUrl, privy: { ...(c as Record<keyof typeof c, string>), apiUrl: e.PRIVY_API_URL || undefined }, caps, relay, aggregator: agg, kyber: agg === 'kyberswap' ? { clientId: e.KYBER_CLIENT_ID?.trim() || undefined } : undefined, network: v.network });
   const statusChecks = [
-    { name: 'Base RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
+    { name: `${spec.label} RPC`, run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); const j: any = await r.json(); if (Number(j.result) !== v.chainId) throw new Error(`the RPC is chain ${Number(j.result)}, not ${v.chainId}`); } },
     { name: 'Privy', run: async () => { await fetch(e.PRIVY_API_URL || 'https://api.privy.io', { signal: AbortSignal.timeout(5_000) }); } },
   ];
-  return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => baseLinkRoutes({ privy: acc.privy, status: acc.status, ...h }) };
+  return { statusChecks, makeAccount: acc.make, extraRoutes: (h => baseLinkRoutes({ privy: acc.privy, status: acc.status, chain: spec.id, label: acc.network.label, ...h })) as ExtraRoutes };
+}
+/** MODE=base-mainnet: real accounts on Base signed through each user's Privy Ethereum wallet (baseaccount.ts). */
+export const baseMode = (e: NodeJS.ProcessEnv) => evmMode(CHAIN_SPECS.base, e);
+
+/** Every chain the server runs (CHAINS, or MODE), built from its settings. The first is the default chain. Status checks with the same name (Privy) are shown once. */
+export function buildChains(e: NodeJS.ProcessEnv): { chains: ChainAccounts[]; statusChecks: { name: string; run: () => Promise<unknown> }[]; specs: ChainSpec[]; otherLegacyMarks: { chain: string; mark: string }[] } {
+  const specs = parseChains(e), chains: ChainAccounts[] = [], checks = new Map<string, { name: string; run: () => Promise<unknown> }>(), errs: string[] = [];
+  for (const s of specs) {
+    try {
+      if (s.kind === 'practice') { chains.push({ id: s.id, label: s.label, makeAccount: practiceAccount }); continue; }
+      const m = s.kind === 'solana' ? solanaMode(e) : evmMode(s, e);
+      chains.push({ id: s.id, label: s.label, makeAccount: m.makeAccount, extraRoutes: m.extraRoutes, legacyMarks: [s.kind === 'solana' ? 'solwallet' : walletState(s.id)] });
+      for (const c of m.statusChecks) if (!checks.has(c.name)) checks.set(c.name, c);
+    } catch (x) { errs.push((x as Error).message); }
+  }
+  if (errs.length) throw new Error(errs.join('\n'));
+  const otherLegacyMarks = Object.values(CHAIN_SPECS).filter(s => !specs.includes(s) && s.kind !== 'practice').map(s => ({ chain: s.id, mark: s.kind === 'solana' ? 'solwallet' : walletState(s.id) }));
+  return { chains, statusChecks: [...checks.values()], specs, otherLegacyMarks };
 }
 
 if (import.meta.main) {
-  const mode = env.MODE ?? 'practice'; if (!['practice', 'solana-mainnet', 'base-mainnet'].includes(mode)) fail(`MODE=${mode} is not built in. Use practice (simulated chain), solana-mainnet or base-mainnet (real funds, Privy).`);
-  let real: ReturnType<typeof solanaMode> | ReturnType<typeof baseMode> | undefined;
-  try { if (mode === 'solana-mainnet') real = solanaMode(env); else if (mode === 'base-mainnet') real = baseMode(env); } catch (e) { fail((e as Error).message); }
+  let built: ReturnType<typeof buildChains> | undefined; try { built = buildChains(env); } catch (e) { fail((e as Error).message); }
+  const real = built!, mode = real.specs.map(s => s.id).join(',');
   let keys: ApiKey[] = []; try { keys = parseKeyFile(readFileSync(need('API_KEYS_FILE'), 'utf8')); } catch (e) { fail((e as Error).message); }
   const httpUrl = (k: string, v: string) => { let u: URL | undefined; try { u = new URL(v); } catch { /* reported below */ } if (u?.protocol !== 'http:') fail(`${k} must be an http:// URL such as http://10.0.3.7:3500 (nodes talk plain HTTP on the private network; TLS belongs at the load balancer)`); return u!; };
   const publicUrl = need('NODE_PUBLIC_URL'), pub = httpUrl('NODE_PUBLIC_URL', publicUrl);
   if (env.SOLANA_SAMPLE_URL) httpUrl('SOLANA_SAMPLE_URL', env.SOLANA_SAMPLE_URL);
   if ((env.HOST ?? '127.0.0.1') === '127.0.0.1' && !/^(localhost|127\.0\.0\.1)$/.test(pub.hostname)) console.warn(`warning: HOST is 127.0.0.1 but NODE_PUBLIC_URL is ${pub.host}: other nodes cannot reach this one. Set HOST=0.0.0.0 (or this machine's private address).`);
   const node = await createNode({
-    redisUrl: need('REDIS_URL'), namespace: env.NAMESPACE ?? 'memedesk', publicUrl, keys, makeAccount: real?.makeAccount ?? practiceAccount, extraRoutes: real?.extraRoutes,
+    redisUrl: need('REDIS_URL'), namespace: env.NAMESPACE ?? 'memedesk', publicUrl, keys, chains: real.chains, otherLegacyMarks: real.otherLegacyMarks,
     leaseTtlMs: int('LEASE_TTL_MS', 15_000, 3_000, 300_000), maxUsers: int('MAX_USERS_PER_NODE', 300, 1, 100_000), sweepMs: int('SWEEP_MS', 2000, 200, 60_000),
     rate: { perSecond: int('RATE_PER_SECOND', 20, 1, 10_000), burst: int('RATE_BURST', 40, 1, 20_000) }, requireAof: env.REDIS_REQUIRE_AOF !== 'false',
-    solanaSampleUrl: env.SOLANA_SAMPLE_URL || undefined, pgUrl: env.PG_URL || undefined, statusChecks: real?.statusChecks,
+    solanaSampleUrl: env.SOLANA_SAMPLE_URL || undefined, pgUrl: env.PG_URL || undefined, statusChecks: real.statusChecks,
     maxUsersPerApp: int('MAX_USERS_PER_APP', 10_000, 1, 10_000_000), maxAppFeeBps: int('APP_FEE_MAX_BPS', 100, 0, 500), webhooks: { allowHttp: env.WEBHOOKS_ALLOW_HTTP === 'true' },
   }).catch(e => fail((e as Error).message));
   if (env.SOLANA_SAMPLE_URL) console.log(`sample page: http://127.0.0.1:${env.PORT ?? 3500}/solana -> ${env.SOLANA_SAMPLE_URL} (this machine only; 404 for remote requests)`);
   const port = await node.listen(int('PORT', 3500, 1, 65_535), env.HOST ?? '127.0.0.1');
-  console.log(`execution node on ${env.HOST ?? '127.0.0.1'}:${port} as ${publicUrl} (mode ${mode}, ${keys.length} key(s); keys are never printed)`);
+  console.log(`execution node on ${env.HOST ?? '127.0.0.1'}:${port} as ${publicUrl} (chains ${mode}${real.chains.length > 1 ? `, default ${real.chains[0].id}: /v1/<chain>/... picks one` : ''}, ${keys.length} key(s); keys are never printed)`);
   let stopping = false; const stop = async (sig: string) => { if (stopping) return; stopping = true; console.log(`${sig}: draining (releasing leases so other nodes take over)`); await node.drain(); process.exit(0); };
   process.on('SIGTERM', () => void stop('SIGTERM')); process.on('SIGINT', () => void stop('SIGINT'));
 }

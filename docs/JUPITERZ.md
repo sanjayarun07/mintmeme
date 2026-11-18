@@ -128,13 +128,13 @@ Found on the way: the default quote wallet's USDC account is **frozen by the iss
 
 ## RFQ Desk (`npm run rfq`)
 
-A standalone, read-only app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:3700) on top of the same code the engine uses. It never signs and never sends. It shows:
+A standalone app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:3700) on top of the same code the engine uses. The desk never signs. It is read-only until you connect a wallet; then it forwards a quote your wallet signed to Jupiter, under RFQ_DESK_MAX_USD (default $1,500). A quote is offered for signing only when the gate accepts it, the simulation passes and the fill passes the share-price check (the same check the engine applies through `checkFill`); otherwise the desk says which one failed. It shows:
 - **Quote.** A firm JupiterZ ticket that counts down to its expiry, the best other route, and our `/build` route. Each comes with the per-share price against the real share price (the `checkFillPrice` figures). The engine's decision is listed with every reason, exactly as `tryRfq` takes it.
 - **Transaction.** The maker's transaction decoded: the signature slots, each instruction with its accounts named, the gate's verdict and its checks. A read-only mainnet simulation shows what the quote wallet would spend and receive. If the quote wallet lacks the SOL, the desk says so.
 - **Size ladder.** Buy or sell at $1k, $10k, $50k, $100k and $250k: JupiterZ against the best other route, quoted price-only (no wallet needed).
 - **Gate lab.** The recorded mainnet transaction, as recorded or tampered with (amount +1, output redirected, extra SOL transfer, third signer), or any pasted `/order` transaction, run through the gate.
 
-The node is the first of `SOL_RPC_URL`, Helius, Alchemy and the public RPC that answers. On 2026-11-18 the Helius key in `.env` answered HTTP 401, so the desk used Alchemy. `JUPITER_API_KEY` is optional; without it, calls are paced to Jupiter's keyless limit.
+The node is the first of `SOL_RPC_URL`, Helius, Alchemy and the public RPC that answers. Early on 2026-11-18 the Helius key in `.env` answered HTTP 401, so the desk used Alchemy; after the key was replaced the same day, the desk used Helius. `JUPITER_API_KEY` is optional; without it, calls are paced to Jupiter's keyless limit.
 
 **Trading from a connected wallet (desk).** "Connect wallet" offers two kinds of wallet:
 - **Privy.** Email, social or wallet login, including the user's Privy embedded wallet. The desk uses the bundle built for the Solana test UI (`npm run build:privy`, then `apps/web/privy.bundle.js`) and the public `PRIVY_APP_ID`.
@@ -175,8 +175,8 @@ Not verified:
 - Behaviour when a quote uses lookup tables (refused today).
 
 ### What would be needed to go live
-1. Add the Order Engine program to the Privy policy (above).
+1. ~~Add the Order Engine program to the Privy policy.~~ Done 2026-11-18 (`scripts/privy-policy.ts --add-program`; README → JupiterZ).
 2. Raise the engine's per-trade caps. RFQ only quotes from about $1k up, and the default cap is 0.05 SOL.
 3. Collect platform fees on RFQ trades. Jupiter's referral params (`referralAccount`/`referralFee`) keep JupiterZ eligible; today RFQ is skipped when a fee applies.
 4. Make one small mainnet RFQ trade, which you approve.
-5. Re-run the comparison during US market hours to choose `minLamports` and `marginBps`. Then pass `jupiterz` (with `checkFill` wired to `checkFillPrice`) through `createSolanaTrader` and `apps/server/solaccount.ts`. The xStocks session owns those files, so this is not done yet.
+5. Re-run the comparison during US market hours to choose `minLamports` and `marginBps`. The wiring itself is done: `jupiterz`, with `checkFill` running the share-price check, goes through `createSolanaTrader` and `apps/server/solaccount.ts`, behind `JUPITERZ=on` (docs/PRODUCTION_SERVER.md).

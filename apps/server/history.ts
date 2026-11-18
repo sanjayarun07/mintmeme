@@ -40,9 +40,11 @@ export class History {
   /** Stop at once without writing what is buffered (what a crashed node looks like). */
   abort() { clearInterval(this.timer); void this.pg.close(); }
 
-  recordTrade(user: string, v: TradeView | undefined) {
-    if (!v) return; const prev = this.trades.get(v.key); if (!prev || prev.v.state !== v.state) this.states.push([v.key, user, v.state]);
-    this.trades.set(v.key, { user, v }); this.bound();
+  /** `chain` (servers with named chains): stored in the chain column; `prefixKey` stores the key as <chain>/<key>, so equal keys on two chains stay two rows. */
+  recordTrade(user: string, v: TradeView | undefined, chain?: { chain: string; prefixKey: boolean }) {
+    if (!v) return; const key = chain?.prefixKey ? `${chain.chain}/${v.key}` : v.key; v = { ...v, key, chainId: chain?.chain } as TradeView;
+    const prev = this.trades.get(key); if (!prev || prev.v.state !== v.state) this.states.push([key, user, v.state]);
+    this.trades.set(key, { user, v }); this.bound();
   }
   audit(e: AuditEntry) { this.audits.push(e); this.bound(); }
   private bound() {
@@ -56,7 +58,7 @@ export class History {
     try {
       while (this.trades.size) {
         const batch = [...this.trades.entries()].slice(0, 500), p: unknown[] = [];
-        const vals = batch.map(([, { user, v }], i) => { p.push(v.key, user, v.walletId, null, v.origin, v.tokenIn, v.tokenOut, v.amountIn.toString(), v.state, v.venue ?? null, v.txHash ?? null, v.failure ?? null, v.fill ?? null); const b = i * 13; return `(${Array.from({ length: 13 }, (_, k) => `$${b + k + 1}`).join(',')})`; });
+        const vals = batch.map(([, { user, v }], i) => { p.push(v.key, user, v.walletId, (v as TradeView & { chainId?: string }).chainId ?? null, v.origin, v.tokenIn, v.tokenOut, v.amountIn.toString(), v.state, v.venue ?? null, v.txHash ?? null, v.failure ?? null, v.fill ?? null); const b = i * 13; return `(${Array.from({ length: 13 }, (_, k) => `$${b + k + 1}`).join(',')})`; });
         await this.pg.query(`insert into trades (key,user_id,wallet,chain,origin,token_in,token_out,amount_in,state,venue,tx_hash,failure,fill) values ${vals.join(',')}
           on conflict (key) do update set state=excluded.state, venue=coalesce(excluded.venue,trades.venue), tx_hash=coalesce(excluded.tx_hash,trades.tx_hash), failure=excluded.failure, fill=coalesce(excluded.fill,trades.fill), updated_at=now()`, p);
         for (const [k, x] of batch) if (this.trades.get(k) === x) this.trades.delete(k); this.stats.written += batch.length;

@@ -11,3 +11,4 @@ export * from './httpsigner.js';
 export * from './secp256k1.js';
 export * from './aggregator.js';
 export * from './relay.js';
+export * from './kyber.js';

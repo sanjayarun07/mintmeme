@@ -1,9 +1,12 @@
 import type { Amount, PriceOrderInput, BulkInput, TwapInput, TraderEvent } from './trader.ts';
-/** `userId`: with an APP key, the end user every call acts for (sent as X-User-Id). Use `forUser` to get a client per end user. */
+/** `userId`: with an APP key, the end user every call acts for (sent as X-User-Id). Use `forUser` to get a client per end user.
+ *  `chain`: on a server that runs several chains (CHAINS=solana,base), the chain every call is for: paths become /v1/<chain>/... (app routes have no chain). Without it,
+ *  calls go to the server's default chain. Use `forChain` for a client per chain, `chains()` for the list. */
 export interface ClientOptions {
     baseUrl: string;
     apiKey: string;
     userId?: string;
+    chain?: string;
     fetch?: typeof fetch;
     timeoutMs?: number;
 }
@@ -40,9 +43,23 @@ export interface StockTradeOptions {
 export declare class MemeClient {
     private o;
     constructor(o: ClientOptions);
+    /** The URL of an API path, with this client's chain prefix (not on app routes or the chain list). */
+    private url;
     private req;
     /** With an app key: the same client acting for another end user. */
     forUser(userId: string): MemeClient;
+    /** The same client for another chain of a multi-chain server (`forChain('base')`). */
+    forChain(chain: string): MemeClient;
+    /** The chains this server runs and its default chain (no key needed). */
+    chains(): Promise<{
+        default: string;
+        chains: {
+            id: string;
+            label: string;
+            prefix: string;
+            default: boolean;
+        }[];
+    }>;
     appWebhook(): Promise<any>;
     /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
     setAppWebhook(url: string, secret?: string): Promise<any>;
@@ -77,7 +94,8 @@ export declare class MemeClient {
         mint?: string; /** Base: the 0x token address (mint works too); Solana: a mint or a stock ticker */
         token?: string;
         sol?: string; /** Base (MODE=base-mainnet): ETH to spend */
-        eth?: string;
+        eth?: string; /** BNB Chain: BNB amounts */
+        bnb?: string;
         tokens?: string;
         pct?: number;
         slippagePct?: number;
@@ -89,7 +107,9 @@ export declare class MemeClient {
     placeOrder(p: {
         type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; /** the token's mint (or `stock` with a ticker) */
         mint?: string;
-        sol?: string;
+        sol?: string; /** Base, Robinhood: ETH amounts */
+        eth?: string; /** BNB Chain: BNB amounts */
+        bnb?: string;
         tokens?: string;
         pct?: number;
         priceUsd?: string | number;

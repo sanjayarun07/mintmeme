@@ -4,7 +4,8 @@ import { normAddr, decodeParams, encodeCall } from './abi.js';
 import { V2Venue, V2_FEE } from './v2.js';
 import { swapExactETHForTokens, swapExactTokensForETH, swapExactTokensForTokens, erc20 } from './calldata.js';
 import { planApproval } from './approval.js';
-import { AggVenue, AggRefused, simulateCalls } from './aggregator.js';
+import { AggVenue, AggRefused, simulateCalls, decodeKyberSwap, KYBER } from './aggregator.js';
+import { gateKyber, KyberUnavailable } from './kyber.js';
 import { RELAY_BASE, gateRelay, decodeRelaySwap, currentSettler, RelayUnavailable } from './relay.js';
 /** Thrown by an RpcLike when the node answered with a JSON-RPC error object. Anything else thrown is treated as a transport failure (ack may be lost). */
 export class JsonRpcError extends Error {
@@ -73,29 +74,39 @@ export class EvmRpcChain {
         if (what === 'venues')
             await this.refreshAgg();
     }
-    /* ---------------- Relay routes ---------------- */
+    /* ---------------- Aggregator routes: Relay, or KyberSwap instead ---------------- */
     aggError;
     aggAt = 0;
     settler;
     relayK() { return this.cfg.relay?.contracts ?? RELAY_BASE; }
-    /** The contract that must be approved for a token-in Relay swap (its approval proxy). */
-    aggRouter() { return lc(this.relayK().approvalProxy); }
-    aggId(a, b) { return `relay:${a === NATIVE ? 'eth' : a.slice(0, 10)}>${b === NATIVE ? 'eth' : b.slice(0, 10)}`; }
+    /** The aggregator this chain uses for tokens without a usable V2 pool: KyberSwap when `kyber` is configured, otherwise Relay. One at a time. */
+    get aggKind() { return this.cfg.kyber ? 'kyberswap' : this.cfg.relay ? 'relay' : undefined; }
+    aggName(family = this.aggKind) { return family === 'kyberswap' ? 'KyberSwap' : 'Relay'; }
+    aggCfg() { return this.cfg.kyber ?? this.cfg.relay; }
+    /** The contract that must be approved for a token-in aggregator swap: KyberSwap's router, or Relay's approval proxy. */
+    aggRouter(family = this.aggKind) { return family === 'kyberswap' ? KYBER.router : lc(this.relayK().approvalProxy); }
+    aggId(a, b) { return `${this.aggKind === 'kyberswap' ? 'kyber' : 'relay'}:${a === NATIVE ? 'eth' : a.slice(0, 10)}>${b === NATIVE ? 'eth' : b.slice(0, 10)}`; }
+    /** A read-only reference quote (output for an exact input) from the configured aggregator. */
+    async aggRefQuote(tokenIn, tokenOut, amount) {
+        if (this.cfg.kyber)
+            return (await this.cfg.kyber.client.quote(tokenIn, tokenOut, amount)).amountOut;
+        const a = this.cfg.relay;
+        return (await a.client.quote(a.refWallet ?? '0x000000000000000000000000000000000000dead', tokenIn, tokenOut, amount)).amountOut;
+    }
     /** Reference quotes for the configured pairs, at most every `refreshMs`. A pair that cannot be quoted has no venue until it can (orders on it wait). */
     async refreshAgg(force = false) {
-        const a = this.cfg.relay;
+        const a = this.aggCfg();
         if (!a?.pairs?.length)
             return;
         if (!force && Date.now() - this.aggAt < (a.refreshMs ?? 15_000))
             return;
         this.aggAt = Date.now();
         this.aggError = undefined;
-        const who = a.refWallet ?? '0x000000000000000000000000000000000000dead';
         for (const p of a.pairs) {
             const id = this.aggId(p.tokenIn, p.tokenOut);
             try {
-                const r = await a.client.quote(who, p.tokenIn, p.tokenOut, p.refAmount);
-                this.state.venues.set(id, new AggVenue(id, p.tokenIn, p.tokenOut, p.refAmount, r.amountOut, this.block, 'relay'));
+                const out = await this.aggRefQuote(p.tokenIn, p.tokenOut, p.refAmount);
+                this.state.venues.set(id, new AggVenue(id, p.tokenIn, p.tokenOut, p.refAmount, out, this.block, this.aggKind));
             }
             catch (e) {
                 this.state.venues.delete(id);
@@ -103,15 +114,15 @@ export class EvmRpcChain {
             }
         }
     }
-    /** Make a token tradable through Relay: ETH -> token for `refWei`, and back for what that returned. Read-only (quotes). Returns false when there is no route. */
+    /** Make a token tradable through the aggregator: ETH -> token for `refWei`, and back for what that returned. Read-only (quotes). Returns false when there is no route. */
     async addAggToken(token, refWei = 10n ** 16n) {
-        const a = this.cfg.relay;
+        const a = this.aggCfg();
         if (!a)
-            throw new Error('Relay is not configured on this chain');
+            throw new Error('no aggregator (Relay or KyberSwap) is configured on this chain');
         const t = lc(normAddr(token));
         let out;
         try {
-            out = (await a.client.quote(a.refWallet ?? '0x000000000000000000000000000000000000dead', NATIVE, t, refWei)).amountOut;
+            out = await this.aggRefQuote(NATIVE, t, refWei);
         }
         catch (e) {
             this.aggError = e.message;
@@ -125,30 +136,26 @@ export class EvmRpcChain {
         await this.refreshAgg(true);
         return this.state.venues.has(this.aggId(NATIVE, t));
     }
-    /** Quote the Relay swap for `tx`, gate it, check any 0x Settler against 0x's registry, and simulate it (with an exact approve first if the allowance is short). */
-    async aggBuild(tx, v) {
+    /** Slippage so that the aggregator's own on-chain minimum is at least the engine's: tighter than the engine allows is fine, looser never is. `reserve` keeps that share
+     *  of the room back, because each request comes back with a fresh quote that can be lower than the one the slippage was computed from. */
+    slipFor(tx, out, reserve, name) { const room = Number((out - tx.minOut) * 10000n / out), s = room - Math.max(2, Math.ceil(room * reserve)); if (s < 1)
+        throw new AggRefused(`the allowed slippage is under a few bps: ${name} cannot honour it`); return Math.min(s, 5_000); }
+    /** The Relay swap for `tx`, gated (relay.ts gateRelay) and its 0x Settler, if any, checked against 0x's registry. */
+    async relaySwap(tx) {
         const a = this.cfg.relay;
         if (!a)
             throw new AggRefused('Relay is not configured');
-        if (tx.platformFeeBps > 0)
-            throw new AggRefused('a platform fee is not supported on Relay routes: refusing to book a fee that is not collected');
-        if (!v.supports(tx.tokenIn, tx.tokenOut))
-            throw new AggRefused('this Relay venue does not cover that pair');
         // Relay unavailable (rate limit, outage) is transient: RpcError keeps the trade waiting for a retry; any other quote error (no route) is a refusal
         const quote = (slip) => a.client.quote(wallet, tx.tokenIn, tx.tokenOut, tx.amountIn, slip).catch(e => { if (e instanceof RelayUnavailable)
             throw new RpcError(e.message); throw new AggRefused(e.message); });
         const K = this.relayK(), wallet = lc(tx.wallet), first = await quote();
         if (first.amountOut < tx.minOut)
             throw new AggRefused(`Relay now quotes ${first.amountOut} out, below your minimum ${tx.minOut}: the price moved`);
-        // slippage so that Relay's own on-chain minimum is at least the engine's: tighter than the engine allows is fine, looser never is.
-        // Each request comes back with a fresh quote that can be lower than the one the slippage was computed from (mainnet 2026-11-18: 0.16% lower a moment later, which
-        // left Relay's minimum 0.008% under ours with a 5% margin). The first request keeps 5% of the room in reserve: asking Relay for tighter slippage made it pick other
-        // inner routes, some not reviewed here (fork runs 2026-11-18). If Relay's minimum still lands under ours, ask once more from the newest quote keeping half the room.
-        // A tighter on-chain minimum can only make the swap revert (gas), never fill below ours; refused after that.
-        const slipFor = (out, reserve) => { const room = Number((out - tx.minOut) * 10000n / out), s = room - Math.max(2, Math.ceil(room * reserve)); if (s < 1)
-            throw new AggRefused('the allowed slippage is under a few bps: Relay cannot honour it'); return Math.min(s, 5_000); };
+        // Mainnet 2026-11-18: a fresh quote 0.16% lower a moment later left Relay's minimum 0.008% under ours with a 5% reserve. The first request keeps 5% of the room in
+        // reserve: asking Relay for tighter slippage made it pick other inner routes, some not reviewed here (fork runs 2026-11-18). If Relay's minimum still lands under ours,
+        // ask once more from the newest quote keeping half the room. A tighter on-chain minimum can only make the swap revert (gas), never fill below ours; refused after that.
         const ctx = { wallet, tokenIn: tx.tokenIn, tokenOut: tx.tokenOut, amountIn: tx.amountIn, minOut: tx.minOut, contracts: K };
-        let q = await quote(slipFor(first.amountOut, 0.05)), g;
+        let q = await quote(this.slipFor(tx, first.amountOut, 0.05, 'Relay')), g;
         try {
             g = gateRelay(q.steps, ctx);
         }
@@ -157,7 +164,7 @@ export class EvmRpcChain {
                 throw e;
             if (q.amountOut < tx.minOut)
                 throw new AggRefused(`Relay now quotes ${q.amountOut} out, below your minimum ${tx.minOut}: the price moved`);
-            q = await quote(slipFor(q.amountOut, 0.5));
+            q = await quote(this.slipFor(tx, q.amountOut, 0.5, 'Relay'));
             g = gateRelay(q.steps, ctx);
         }
         if (g.settler) {
@@ -166,12 +173,47 @@ export class EvmRpcChain {
             if (g.settler !== this.settler.addr)
                 throw new AggRefused(`the route's 0x Settler ${g.settler} is not the current one in 0x's registry (${this.settler.addr})`);
         }
-        const swap = { to: g.swap.to, data: g.swap.data, value: g.swap.value }, calls = [swap];
+        return { to: g.swap.to, data: g.swap.data, value: g.swap.value };
+    }
+    /** The KyberSwap swap for `tx`: quoted, built for our wallet with slippage inside the engine's minimum, and gated (kyber.ts gateKyber). Same reserve and one retry as Relay. */
+    async kyberSwap(tx) {
+        const k = this.cfg.kyber;
+        if (!k)
+            throw new AggRefused('KyberSwap is not configured');
+        const call = (p) => p.catch(e => { if (e instanceof KyberUnavailable)
+            throw new RpcError(e.message); if (e instanceof AggRefused)
+            throw e; throw new AggRefused(e.message); });
+        const wallet = lc(tx.wallet), ctx = { wallet, tokenIn: tx.tokenIn, tokenOut: tx.tokenOut, amountIn: tx.amountIn, minOut: tx.minOut };
+        for (let attempt = 0;; attempt++) {
+            const q = await call(k.client.quote(tx.tokenIn, tx.tokenOut, tx.amountIn));
+            if (q.amountOut < tx.minOut)
+                throw new AggRefused(`KyberSwap now quotes ${q.amountOut} out, below your minimum ${tx.minOut}: the price moved`);
+            const b = await call(k.client.build(q, wallet, this.slipFor(tx, q.amountOut, attempt === 0 ? 0.05 : 0.5, 'KyberSwap')));
+            try {
+                return gateKyber(b, ctx).swap;
+            }
+            catch (e) {
+                if (attempt > 0 || !(e instanceof AggRefused) || !/on-chain minimum .* is below ours/.test(e.message))
+                    throw e;
+            }
+        }
+    }
+    /** Build the aggregator swap for `tx` (Relay or KyberSwap, by the venue), then simulate it on the exact bytes (with an exact approve first if the allowance is short). */
+    async aggBuild(tx, v) {
+        const name = this.aggName(v.family);
+        if (tx.platformFeeBps > 0)
+            throw new AggRefused(`a platform fee is not supported on ${name} routes: refusing to book a fee that is not collected`);
+        if (!v.supports(tx.tokenIn, tx.tokenOut))
+            throw new AggRefused(`this ${name} venue does not cover that pair`);
+        if (v.family !== this.aggKind)
+            throw new AggRefused(`this venue is a ${name} route, but this chain now uses ${this.aggName()}`);
+        const wallet = lc(tx.wallet), spender = this.aggRouter(v.family);
+        const swap = v.family === 'kyberswap' ? await this.kyberSwap(tx) : await this.relaySwap(tx), calls = [swap];
         if (tx.tokenIn !== NATIVE) {
-            const qa = erc20.allowance(lc(tx.tokenIn), wallet, K.approvalProxy);
+            const qa = erc20.allowance(lc(tx.tokenIn), wallet, spender);
             const al = erc20.decodeUint(await this.rpc.call('eth_call', [{ to: qa.to, data: qa.data }, 'latest']));
             if (al < tx.amountIn) {
-                const ap = erc20.approve(lc(tx.tokenIn), lc(K.approvalProxy), tx.amountIn);
+                const ap = erc20.approve(lc(tx.tokenIn), spender, tx.amountIn);
                 calls.unshift({ to: ap.to, data: ap.data, value: 0n });
             }
         }
@@ -248,7 +290,7 @@ export class EvmRpcChain {
     async needsApproval(tx) {
         if (tx.kind === 'noop' || tx.kind === 'approve' || tx.tokenIn === NATIVE)
             return undefined;
-        const spender = this.aggVenue(tx) ? this.aggRouter() : lc(tx.platformFeeBps > 0 && this.cfg.feeRouter ? this.cfg.feeRouter.address : this.cfg.router);
+        const av = this.aggVenue(tx), spender = av ? this.aggRouter(av.family) : lc(tx.platformFeeBps > 0 && this.cfg.feeRouter ? this.cfg.feeRouter.address : this.cfg.router);
         const q = erc20.allowance(lc(tx.tokenIn), lc(tx.wallet), spender);
         let allowance;
         try {
@@ -411,10 +453,16 @@ export class EvmRpcChain {
         // Relay swaps: ETH paid out to the wallet is an internal transfer (no log), so the wallet's ETH change is read as its balance change across that block, which is exact
         // when this was its only transaction there (gas, value and ETH received). When the wallet's other transactions in that block can only have cost it ETH (approvals and
         // the engine's self-sends: their gas and L1 fee), those costs are added back. Anything else, or a node that no longer serves that state: not booked yet (retried).
-        const K = this.cfg.relay ? this.relayK() : undefined, relayTx = !!K && [lc(K.router), lc(K.approvalProxy)].includes(lc(t.to ?? ''));
-        if (relayTx) {
-            if (t.input && t.input !== '0x')
-                decodeRelaySwap(t.input); // throws on anything that is not a Relay swap call
+        // the same holds for KyberSwap: its router pays ETH out with an internal transfer
+        // recognised whichever aggregator is configured now: a trade sent before the server switched aggregator still settles the same way
+        const K = this.relayK(), to = lc(t.to ?? ''), relayTx = [lc(K.router), lc(K.approvalProxy)].includes(to), kyberTx = to === KYBER.router;
+        if (relayTx || kyberTx) {
+            if (t.input && t.input !== '0x') {
+                if (kyberTx)
+                    decodeKyberSwap(t.input);
+                else
+                    decodeRelaySwap(t.input);
+            } // throws on anything that is not a swap call of that aggregator
             const at = (m, b) => this.rpc.call(m, [wallet, hex(b)]).then(big), n = big(rc.blockNumber);
             let txs;
             try {
