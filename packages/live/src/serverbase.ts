@@ -6,13 +6,13 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import net from 'node:net';
 import { startFork } from './forkenv.ts';
-import { fakePrivyEvm } from '../../evm/test/fakeprivyevm.ts';
+import { fakePrivyEvm, RELAY_ROUTER, RELAY_PROXY } from '../../evm/test/fakeprivyevm.ts';
 import { testKey, personalSign } from '../../evm/test/ecdsa.ts';
 import { erc20 } from '../../evm/src/index.ts';
 import { createNode } from '../../../apps/server/node.ts';
 import { baseAccounts, baseLinkRoutes } from '../../../apps/server/baseaccount.ts';
 
-const KEYCAT = '0x9a26f5433671751c3276a065f57e5a02d2817973', PORT = 8671;
+const KEYCAT = '0x9a26f5433671751c3276a065f57e5a02d2817973', ZORA = '0x1111111111166b7fe7bd91427724b487980afc69', PORT = 8671;
 const freePort = () => new Promise<number>(ok => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); });
 async function main() {
   const key = process.env.ALCHEMY_API_KEY ?? '', upstream = process.env.BASE_RPC_URL || (key ? `https://base-mainnet.g.alchemy.com/v2/${key}` : '');
@@ -57,6 +57,18 @@ async function main() {
     // sell everything: the exact-amount approval goes first (allowed by the policy: approve(router)), then the swap
     const signedBefore = fp.state.signed, s1 = await run('/v1/trades/sell', { token: KEYCAT, pct: 100, slippagePct: 5, key: 's1' }), e3 = await eth();
     check('B7 sell 100%: approval + swap both signed by Privy, tokens gone, ETH back', s1.t.state === 'finalized' && (await keycat()) === 0n && e3 > e2 && fp.state.signed - signedBefore === 2, `${s1.t.state} ${s1.t.failure ?? ''} signed ${fp.state.signed - signedBefore} eth ${e2}->${e3}`);
+    // a token whose V2 pool is dust (ZORA: about 0.003 WETH there, liquid on V3/V4): Relay venues are added next to it and win; the swap goes to Relay's router,
+    // gated (pinned contracts, reviewed inner swap, on-chain minimum) and simulated with eth_simulateV1 on this fork before Privy is asked
+    const zora = async () => { const q = erc20.balanceOf(ZORA, addr); return erc20.decodeUint(await node.call<string>('eth_call', [{ to: q.to, data: q.data }, 'latest'])); };
+    // Relay quotes LIVE mainnet state while this fork is frozen at its start block, so a route can revert here ("inactive pair"): the simulation then refuses it and
+    // nothing is sent. A fresh quote may pick another route, so up to three attempts (each a new trade key).
+    const relayRun = async (path: string, body: any) => { let r: any; for (let i = 1; i <= 3; i++) { r = await run(path, { ...body, key: `${body.key}-${i}` }); if (r.t.state === 'finalized' || !/simulation|Relay quote/.test(r.t.failure ?? '')) break; await new Promise(ok => setTimeout(ok, 3000)); } return r; };
+    const z1 = await zora(), rb = await relayRun('/v1/trades/buy', { token: ZORA, eth: '0.002', slippagePct: 3, key: 'rb1' }), z2 = await zora();
+    const rtx: any = rb.t.txHash ? await node.call('eth_getTransactionByHash', [rb.t.txHash]) : null;
+    check('B14 buy 0.002 ETH of ZORA (dust V2 pool): routed through Relay\'s router, gated and simulated, finalized, tokens arrived', rb.t.state === 'finalized' && z2 > z1 && String(rtx?.to).toLowerCase() === RELAY_ROUTER, `${rb.t.state} ${rb.t.failure ?? ''} to ${rtx?.to} tokens ${z1}->${z2}`);
+    const signedR = fp.state.signed, eR = await eth(), rs = await relayRun('/v1/trades/sell', { token: ZORA, pct: 100, slippagePct: 5, key: 'rs1' }), eR2 = await eth();
+    const stx: any = rs.t.txHash ? await node.call('eth_getTransactionByHash', [rs.t.txHash]) : null;
+    check('B15 sell 100% of ZORA through Relay: exact approval of its proxy + swap signed by Privy, tokens gone, ETH back', rs.t.state === 'finalized' && (await zora()) === 0n && eR2 > eR && fp.state.signed - signedR === 2 && String(stx?.to).toLowerCase() === RELAY_PROXY, `${rs.t.state} ${rs.t.failure ?? ''} to ${stx?.to} signed ${fp.state.signed - signedR} eth ${eR}->${eR2}`);
     // the per-trade cap (0.01 ETH by default) is checked before Privy is asked
     const signedCap = fp.state.signed, c1 = await run('/v1/trades/buy', { token: KEYCAT, eth: '0.02', key: 'c1' });
     check('B8 a buy above the per-trade cap fails before signing: nothing sent', c1.t.state === 'failed' && !sent(c1.t) && fp.state.signed === signedCap, `${c1.t.state} ${c1.t.failure ?? JSON.stringify(c1.t)}`);
@@ -73,7 +85,7 @@ async function main() {
     check('B12 relinking while the signer is removed is refused with the reason', rl.status === 409 && rl.j.error?.code === 'not_delegated', JSON.stringify(rl.j));
     // a token with no V2 pool is refused before anything else
     const np = await call('POST', '/v1/trades/buy', { token: '0x000000000000000000000000000000000000dEaD', eth: '0.001', key: 'n1' });
-    check('B13 a token without a Uniswap V2 WETH pool is refused with the reason', np.status >= 400 && np.j.error?.code === 'no_route', JSON.stringify(np.j));
+    check('B13 a token with neither a Uniswap V2 WETH pool nor a Relay route is refused with the reason', np.status >= 400 && np.j.error?.code === 'no_route', JSON.stringify(np.j));
   } catch (e) { check('run', false, (e as Error).stack ?? String(e)); }
   finally { await nd.drain().catch(() => {}); privySrv.close(); fork.stop(); }
   const pass = checks.every(c => c.pass);

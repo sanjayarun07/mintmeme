@@ -23,16 +23,19 @@ type Status = { address?: string; active: boolean; why?: string };
 const TRADE_PATHS = /^\/v1\/(trades\/(buy|sell)$|orders\/[a-z-]+$|twap$|bulk\/(buy|sell)$)/;
 
 /** The account factory. A user with no linked (or no longer delegated) wallet still gets an account: reads work, every trade is refused with the reason. */
-export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { maxTradeWei: bigint; dailyCapWei: bigint }; rpc?: RpcLike; log?: (m: string) => void }) {
+export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { maxTradeWei: bigint; dailyCapWei: bigint }; rpc?: RpcLike; log?: (m: string) => void;
+  /** Relay routes for tokens with no Uniswap V2 WETH pool (Coinbase stocks, V3/V4/Aerodrome-only tokens), gated and simulated before signing. Default on; false turns it
+   *  off. The Privy Base policy must allow Relay's router and approval proxy (README → Base policy rules). */
+  relay?: false | { apiKey?: string; client?: import('../../packages/evm/src/index.ts').RelayClient } }) {
   const privy = new PrivyApi({ ...c.privy, chainType: 'ethereum' }), rpc = c.rpc ?? new EvmJsonRpc(c.rpcUrl), ethUsd = baseEthUsd(rpc), status = new Map<string, Status>();
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
     const link = readBaseLink(state('basewallet'));
-    const s = await createBaseTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, rpc, privy, state, caps: c.caps, ethUsd, log: c.log });
+    const s = await createBaseTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, rpc, privy, state, caps: c.caps, ethUsd, log: c.log, relay: c.relay });
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy Ethereum wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     return { trader: s.trader, prepare: async (raw: any, path: string) => {
       const trades = TRADE_PATHS.test(path); if (trades) s.refuseIfInactive();
       if (raw && typeof raw === 'object' && raw.token === undefined && typeof raw.mint === 'string') { raw = { ...raw, token: raw.mint }; delete raw.mint; }   // 'mint' works too
-      const tok = raw?.token; if (typeof tok === 'string') await s.prepare(tok);   // finds the token's V2 pool and its decimals (plain units need them)
+      const tok = raw?.token; if (typeof tok === 'string') await s.prepare(tok);   // finds the token's V2 pool, or its Relay routes, and its decimals (plain units need them)
       const body = await s.simple(path, raw);
       if (trades || typeof tok === 'string') await s.sync();   // chain clock (deadlines) and pool reserves (quotes) as of now
       return body;

@@ -4,15 +4,16 @@
  *  asked whether that is still so; if not, the Trader is still returned (reads work) and every trade is refused with the reason (`active: false`, `why`).
  *  Every transaction Privy signs is decoded and compared field by field with what the engine built (destination, value, data, nonce, gas, chain), and its signer is
  *  recovered from the signature: it must be the user's wallet. Anything else is refused and nothing is sent.
- *  Scope, honestly: trades route through Uniswap V2 pools against WETH only (many Base memecoins trade mostly on Uniswap V3/V4 or Aerodrome, which are not
- *  built here: `prepare` refuses a token without a V2 WETH pool, and a thin pool gives a bad price, so check the quote). No token safety check and no fee sharing
- *  on Base yet (the fee needs an on-chain fee router). Base has no public mempool, so there is no MEV setting. */
+ *  Scope, honestly: trades route through Uniswap V2 pools against WETH and, for a token with no V2 WETH pool (Coinbase stocks, V3/V4/Aerodrome-only tokens), through
+ *  Relay: gated against Relay's pinned contracts and the reviewed inner swaps, and simulated against the wallet's balances before signing (packages/evm/src/relay.ts).
+ *  A thin V2 pool still gives a bad price, so check the quote. No token safety check and no fee sharing on Base yet (the fee needs an on-chain fee router; Relay
+ *  routes refuse a platform fee). Base has no public mempool, so there is no MEV setting. */
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Engine, Router, Store, PolicySigner, MemoryLedger, NATIVE, fileBackend } from '../../core/src/index.ts';
 import type { Backend, SpentLedger, WalletPolicy } from '../../core/src/index.ts';
-import { EvmRpcChain, JsonRpcError, mismatch, signerOf, isAddress, erc20 } from '../../evm/src/index.ts';
+import { EvmRpcChain, JsonRpcError, mismatch, signerOf, isAddress, erc20, RelayClient, RELAY_BASE, V2Venue } from '../../evm/src/index.ts';
 import type { RawSigner, Eip1559Request, RpcLike } from '../../evm/src/index.ts';
 import { PrivyApi, SignRequestError } from '../../sol/src/index.ts';
 import type { PrivyConfig } from '../../sol/src/index.ts';
@@ -28,6 +29,8 @@ export const BASE = {
 /** Defaults: at most 0.01 ETH per buy and 0.05 ETH of buys per day. The Privy policy should cap the value separately. */
 export const BASE_DEFAULT_CAPS = { maxTradeWei: 10n ** 16n, dailyCapWei: 5n * 10n ** 16n };
 const BIG = 10n ** 40n, lc = (s: string) => s.toLowerCase();
+/** Below this much WETH a V2 pool is treated as thin and Relay routes are added next to it (1 WETH). */
+export const THIN_V2_WETH = 10n ** 18n;
 
 /** JSON-RPC over HTTPS. A JSON-RPC error object becomes JsonRpcError (the node answered); anything else is a transport failure. */
 export class EvmJsonRpc implements RpcLike {
@@ -70,6 +73,9 @@ export interface BaseTraderOptions {
   ethUsd?: () => Promise<{ price: number; at: number } | null>;
   rpc?: RpcLike;
   log?: (m: string) => void;
+  /** Relay routes for tokens without a Uniswap V2 WETH pool (Coinbase stocks, V3/V4/Aerodrome-only tokens). Default on; `false` turns it off. Relay's docs require an API
+   *  key for /quote/v2 (`apiKey`). Your Privy Base policy must allow Relay's router and approval proxy (RELAY_BASE) or Privy refuses those trades. */
+  relay?: false | { apiKey?: string; client?: RelayClient };
 }
 export interface BaseTrader { trader: Trader; chain: EvmRpcChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
   /** Plain units for one API call: `token` (0x address), `eth` for ETH amounts, `tokens` or `pct` to sell, `price` in ETH per token or `priceUsd`, `slippagePct` ... */
@@ -100,14 +106,15 @@ export async function createBaseTrader(o: BaseTraderOptions): Promise<BaseTrader
   if (o.address !== undefined && !isAddress(o.address)) throw new SdkError('bad_address', 'address must be a 0x Ethereum address');
   if (!o.state) mkdirSync(o.persistDir!, { recursive: true });
   const state = o.state ?? ((n: string) => fileBackend(join(o.persistDir!, `${n}.json`))), log = o.log ?? (() => {}), address = o.address ? lc(o.address) : undefined;
-  const privy = o.privy instanceof PrivyApi ? o.privy : new PrivyApi({ ...o.privy, chainType: 'ethereum' }), caps = o.caps ?? BASE_DEFAULT_CAPS, venues = ['uniswap-v2'];
+  const privy = o.privy instanceof PrivyApi ? o.privy : new PrivyApi({ ...o.privy, chainType: 'ethereum' }), caps = o.caps ?? BASE_DEFAULT_CAPS, relayOn = o.relay !== false, venues = relayOn ? ['uniswap-v2', 'relay'] : ['uniswap-v2'];
+  const relayClient = o.relay === false ? undefined : (o.relay?.client ?? new RelayClient({ chainId: BASE.chainId, apiKey: o.relay?.apiKey }));
   if (privy.chainType !== 'ethereum') throw new SdkError('config', 'createBaseTrader needs a PrivyApi with chainType ethereum (and your Base policy id)');
   let signable = new Map<string, string>(), why: string | undefined;
   if (!address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(address);   // throws when Privy is unreachable: the caller retries rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
   const rpc = o.rpc ?? new EvmJsonRpc(o.rpcUrl);
-  const chain = new EvmRpcChain({ id: 'base-main', chainId: BASE.chainId, router: BASE.router, weth: BASE.weth, pools: [], finalityDepth: 3 }, rpc, new PrivyEvmSigner(privy, signable));
+  const chain = new EvmRpcChain({ id: 'base-main', chainId: BASE.chainId, router: BASE.router, weth: BASE.weth, pools: [], finalityDepth: 3, ...(relayClient ? { relay: { client: relayClient, contracts: RELAY_BASE, refWallet: address } } : {}) }, rpc, new PrivyEvmSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (address) { owners.set(address, 'x'); policies.set(address, { userId: o.userId, chains: ['base-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeWei }, dailyLimit: { [NATIVE]: caps.dailyCapWei }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });
@@ -119,8 +126,15 @@ export async function createBaseTrader(o: BaseTraderOptions): Promise<BaseTrader
     if (t === BASE.weth) throw new SdkError('bad_token', 'WETH is ETH here: trade the token against ETH');
     let pair: string; try { pair = '0x' + (await rpc.call<string>('eth_call', [{ to: BASE.factory, data: '0xe6a43905' + word(BASE.weth) + word(t) }, 'latest'])).slice(26); }
     catch (e) { throw new SdkError('rpc_unavailable', `could not look up the pool: ${(e as Error).message}`, 'Retry shortly.', 503); }
-    if (/^0x0{40}$/.test(pair)) throw new SdkError('no_route', 'this token has no Uniswap V2 pool against WETH on Base (V3, V4 and Aerodrome pools are not supported yet)', 'Check the address, or trade it elsewhere.');
-    chain.addPool({ id: `uniswap-v2:${t}`, pair }); await chain.refresh('venues'); await decimals(t);
+    if (/^0x0{40}$/.test(pair)) {   // no V2 pool (Coinbase stocks, V3/V4/Aerodrome-only tokens): Relay routes, gated and simulated before signing (packages/evm/src/relay.ts)
+      if (!relayOn) throw new SdkError('no_route', 'this token has no Uniswap V2 pool against WETH on Base, and Relay routing is off', 'Check the address, or turn Relay on.');
+      let ok: boolean; try { ok = await chain.addAggToken(t); } catch (e) { throw new SdkError('rpc_unavailable', `could not ask Relay for a route: ${(e as Error).message}`, 'Retry shortly.', 503); }
+      if (!ok) throw new SdkError('no_route', `no Uniswap V2 pool and no Relay route for this token on Base${chain.aggError ? ` (${chain.aggError})` : ''}`, 'Check the address, or trade it elsewhere.');
+    } else chain.addPool({ id: `uniswap-v2:${t}`, pair });
+    await chain.refresh('venues'); await decimals(t);
+    // a V2 pool holding less than THIN_V2_WETH is no market (many tokens keep a dust V2 pair while trading on V3/V4/Aerodrome): add Relay too; the Router takes the better quote
+    const v2 = chain.venues().find(v => v.id === `uniswap-v2:${t}`) as V2Venue | undefined, wethRes = v2 ? (v2.token0 === BASE.weth ? v2.reserve0 : v2.reserve1) : 0n;
+    if (relayOn && v2 && wethRes < THIN_V2_WETH) await chain.addAggToken(t).catch(e => { log(`${o.userId}: ${t}: thin V2 pool and Relay failed: ${(e as Error).message}`); return false; });
     added.add(t); for (const p of policies.values()) { p.maxPerTx[t] = BIG; p.dailyLimit[t] = BIG; } };
   const usd = o.ethUsd ?? baseEthUsd(rpc);
   const trader: Trader = new Trader({ engine, chain, userId: o.userId, venues, state, usd: { quoteUsd: usd, quoteDecimals: 18, tokenDecimals: decimals, maxAgeMs: 120_000 },

@@ -18,6 +18,7 @@
     "verify:server-sol": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/serverfork.ts",
     "server:loadtest": "node --experimental-transform-types --no-warnings apps/server/loadtest.ts",
     "verify:evm": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/traderfork.ts",
+    "verify:base-relay": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/baserelayread.ts",
     "setup:check": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/setup-check.ts",
     "test:pg": "PG_TEST_URL=${PG_TEST_URL:-postgres://memedesk:memedesk-local-pw@127.0.0.1:55433/memedesk_test} npm test"
   },

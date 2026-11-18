@@ -11,7 +11,7 @@
  *    MAX_USERS_PER_APP=10000   end users one app key may create;  WEBHOOKS_ALLOW_HTTP=true only for local testing (http and private hosts as webhook targets)
  *    PLATFORM_FEE_WALLET + PLATFORM_FEE_BPS=0..100   the operator's fee on every real trade (paid in SOL);  APP_FEE_MAX_BPS=100   the most an app may set with PUT /v1/app/fees
  *  MODE: `practice` (simulated chain, fake funds), `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY)
- *        or `base-mainnet` (REAL funds on Base, Uniswap V2: each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
+ *        or `base-mainnet` (REAL funds on Base, Uniswap V2, plus Relay for tokens with no V2 pool (BASE_RELAY=off turns it off, RELAY_API_KEY): each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
  *        PRIVY_AUTH_PRIVATE_KEY, PRIVY_BASE_POLICY_ID and BASE_RPC_URL or ALCHEMY_API_KEY with Base enabled). BASE_MAX_TRADE_ETH=0.01, BASE_DAILY_CAP_ETH=0.05. */
 import { readFileSync } from 'node:fs';
 import { createNode } from './node.ts';
@@ -74,7 +74,9 @@ export function baseMode(e: NodeJS.ProcessEnv) {
   if (e.PLATFORM_FEE_BPS && e.PLATFORM_FEE_BPS !== '0') throw new Error('PLATFORM_FEE_BPS is set, but fees are not collected on Base yet (no on-chain fee router): unset it for MODE=base-mainnet');
   const eth = (k: string, d: string) => { try { return toUnits(e[k] ?? d, 18, k); } catch (x) { throw new Error((x as Error).message); } };
   const caps = { maxTradeWei: eth('BASE_MAX_TRADE_ETH', '0.01'), dailyCapWei: eth('BASE_DAILY_CAP_ETH', '0.05') };
-  const acc = baseAccounts({ rpcUrl, privy: { ...(c as Record<keyof typeof c, string>), apiUrl: e.PRIVY_API_URL || undefined }, caps });
+  // Relay routes for tokens without a Uniswap V2 pool (Coinbase stocks): on unless BASE_RELAY=off; RELAY_API_KEY is sent when set (Relay's docs require one for quotes)
+  const relay = e.BASE_RELAY === 'off' ? false as const : { apiKey: e.RELAY_API_KEY?.trim() || undefined };
+  const acc = baseAccounts({ rpcUrl, privy: { ...(c as Record<keyof typeof c, string>), apiUrl: e.PRIVY_API_URL || undefined }, caps, relay });
   const statusChecks = [
     { name: 'Base RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
     { name: 'Privy', run: async () => { await fetch(e.PRIVY_API_URL || 'https://api.privy.io', { signal: AbortSignal.timeout(5_000) }); } },

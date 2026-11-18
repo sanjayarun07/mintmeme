@@ -1,6 +1,7 @@
 /** A stand-in for Privy's wallet API for an ETHEREUM wallet on Base, for tests and local forks. It checks the app credentials and the authorization signature as Privy
  *  documents them, applies the README's Base policy (eth_signTransaction only; chain id 8453; destination the Uniswap V2 router with value at most the cap, or an ERC-20
- *  approve whose spender is the router with no value), and signs with a throwaway key. `mode` makes it misbehave on purpose (tests of our checks). */
+ *  approve whose spender is the router with no value; and the Relay rules (relay-buys, relay-sells, approve-relay): Relay's router with value at most the cap, its approval proxy with no value, approve of the proxy),
+ *  and signs with a throwaway key. `mode` makes it misbehave on purpose (tests of our checks). */
 import http from 'node:http';
 import { generateKeyPairSync, verify } from 'node:crypto';
 import { canonical } from '../../sol/src/privysigner.ts';
@@ -8,6 +9,8 @@ import { testKey, signTx } from './ecdsa.ts';
 import type { TestKey } from './ecdsa.ts';
 
 export const BASE_ROUTER = '0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24';
+/** Relay's v3.2 router and approval proxy on Base (README → Base policy rules, relay-*). */
+export const RELAY_ROUTER = '0x0729e2a4716d9f7dd17858d5d504426d228697f7', RELAY_PROXY = '0x5567954cd026cebfe486062cb75848e0f1c12e58';
 export function fakePrivyEvm(o: { key?: TestKey; base?: string; signerId?: string; policyId?: string; capWei?: bigint; chainId?: number; router?: string } = {}) {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const cfg = { appId: 'app-test', appSecret: 'secret-test-0123456789abcdef0123456789abcdef', signerId: o.signerId ?? 'quorum-1', policyId: o.policyId ?? 'policy-base',
@@ -20,6 +23,10 @@ export function fakePrivyEvm(o: { key?: TestKey; base?: string; signerId?: strin
     const to = String(t.to ?? '').toLowerCase(), value = big(t.value ?? 0), data = String(t.data ?? '0x').toLowerCase();
     if (to === router) return value > cap ? 'value above the cap' : undefined;
     if (data.startsWith('0x095ea7b3') && value === 0n && '0x' + data.slice(34, 74) === router) return undefined;   // approve(router, amount)
+    // the README's Relay rules (relay-buys, relay-sells, approve-relay): Relay's router (value capped), its approval proxy (no value), approve(approval proxy)
+    if (to === RELAY_ROUTER) return value > cap ? 'value above the cap' : undefined;
+    if (to === RELAY_PROXY) return value === 0n ? undefined : 'value must be 0';
+    if (data.startsWith('0x095ea7b3') && value === 0n && '0x' + data.slice(34, 74) === RELAY_PROXY) return undefined;
     return `destination ${to} is not allowed`;
   }
   async function handle(method: string, url: string, headers: Record<string, string>, body: string): Promise<{ status: number; json: unknown }> {
