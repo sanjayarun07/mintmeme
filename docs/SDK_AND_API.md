@@ -212,6 +212,29 @@ sandwich attacks but is not guaranteed". It works on Jupiter and pump.fun trades
 Defaults: Jupiter and pump.fun only, at most 0.05 SOL per buy and 0.25 SOL of buys per day (`caps` lowers or changes them), sells of held tokens not capped in SOL, SOL/USD
 from a Jupiter quote (`solUsd` replaces it). For many users in one process, share one `PrivyApi` and one `jupiterSolUsd()` across them.
 
+### 4.5b Real Base accounts (Privy Ethereum wallet, Uniswap V2)
+
+Hosted: run the server with `MODE=base-mainnet` (docs/PRODUCTION_SERVER.md). The API is the same, with `eth` in place of `sol` and 0x token addresses:
+
+```ts
+const c = new MemeClient({ baseUrl, apiKey });
+await c.swap({ side: 'buy', token: '0x9a26f5433671751c3276a065f57e5a02d2817973', eth: '0.001', slippagePct: 3 });
+```
+
+In your own backend:
+
+```ts
+import { createBaseTrader } from '@memedesk/sdk';
+const b = await createBaseTrader({ userId: 'u1', address: '0x…', rpcUrl, persistDir: './state/u1',
+  privy: { appId, appSecret, authKey, signerId, policyId: BASE_POLICY_ID } });   // chainType 'ethereum' is set for you
+if (!b.active) console.log(b.why);   // e.g. the signer is not on the wallet yet
+await b.prepare(token); await b.sync();
+await b.trader.buy(await b.simple('/v1/trades/buy', { token, eth: '0.001', slippagePct: 3 }));
+```
+
+`PrivyEvmSigner` checks each signed transaction against the request and recovers its signer. Defaults: 0.01 ETH per buy and 0.05 ETH per day (`caps`).
+Uniswap V2 WETH pools only; no token safety check and no fee sharing on Base yet.
+
 ### 4.6 Apps: one key for many users, and webhooks
 
 An app with many users holds **one app key** (`npm run server:key -- <appId> app`, key file line `hash:<appId>:app`) and names the end user on every call in the

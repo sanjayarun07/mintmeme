@@ -17,6 +17,8 @@ export interface PrivyConfig {
   /** The policy the user attaches when adding the signer. A wallet whose signer carries another policy (or none) is refused. */
   policyId: string;
   apiUrl?: string; fetchFn?: typeof fetch; timeoutMs?: number;
+  /** Which wallets this client works with: 'solana' (default, method signTransaction) or 'ethereum' (EVM chains such as Base, method eth_signTransaction). */
+  chainType?: 'solana' | 'ethereum';
 }
 
 /** RFC 8785 JSON canonicalization for the values Privy requests carry (objects, arrays, strings, integers, booleans, null). Keys sort by UTF-16 code units, as JS sort does. */
@@ -47,10 +49,14 @@ export class PrivyApi {
     if (!r.ok) throw new PrivyError(`Privy refused (${r.status}): ${String(j?.error ?? j?.message ?? text).slice(0, 300)}`, r.status);
     return j;
   }
-  /** The Privy wallet with this Solana address, or undefined when this app has none. */
+  get chainType() { return this.c.chainType ?? 'solana'; }
+  /** The method this client signs with (what the policy must ALLOW). */
+  get signMethod() { return this.chainType === 'ethereum' ? 'eth_signTransaction' : 'signTransaction'; }
+  /** The Privy wallet with this address (Solana, or 0x for ethereum: compared without case), or undefined when this app has none. */
   async walletByAddress(address: string): Promise<{ id: string; address: string; additional_signers?: { signer_id: string; override_policy_ids?: string[] }[] } | undefined> {
-    const j = await this.req('GET', `/v1/wallets?chain_type=solana&address=${encodeURIComponent(address)}`);
-    return (j?.data ?? []).find((w: any) => w?.address === address);
+    const j = await this.req('GET', `/v1/wallets?chain_type=${this.chainType}&address=${encodeURIComponent(address)}`);
+    const same = (a: unknown) => typeof a === 'string' && (this.chainType === 'ethereum' ? a.toLowerCase() === address.toLowerCase() : a === address);
+    return (j?.data ?? []).find((w: any) => same(w?.address));
   }
   /** Whether the user has added this app's signer, with this app's policy, to the wallet at `address`. */
   async delegation(address: string): Promise<{ ok: true; walletId: string } | { ok: false; why: string }> {
@@ -59,14 +65,19 @@ export class PrivyApi {
     const s = (w.additional_signers ?? []).find(x => x.signer_id === this.c.signerId);
     if (!s) return { ok: false, why: 'Your Privy wallet has not allowed automatic trading yet (the server signer is not on it).' };
     if (!(s.override_policy_ids ?? []).includes(this.c.policyId)) return { ok: false, why: 'The server signer on your wallet is not limited by this app\'s trading policy. Revoke it and allow automatic trading again.' };
-    // the server signs with method signTransaction (the engine sends the transaction itself): a policy without an ALLOW rule for it denies every trade
-    const p = await this.req('GET', `/v1/policies/${encodeURIComponent(this.c.policyId)}`);
-    if (!(p?.rules ?? []).some((r: any) => r?.action === 'ALLOW' && (r.method === 'signTransaction' || r.method === '*'))) return { ok: false, why: 'The trading policy has no ALLOW rule for the method signTransaction, which this server uses, so Privy would refuse every trade. In the Privy dashboard, set the method of the policy\'s rules to signTransaction (README → Solana policy rules).' };
+    // the server signs with method signTransaction / eth_signTransaction (the engine sends the transaction itself): a policy without an ALLOW rule for it denies every trade
+    const p = await this.req('GET', `/v1/policies/${encodeURIComponent(this.c.policyId)}`), m = this.signMethod;
+    if (!(p?.rules ?? []).some((r: any) => r?.action === 'ALLOW' && (r.method === m || r.method === '*'))) return { ok: false, why: `The trading policy has no ALLOW rule for the method ${m}, which this server uses, so Privy would refuse every trade. In the Privy dashboard, set the method of the policy's rules to ${m} (README → ${this.chainType === 'ethereum' ? 'Base' : 'Solana'} policy rules).` };
     return { ok: true, walletId: w.id };
   }
   /** Privy signs a serialized transaction (base64, signatures zeroed) and returns it signed. */
   async signTransaction(walletId: string, txBase64: string): Promise<string> {
     const j = await this.req('POST', `/v1/wallets/${encodeURIComponent(walletId)}/rpc`, { method: 'signTransaction', params: { transaction: txBase64, encoding: 'base64' } });
+    const out = j?.data?.signed_transaction; if (typeof out !== 'string') throw new PrivyError('Privy answered without a signed transaction', 502); return out;
+  }
+  /** EVM: Privy signs an unsigned type-2 transaction (fields as in @privy-io/api-types UnsignedStandardEthereumTransaction) and returns the signed RLP hex. */
+  async signEthTransaction(walletId: string, transaction: Record<string, string | number>): Promise<string> {
+    const j = await this.req('POST', `/v1/wallets/${encodeURIComponent(walletId)}/rpc`, { method: 'eth_signTransaction', params: { transaction } });
     const out = j?.data?.signed_transaction; if (typeof out !== 'string') throw new PrivyError('Privy answered without a signed transaction', 502); return out;
   }
 }

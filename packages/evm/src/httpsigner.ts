@@ -1,7 +1,9 @@
 import type { Eip1559Request, RawSigner } from './rpcchain.ts';
+import { keccak256 } from './keccak.ts';
+import { recoverAddress } from './secp256k1.ts';
 
 /** Minimal RLP decoder, just enough to read an EIP-1559 transaction. */
-type Rlp = Uint8Array | Rlp[];
+export type Rlp = Uint8Array | Rlp[];
 const hexOf = (b: Uint8Array) => '0x' + Buffer.from(b).toString('hex');
 function rlpAt(b: Uint8Array, i: number): [Rlp, number] {
   const t = b[i]; if (t === undefined) throw new Error('rlp: truncated');
@@ -26,6 +28,21 @@ export function decodeEip1559(raw: string) {
   const r = num(f[10]), s = num(f[11]), yp = num(f[9]);
   if (yp > 1n || r === 0n || s === 0n) throw new Error('raw transaction is not signed');
   return { chainId: num(f[0]), nonce: num(f[1]), maxPriorityFeePerGas: num(f[2]), maxFeePerGas: num(f[3]), gasLimit: num(f[4]), to: hexOf(bytes(f[5])), value: num(f[6]), data: hexOf(bytes(f[7])) };
+}
+
+/** RLP encoding of bytes and nested lists (canonical). */
+export function rlpEncode(x: Rlp): Uint8Array {
+  const head = (n: number, short: number) => { if (n < 56) return [short + n]; const l: number[] = []; for (let v = n; v > 0; v = Math.floor(v / 256)) l.unshift(v % 256); return [short + 55 + l.length, ...l]; };
+  if (x instanceof Uint8Array) return x.length === 1 && x[0] < 0x80 ? x : new Uint8Array([...head(x.length, 0x80), ...x]);
+  const body = x.map(rlpEncode), n = body.reduce((s, b) => s + b.length, 0), out = new Uint8Array(head(n, 0xc0).length + n); out.set(head(n, 0xc0)); let p = out.length - n; for (const b of body) { out.set(b, p); p += b.length; }
+  return out;
+}
+/** The address that signed a type-2 transaction: recovered from its signature over keccak256(0x02 ‖ rlp(the nine unsigned fields)). */
+export function signerOf(raw: string): string {
+  decodeEip1559(raw);   // well-formed and signed, or it throws
+  const b = Uint8Array.from(Buffer.from(raw.slice(2), 'hex')), [f] = rlpAt(b, 1) as [Rlp[], number];
+  const hash = keccak256(new Uint8Array([0x02, ...rlpEncode(f.slice(0, 9))]));
+  return recoverAddress(hash, num(f[10]), num(f[11]), Number(num(f[9])));
 }
 
 /** Compares what the signing service returned with what we asked it to sign. Returns the first difference, or undefined when they agree. */

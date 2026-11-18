@@ -129,7 +129,7 @@ Advanced → Smart wallets), which may cover option C without a separate provide
 | 3 | App settings → Basics → **API keys** | Copy the app secret. Optional: Basics → Advanced → **IP allowlist** with your servers' addresses, so only they can use it. | `PRIVY_APP_SECRET` |
 | 4 | App settings → Basics → **Domains and clients** | Add the UI addresses to the allowed origins: `http://localhost:3000`, `http://127.0.0.1:3500`, and your production URL. | – |
 | 5 | Wallet infrastructure → **Policies** → **New policy**: name `memedesk-solana`, chain type **SVM (Solana)**, owner empty → **Next: Create rule**. Add the three rules in the "Solana policy rules" table below, then **Create policy** and copy its ID. | Privy checks every top-level instruction of a transaction; each must be allowed, and any matching DENY wins. | `PRIVY_SOLANA_POLICY_ID` |
-| 6 | (later, for EVM) Policies → New policy, chain type **Ethereum**; optionally Advanced → **Smart wallets** | Allow only the swap router (Uniswap V2 router for the chosen chain, address from Uniswap's deployments page) and cap the ETH per transaction. | `PRIVY_ETHEREUM_POLICY_ID` |
+| 6 | Policies → New policy: name `memedesk-base`, chain type **Ethereum**, owner empty. Add the two rules in the "Base policy rules" table below, then copy its ID. Only for `MODE=base-mainnet`. | The server signer may then sign only Uniswap V2 swaps on Base (chain 8453) up to 0.01 ETH, and approvals for that router. | `PRIVY_BASE_POLICY_ID` |
 | 7 | top bar: **Upgrade to production** | Only when you go live with other users' funds. Development mode is fine for testing. | – |
 
 **Solana policy rules (step 5).** Use the same method on all three rules: **`signTransaction`**. The server has Privy sign and then sends the transaction itself, so a rule for any other method (such as `signAndSendTransaction`) never applies, and Privy denies every trade. "Allow automatic trading" checks this and says so.
@@ -159,6 +159,30 @@ Tests:
 
 Current state of this app (checked 2026-11-17): TEE enabled; one authorization key; policy `memedesk-solana-trading` with its three rules on `signTransaction`; smart wallets off; development mode.
 
+**Base policy rules (step 6).** Method on both rules: **`eth_signTransaction`**. As on Solana, the server has Privy sign and sends the transaction itself, so a rule for `eth_sendTransaction` never applies. Linking checks this and says so.
+
+| Rule name | Conditions (all must match) | Action |
+|---|---|---|
+| `uniswap-v2-swaps` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `to` eq `0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24`; Ethereum transaction → `value` lte `10000000000000000` (0.01 ETH in wei) | ALLOW |
+| `approve-router` | Ethereum transaction → `chain_id` eq `8453`; Ethereum transaction → `value` eq `0`; Ethereum calldata → `approve.spender` eq `0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24`, with this ABI: `[{"type":"function","name":"approve","stateMutability":"nonpayable","inputs":[{"name":"spender","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[{"name":"","type":"bool"}]}]` | ALLOW |
+
+The address is the Uniswap V2 Router02 on Base, read back on chain: its `factory()` is `0x8909dc15e40173ff4699343b6eb8132c65e18ec6` and its `WETH()` is `0x4200000000000000000000000000000000000006`. Anything else, including a plain ETH or token transfer, matches no rule and is denied. Selling needs the second rule: a sell first approves the router for exactly the amount sold. Not allowed, and therefore not available on Base: cancelling a pending transaction by replacement, which sends 0 ETH to the wallet itself.
+
+**Base trading through the execution server (`MODE=base-mainnet`, built).** Set `PRIVY_BASE_POLICY_ID` and either `BASE_RPC_URL` or `ALCHEMY_API_KEY` with Base enabled, then:
+1. On the `/solana` page served by the node, log in with Privy. In **Execution server → Base**, click **Create Base wallet** (a Privy embedded Ethereum wallet), and send it a little ETH on Base.
+2. Click **Allow automatic trading on Base**. Privy adds the server's signer with the Base policy.
+3. Paste your API key and click **Link my Base wallet**. The wallet signs a one-time message (`personal_sign`). The server recovers the signer from that signature and asks Privy whether the signer and policy are on the wallet.
+4. Trade through the API in plain units: `{"token":"0x…","eth":"0.001","slippagePct":3}`.
+
+The server checks every transaction Privy signs, field by field, against what it built, and recovers who signed it (`packages/sdk/src/base.ts`, `PrivyEvmSigner`). Caps: 0.01 ETH per buy and 0.05 ETH per day by default (`BASE_MAX_TRADE_ETH`, `BASE_DAILY_CAP_ETH`).
+
+Limits:
+- Only Uniswap V2 pools against WETH. Most Base memecoins trade mainly on Uniswap V3/V4 or Aerodrome, and those are not supported yet. A token without a V2 pool is refused with `no_route`.
+- No token safety check and no fee sharing on Base yet.
+- Base has no public mempool, so there is no MEV setting.
+
+Tested: `packages/sdk/test/base.test.ts`, and `npm run verify:server-base` (13 checks on a local Base fork with a Privy stand-in, buying and selling KEYCAT).
+
 **B. EVM via ERC-4337, if not using Privy smart wallets:** choose the smart-account implementation (for example ZeroDev Kernel, Safe with ERC-7579 modules,
 Biconomy Nexus or Alchemy Account Kit), a bundler and paymaster provider (for example Pimlico, ZeroDev, Alchemy or Biconomy; their API key goes into `.env` as
 `AA_BUNDLER_URL` and `AA_PAYMASTER_URL`), the chain (Ethereum mainnet or an L2 where Uniswap V2 is deployed), who pays gas, and the session-key limits.
@@ -178,6 +202,8 @@ Real funds so far: the `/solana` UI (wallet sign-in, Privy automatic trading, th
 | `npm test` | Unit, HTTP, cluster and server tests (379) | Redis for the cluster tests |
 | `npm run verify:sol-guard` | The `/solana` back end on a local Solana validator, fake SOL: limits, kill switch, wallet sign-in and signing, orders, TWAP, trading key fund, use and return, Privy automatic trading with a Privy stand-in (62 checks) | `solana-test-validator`, `ALCHEMY_API_KEY` |
 | `npm run verify:server-sol` | The execution server in `MODE=solana-mainnet`: two nodes, local Redis, a local Solana validator and a Privy stand-in: linking, a forwarded buy and a sell in plain units, idempotency, caps, an order surviving an owner crash, revocation, priority fee on the transaction, MEV protection per account and per trade through a stand-in Jito block engine, token safety, fee sharing on a buy and a sell (15 checks; with `PG_TEST_URL` also the stored trade history, 16) | `solana-test-validator`, Redis, `ALCHEMY_API_KEY` |
+| `npm run verify:server-base` | The execution server in `MODE=base-mainnet` on a local anvil fork of Base, with a Privy stand-in: linking by `personal_sign` (and refusing another key's signature), a KEYCAT buy and a 100% sell with its exact approval, the ETH cap, a Privy answer that changes the transaction or comes from another key (refused, nothing sent), a removed signer, a token with no V2 pool (13 checks) | anvil, Redis, `ALCHEMY_API_KEY` with Base enabled (or `BASE_RPC_URL`) |
+| `npm run test:pg` | `npm test` plus the Postgres trade-history test (`apps/server/records.test.ts`), which drops and recreates its tables in `PG_TEST_URL`. Default: the `memedesk_test` database of a local Postgres container started with `docker run -d --name memedesk-pg -e POSTGRES_USER=memedesk -e POSTGRES_PASSWORD=memedesk-local-pw -e POSTGRES_DB=memedesk -p 127.0.0.1:55433:5432 -v memedesk-pg-data:/var/lib/postgresql/data postgres:16-alpine` and `docker exec memedesk-pg psql -U memedesk -c "create database memedesk_test"`. Never point it at a database you keep | Docker |
 | `npm run verify:evm` | The SDK `Trader` and HTTP API on a local Ethereum mainnet fork, real Uniswap V2 WETH/USDC pool, fake ETH: market buy and sell with approval, orders, bulk, TWAP, restart | `anvil`, `ALCHEMY_API_KEY` |
 | `npm run server:loadtest` | Throughput, latency, event-loop delay with standing orders, failover with many users (`USERS`, `NODES`, `SECONDS`, `CONCURRENCY`) | Redis |
 | `npm run bench` | In-process engine benchmark (not network latency) | – |

@@ -30,6 +30,16 @@ and failover without a chain.
 as the API) and bought 0.005 SOL of Bonk through the API in plain units. Routed through Jupiter, signed by real Privy under the app's policy, finalized as tx
 `3zMawgRFnseC1daidQZMQarkmFvqHS6scJu5qgCeNAdwUhj95E8ee2SBv1FhTZbXSbWdoUDmwj9Py7dbvQ8tpQ8G` (wallet paid 0.005009668 SOL, received 154,813.93 Bonk).
 
+## Real Base accounts (`MODE=base-mainnet`)
+
+The same server for Base. Each API user links their own **Privy embedded Ethereum wallet** (`apps/server/baseaccount.ts`), and the owner node runs `createBaseTrader` over the
+user's Redis state. Env: `PRIVY_APP_ID`, `PRIVY_APP_SECRET`, `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`, `PRIVY_BASE_POLICY_ID` (README → Base policy rules), and `BASE_RPC_URL`
+or `ALCHEMY_API_KEY` with Base enabled. Optional: `BASE_MAX_TRADE_ETH=0.01`, `BASE_DAILY_CAP_ETH=0.05`. `PLATFORM_FEE_BPS` is refused in this mode: Base has no fee router yet.
+Linking is the same routes as Solana: `/v1/wallet/link/start` and `/link/finish`. The signature is a `personal_sign` (0x, 65 bytes). The server recovers the signer from it, then asks Privy for the signer and the Base policy.
+
+Every transaction Privy signs is decoded and compared with what the engine built: destination, value, data, nonce, gas, fees and chain. Its signer is recovered from the signature and must be the
+linked wallet. Otherwise it is refused and nothing is sent. Trades route through Uniswap V2 WETH pools only (`no_route` otherwise). Local proof: `npm run verify:server-base`, 13 checks.
+
 **Mainnet, 2026-11-18 (user-approved), the newer features together:** a 0.005 SOL Bonk buy through the API with `mevProtection: true`, finalized as tx
 `4EbzSNurPKE54KjuxFdZJKEMNGW9U9iYKWyG6GzVxRDNrsn4cj9EptYVhfd7DmoE5iGCfCFdt8iKowRXdTqHGm9j`: it passed the token safety check, was sent privately to Jito with a
 7,754-lamport tip (the tip floor's 75th percentile) to a Jito tip account and the `jitodontfront` flag, carried a compute-unit limit of 67,250 from simulation
@@ -161,7 +171,7 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 ## What is not done (read before trusting it with money)
 
-- **Real accounts: Solana only.** `MODE=solana-mainnet` (above): local validator, plus one small mainnet buy. Orders, failover and sells through the server have not run on mainnet. EVM still has no real signer.
+- **Real accounts: Solana and Base.** `MODE=solana-mainnet` (above): local validator, plus one small mainnet buy. Orders, failover and sells through the server have not run on mainnet. `MODE=base-mainnet`: a local Base fork with a Privy stand-in only, so far. Base is limited to Uniswap V2 pools, with no token safety check and no fee sharing. One server runs one mode.
   Server-held hot keys in files are not production custody.
 - **Postgres is a record, not the source of truth.** Redis holds running accounts; with `PG_URL`, trades and an audit log are copied to Postgres in the background (below). Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.

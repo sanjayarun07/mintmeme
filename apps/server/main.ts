@@ -10,11 +10,15 @@
  *    PG_URL              optional: postgres://user:pass@host:5432/db?sslmode=require   stored trade history and audit log (/v1/records/*, the status page)
  *    MAX_USERS_PER_APP=10000   end users one app key may create;  WEBHOOKS_ALLOW_HTTP=true only for local testing (http and private hosts as webhook targets)
  *    PLATFORM_FEE_WALLET + PLATFORM_FEE_BPS=0..100   the operator's fee on every real trade (paid in SOL);  APP_FEE_MAX_BPS=100   the most an app may set with PUT /v1/app/fees
- *  MODE: `practice` (simulated chain, fake funds) or `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY). */
+ *  MODE: `practice` (simulated chain, fake funds), `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY)
+ *        or `base-mainnet` (REAL funds on Base, Uniswap V2: each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
+ *        PRIVY_AUTH_PRIVATE_KEY, PRIVY_BASE_POLICY_ID and BASE_RPC_URL or ALCHEMY_API_KEY with Base enabled). BASE_MAX_TRADE_ETH=0.01, BASE_DAILY_CAP_ETH=0.05. */
 import { readFileSync } from 'node:fs';
 import { createNode } from './node.ts';
 import { practiceAccount } from './accounts.ts';
 import { solanaAccounts, linkRoutes } from './solaccount.ts';
+import { baseAccounts, baseLinkRoutes } from './baseaccount.ts';
+import { toUnits } from '../../packages/sdk/src/solana.ts';
 import { readAppFee } from './webhooks.ts';
 import type { AppFee } from './webhooks.ts';
 import { SyncRedis } from '../../packages/core/src/index.ts';
@@ -61,9 +65,27 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
   return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }) };
 }
 
+/** MODE=base-mainnet: real accounts on Base signed through each user's Privy Ethereum wallet (baseaccount.ts). */
+export function baseMode(e: NodeJS.ProcessEnv) {
+  const rpcUrl = e.BASE_RPC_URL || (e.ALCHEMY_API_KEY ? `https://base-mainnet.g.alchemy.com/v2/${e.ALCHEMY_API_KEY}` : '');
+  const c = { appId: e.PRIVY_APP_ID, appSecret: e.PRIVY_APP_SECRET, authKey: e.PRIVY_AUTH_PRIVATE_KEY, signerId: e.PRIVY_AUTH_KEY_ID, policyId: e.PRIVY_BASE_POLICY_ID };
+  const missing = [!rpcUrl && 'BASE_RPC_URL (or ALCHEMY_API_KEY)', ...Object.entries({ PRIVY_APP_ID: c.appId, PRIVY_APP_SECRET: c.appSecret, PRIVY_AUTH_PRIVATE_KEY: c.authKey, PRIVY_AUTH_KEY_ID: c.signerId, PRIVY_BASE_POLICY_ID: c.policyId }).filter(([, v]) => !v?.trim()).map(([k]) => k)].filter(Boolean);
+  if (missing.length) throw new Error(`MODE=base-mainnet needs ${missing.join(', ')} (README → Base with Privy).`);
+  if (e.PLATFORM_FEE_BPS && e.PLATFORM_FEE_BPS !== '0') throw new Error('PLATFORM_FEE_BPS is set, but fees are not collected on Base yet (no on-chain fee router): unset it for MODE=base-mainnet');
+  const eth = (k: string, d: string) => { try { return toUnits(e[k] ?? d, 18, k); } catch (x) { throw new Error((x as Error).message); } };
+  const caps = { maxTradeWei: eth('BASE_MAX_TRADE_ETH', '0.01'), dailyCapWei: eth('BASE_DAILY_CAP_ETH', '0.05') };
+  const acc = baseAccounts({ rpcUrl, privy: { ...(c as Record<keyof typeof c, string>), apiUrl: e.PRIVY_API_URL || undefined }, caps });
+  const statusChecks = [
+    { name: 'Base RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
+    { name: 'Privy', run: async () => { await fetch(e.PRIVY_API_URL || 'https://api.privy.io', { signal: AbortSignal.timeout(5_000) }); } },
+  ];
+  return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => baseLinkRoutes({ privy: acc.privy, status: acc.status, ...h }) };
+}
+
 if (import.meta.main) {
-  const mode = env.MODE ?? 'practice'; if (mode !== 'practice' && mode !== 'solana-mainnet') fail(`MODE=${mode} is not built in. Use practice (simulated chain) or solana-mainnet (real funds, Privy).`);
-  let real: ReturnType<typeof solanaMode> | undefined; if (mode === 'solana-mainnet') { try { real = solanaMode(env); } catch (e) { fail((e as Error).message); } }
+  const mode = env.MODE ?? 'practice'; if (!['practice', 'solana-mainnet', 'base-mainnet'].includes(mode)) fail(`MODE=${mode} is not built in. Use practice (simulated chain), solana-mainnet or base-mainnet (real funds, Privy).`);
+  let real: ReturnType<typeof solanaMode> | ReturnType<typeof baseMode> | undefined;
+  try { if (mode === 'solana-mainnet') real = solanaMode(env); else if (mode === 'base-mainnet') real = baseMode(env); } catch (e) { fail((e as Error).message); }
   let keys: ApiKey[] = []; try { keys = parseKeyFile(readFileSync(need('API_KEYS_FILE'), 'utf8')); } catch (e) { fail((e as Error).message); }
   const httpUrl = (k: string, v: string) => { let u: URL | undefined; try { u = new URL(v); } catch { /* reported below */ } if (u?.protocol !== 'http:') fail(`${k} must be an http:// URL such as http://10.0.3.7:3500 (nodes talk plain HTTP on the private network; TLS belongs at the load balancer)`); return u!; };
   const publicUrl = need('NODE_PUBLIC_URL'), pub = httpUrl('NODE_PUBLIC_URL', publicUrl);

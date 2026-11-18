@@ -8,3 +8,4 @@ export * from './rpcchain.ts';
 export * from './leaderwatch.ts';
 export * from './v2launch.ts';
 export * from './httpsigner.ts';
+export * from './secp256k1.ts';

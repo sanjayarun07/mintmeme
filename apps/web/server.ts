@@ -15,7 +15,7 @@ let solMainInst: SolMainnet | undefined; const solMain = async () => solMainInst
 const routes = () => import('./solroutes.ts');
 
 export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
-  '/api/sol/config': async () => ({ privyAppId: process.env.PRIVY_APP_ID || null, privyBundle: existsSync(new URL('./privy.bundle.js', import.meta.url)) }),
+  '/api/sol/config': async () => ({ privyAppId: process.env.PRIVY_APP_ID || null, /* public ids, for adding the server signer on Base (MODE=base-mainnet); never the secret or the key */ privySignerId: process.env.PRIVY_AUTH_KEY_ID || null, privyBasePolicyId: process.env.PRIVY_BASE_POLICY_ID || null, privyBundle: existsSync(new URL('./privy.bundle.js', import.meta.url)) }),
   '/api/sol/search': async b => (await routes()).solSearch(b), '/api/sol/token': async b => (await routes()).solToken(b), '/api/sol/simulate': async b => (await routes()).solSimulate(b),
   '/api/sol/auth/nonce': async b => (await solMain()).authNonce(b), '/api/sol/auth/verify': async b => (await solMain()).authVerify(b),
   '/api/sol/sign/pending': async b => (await solMain()).pendingSigns(b), '/api/sol/sign/submit': async b => (await solMain()).submitSign(b), '/api/sol/sign/reject': async b => (await solMain()).rejectSign(b),

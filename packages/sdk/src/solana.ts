@@ -62,7 +62,8 @@ const BUY_PATHS = new Set(['/v1/trades/buy', '/v1/orders/limit-buy']);
 /** PLAIN UNITS, the way Jupiter's API reads: `mint` for the token, `sol` for SOL amounts, `tokens` or `pct` for what to sell, `price` in SOL per token or `priceUsd`,
  *  `slippagePct`, `trailPct`, `tpUsd` / `slUsd`; the wallet defaults to the linked one. Raw fields (`token`, `amount`, `priceE18`, `slippageBps`, ...) still work and win.
  *  `pct` on a sell order is taken from the wallet's balance now. Returns a new body; the input is not changed. */
-export async function simpleBody(path: string, b: any, o: { address?: string; decimals: (mint: string) => Promise<number>; balance: (mint: string) => Promise<bigint> }): Promise<any> {
+export async function simpleBody(path: string, b: any, o: { address?: string; decimals: (mint: string) => Promise<number>; balance: (mint: string) => Promise<bigint>; /** The native coin's field and decimals: SOL (default) or { key: 'eth', decimals: 18 } on Base. */ native?: { key: string; decimals: number } }): Promise<any> {
+  const nat = o.native ?? { key: 'sol', decimals: 9 };
   if (!b || typeof b !== 'object') return b; const x: any = { ...b };
   if (x.token === undefined && x.mint !== undefined) x.token = x.mint; delete x.mint;
   if (x.walletId === undefined && o.address && path !== '/v1/quote' && !path.startsWith('/v1/wallet') && !path.startsWith('/v1/bulk')) x.walletId = o.address;
@@ -74,13 +75,13 @@ export async function simpleBody(path: string, b: any, o: { address?: string; de
   const buying = BUY_PATHS.has(path) || ((path === '/v1/twap' || path === '/v1/quote') && x.side === 'buy');
   const dec = async () => o.decimals(String(x.token));
   if (x.amount === undefined && x.total === undefined) {
-    if (x.sol !== undefined) { const v = toUnits(x.sol, 9, 'sol'); if (path === '/v1/twap') x.total = v; else x.amount = v; }
+    if (x[nat.key] !== undefined) { const v = toUnits(x[nat.key], nat.decimals, nat.key); if (path === '/v1/twap') x.total = v; else x.amount = v; }
     else if (x.tokens !== undefined && !buying) { const v = toUnits(x.tokens, await dec(), 'tokens'); if (path === '/v1/twap') x.total = v; else x.amount = v; }
     else if (x.pct !== undefined && !buying) { const bps = Math.round(Number(x.pct) * 100); if (!(bps >= 1 && bps <= 10_000)) throw new SdkError('bad_number', 'pct must be between 0.01 and 100');
       if (path === '/v1/trades/sell') x.pctBps ??= bps; else { const v = (await o.balance(String(x.token))) * BigInt(bps) / 10_000n; if (v <= 0n) throw new SdkError('bad_amount', 'the wallet holds none of this token'); if (path === '/v1/twap') x.total = v; else x.amount = v; } }
   }
-  if (x.priceE18 === undefined && x.priceUsd === undefined && x.price !== undefined) x.priceE18 = toUnits(x.price, 27 - await dec(), 'price');   // SOL per token -> lamports per raw unit x 1e18
-  delete x.sol; delete x.tokens; delete x.pct; delete x.price;
+  if (x.priceE18 === undefined && x.priceUsd === undefined && x.price !== undefined) x.priceE18 = toUnits(x.price, 18 + nat.decimals - await dec(), 'price');   // native per token -> native raw units per raw token unit x 1e18
+  delete x[nat.key]; delete x.tokens; delete x.pct; delete x.price;
   for (const k of ['amount', 'total', 'priceE18'] as const) if (typeof x[k] === 'bigint') x[k] = x[k].toString();
   return x;
 }

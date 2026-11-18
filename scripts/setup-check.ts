@@ -35,7 +35,7 @@ add('Privy signing', 'PRIVY_APP_SECRET', looksKey('PRIVY_APP_SECRET') ? 'ok' : s
 add('Privy signing', 'PRIVY_AUTH_KEY_ID', set('PRIVY_AUTH_KEY_ID') ? 'ok' : 'missing', 'Wallet infrastructure → Keys and quorums → New key');
 add('Privy signing', 'PRIVY_AUTH_PRIVATE_KEY', looksKey('PRIVY_AUTH_PRIVATE_KEY') ? 'ok' : set('PRIVY_AUTH_PRIVATE_KEY') ? 'warn' : 'missing', 'shown once when the key is created');
 add('Privy signing', 'PRIVY_SOLANA_POLICY_ID', set('PRIVY_SOLANA_POLICY_ID') ? 'ok' : 'missing', 'Wallet infrastructure → Policies (chain type Solana)');
-add('Privy signing', 'PRIVY_ETHEREUM_POLICY_ID', set('PRIVY_ETHEREUM_POLICY_ID') ? 'ok' : 'n/a', 'later, for EVM');
+add('Privy signing', 'PRIVY_BASE_POLICY_ID', set('PRIVY_BASE_POLICY_ID') ? 'ok' : 'n/a', 'only for MODE=base-mainnet');
 
 // verification tools
 add('fork tests', 'solana-test-validator (verify:sol-guard)', has('solana-test-validator') ? 'ok' : 'warn', 'Solana CLI');

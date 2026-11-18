@@ -4,7 +4,8 @@
 import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
-import { PrivyProvider, usePrivy, useLogin, useSigners } from '@privy-io/react-auth';
+import { PrivyProvider, usePrivy, useLogin, useSigners, useWallets as useEvmWallets, useCreateWallet as useCreateEvmWallet, useSignMessage as useEvmSignMessage } from '@privy-io/react-auth';
+import { base } from 'viem/chains';
 import { useWallets, useCreateWallet, useSignMessage, useSignTransaction, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 
 const UI = { showWalletUIs: true };
@@ -28,6 +29,18 @@ function Panel({ onWallets }) {
   // Automatic trading: add or remove the server's signer on a Privy wallet. Privy shows the user what is being allowed; the policy id limits what the signer can sign.
   const { addSigners, removeSigners } = useSigners(), sg = useRef();
   sg.current = { addSigners, removeSigners, authenticated };
+  // Base (MODE=base-mainnet): the user's Privy EMBEDDED Ethereum wallet (an external one cannot carry the server signer). create() makes one; sign(message) is personal_sign.
+  const { wallets: evmAll } = useEvmWallets(), { createWallet: createEvm } = useCreateEvmWallet(), { signMessage: evmSign } = useEvmSignMessage(), ev = useRef();
+  const evmWallet = evmAll.find(w => w.walletClientType === 'privy');
+  ev.current = { evmWallet, createEvm, evmSign };
+  useEffect(() => {
+    window.MintPrivy.evm = {
+      address: () => (ev.current.evmWallet ? ev.current.evmWallet.address.toLowerCase() : null),
+      create: async () => { if (!sg.current.authenticated) throw new Error('log in with Privy first'); if (ev.current.evmWallet) return ev.current.evmWallet.address.toLowerCase(); const w = await ev.current.createEvm(); return String(w.address).toLowerCase(); },
+      sign: async (message) => { const w = ev.current.evmWallet; if (!w) throw new Error('create your Base wallet first');
+        const r = await ev.current.evmSign({ message }, { address: w.address, uiOptions: { ...UI, title: 'Link to the MINT server', description: 'This only proves you control this wallet. It moves no funds.' } }); return r.signature; },
+    };
+  }, []);
   useEffect(() => {
     const need = () => { if (!sg.current.authenticated) throw new Error('log in with Privy first'); };
     window.MintPrivy.allow = async (address, signerId, policyId) => { need(); await sg.current.addSigners({ address, signers: [{ signerId, policyIds: [policyId] }] }); };
@@ -102,6 +115,7 @@ function Panel({ onWallets }) {
         </span>
       ) : null}
       {wReady && wallets.length > 0 ? <span className="faint">Choose it under "Sign in with your wallet" below. </span> : null}
+      <span className="faint" style={{ display: 'block' }}>{evmWallet ? `Base wallet ${evmWallet.address.slice(0, 8)}…` : 'No Base wallet yet (create it in the Execution server box when the server runs MODE=base-mainnet).'}</span>
       {err ? <span className="dn">{err} </span> : null}
       <button className="btn" onClick={() => logout()}>Log out of Privy</button>
     </span>
@@ -120,7 +134,8 @@ window.MintPrivy = {
           appearance: { walletChainType: 'solana-only', showWalletLoginFirst: false },
           loginMethods: ['email', 'wallet'],
           externalWallets: { solana: { connectors: toSolanaWalletConnectors() } },
-          embeddedWallets: { solana: { createOnLogin: 'users-without-wallets' }, showWalletUIs: true },
+          embeddedWallets: { solana: { createOnLogin: 'users-without-wallets' }, ethereum: { createOnLogin: 'off' }, showWalletUIs: true },
+          defaultChain: base, supportedChains: [base],
           // Privy's approval screen reads fees and balances through this RPC and fails without it ("No RPC configuration found"). Display only: the server still builds and sends the trade. Goes through this terminal's read-only relay (/api/sol/rpc): the public endpoint answers browsers with 403.
           solana: { rpcs: { 'solana:mainnet': { rpc: createSolanaRpc(location.origin + '/api/sol/rpc'), rpcSubscriptions: createSolanaRpcSubscriptions('wss://api.mainnet-beta.solana.com') } } },
         }}
