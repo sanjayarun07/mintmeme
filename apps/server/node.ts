@@ -13,6 +13,7 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { createApi } from '../api/server.ts';
+import { SdkError } from '../../packages/sdk/src/wire.ts';
 import type { ApiKey, Route } from '../api/server.ts';
 import { SyncRedis } from '../../packages/core/src/index.ts';
 import type { Backend } from '../../packages/core/src/index.ts';
@@ -24,7 +25,9 @@ import { recordRoutes, clusterStatus, statusHtml, nodeKey, nodesKey, nodeId } fr
 import type { WebhookOptions } from './webhooks.ts';
 
 /** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
-export interface Account { trader: Trader; stop?: () => void; prepare?: (body: any, path: string) => Promise<any> }
+/** `copies` (optional): copy trading for this account (POST/GET/DELETE /v1/copies): the host builds the leader source and keeps the configs in the user's state. */
+export interface Account { trader: Trader; stop?: () => void; prepare?: (body: any, path: string) => Promise<any>; copies?: AccountCopies }
+export interface AccountCopies { create: (body: any) => Promise<unknown>; remove: (id: string) => unknown; list: () => unknown }
 export interface NodeOptions {
   redisUrl: string; namespace: string;
   /** How OTHER nodes reach this one (http://, e.g. http://10.0.3.7:3500). Must be routable from the other nodes. */
@@ -97,8 +100,10 @@ export async function createNode(o: NodeOptions) {
   /** Every event of an app's end user goes to the app's webhook (if it set one). Internal error events are not sent. */
   const history = o.pgUrl ? new History(o.pgUrl, { log }) : undefined; if (history) await history.start();
   const wire = (user: string, t: Trader) => t.on(e => { if (e.type !== 'error') void hooks.emit(user, e.type, e); if (e.type === 'trade') history?.recordTrade(user, t.trade_(e.key)); });
+  const copiesOf = (u: string) => { const c = owned.get(u)?.acct.copies; if (!c) throw new SdkError('not_configured', 'copy trading is not available for this account on this server', 'The server mode has no leader source (MODE=solana-mainnet has one).', 501); return c; };
   const extra = o.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? (n: string) => x.lease.backend(n) : undefined; }, reload });
-  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: history ? e => history.audit({ ...e, node: o.publicUrl, body: auditBody(e.body) }) : undefined, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path), appRoutes: [...appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100), ...recordRoutes(history, true)] });
+  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: history ? e => history.audit({ ...e, node: o.publicUrl, body: auditBody(e.body) }) : undefined, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path),
+    makeCopy: (_t, body, u) => copiesOf(u).create(body), removeCopy: (_t, id, u) => copiesOf(u).remove(id), listCopies: (t, u) => owned.get(u)?.acct.copies?.list() ?? [...t.copies].map(([id, x]) => ({ id, lastError: x.lastError })), appRoutes: [...appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100), ...recordRoutes(history, true)] });
 
   /** Take the user's lease and start its Trader from the state in Redis. Concurrent claims for one user share one attempt. */
   const claim = (user: string): Promise<boolean> => {

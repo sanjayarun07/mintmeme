@@ -62,7 +62,7 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
     { name: 'Privy', run: async () => { await fetch('https://api.privy.io', { signal: AbortSignal.timeout(5_000) }); } },
     { name: 'Jito block engine', run: async () => { const r = await fetch('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
   ];
-  return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }) };
+  return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, stock: acc.stock, stocksEnabled: acc.stocksEnabled, ...h }) };
 }
 
 /** MODE=base-mainnet: real accounts on Base signed through each user's Privy Ethereum wallet (baseaccount.ts). */

@@ -46,7 +46,7 @@ export class CopyRunner {
     const allowed = new Set(cfgs.flatMap(c => c.venues)); let best: Market | undefined; let bestV: Venue | undefined;
     for (const v of this.d.chain.venues()) {
       if (v.status !== 'active' || !(allowed.has(v.id) || allowed.has(v.family)) || !v.supports(quote, token) || !v.spotPriceE18) continue;
-      try { const q = v.quote(quote, token, this.d.probeAmount ?? 10n ** 12n); const m = { priceE18: v.spotPriceE18(token, quote), liquidity: q.liquidity }; if (!best || m.liquidity > best.liquidity) { best = m; bestV = v; } } catch { /* unquotable */ }
+      try { const q = v.quote(quote, token, this.d.probeAmount ?? 10n ** 12n), m = { priceE18: priceOf(v, token, quote), liquidity: q.liquidity }; if (!best || m.liquidity > best.liquidity) { best = m; bestV = v; } } catch { /* unquotable */ }
     }
     if (!best || !bestV) return { priceE18: 0n, liquidity: 0n };
     const v = bestV, extra = this.d.info?.(chain, token);
@@ -90,4 +90,8 @@ export class CopyRunner {
       this.inflight.delete(key); this.checkpoint();
     }
   }
+}
+/** Quote units per token x1e18. A one-direction venue (Jupiter: built quote -> token) only prices its own direction: invert that one. */
+function priceOf(v: Venue, token: string, quote: string): bigint {
+  try { return v.spotPriceE18!(token, quote); } catch { const inv = v.spotPriceE18!(quote, token); return inv > 0n ? 10n ** 36n / inv : 0n; }
 }

@@ -18,7 +18,9 @@ export interface ApiOptions {
   /** Rate limit per key: requests per second sustained and burst. Default 20 and 40. */
   rate?: { perSecond: number; burst: number };
   /** Optional: how the host turns a JSON request into a launch or leader source. Without these, creating snipes and copy configs answers 501 with an explanation (listing still works). */
-  makeSnipe?: (t: Trader, body: any) => Promise<unknown> | unknown; makeCopy?: (t: Trader, body: any) => Promise<unknown> | unknown;
+  makeSnipe?: (t: Trader, body: any) => Promise<unknown> | unknown; makeCopy?: (t: Trader, body: any, userId: string) => Promise<unknown> | unknown;
+  /** Optional, with makeCopy: how the host stops a copy config (and forgets its saved state) and lists them with their settings. Without these, DELETE only removes the runner from the Trader. */
+  removeCopy?: (t: Trader, id: string, userId: string) => Promise<unknown> | unknown; listCopies?: (t: Trader, userId: string) => unknown;
   now?: () => number;
   /** Host-specific routes (the execution server's wallet linking in MODE=solana-mainnet). Same auth, scope and rate rules as the rest. */
   extraRoutes?: Route[];
@@ -72,8 +74,9 @@ function routes(o: ApiOptions): Route[] {
     { method: 'POST', path: '/v1/entries/resume', scope: 'trade', summary: 'Resume buys', run: c => { c.t.resumeEntries(); return { paused: false }; } },
     { method: 'GET', path: '/v1/snipes', scope: 'read', summary: 'Running launch snipers and what each decided per launch', run: c => [...c.t.snipes].map(([id, s]) => ({ id, status: Object.fromEntries(s.status), results: Object.fromEntries(s.results), exitErrors: Object.fromEntries(s.exitErrors), lastError: s.lastError })) },
     { method: 'POST', path: '/v1/snipes', scope: 'trade', summary: 'Start a launch sniper (needs a launch source configured by the host)', body: 'host-defined', run: async c => { if (!o.makeSnipe) throw new SdkError('not_configured', 'this server has no launch source configured', 'Sniping needs a chain-specific launch scanner. Create it in code with trader.addSnipe(...) or pass makeSnipe to createApi.', 501); return o.makeSnipe(c.t, c.body); } },
-    { method: 'GET', path: '/v1/copies', scope: 'read', summary: 'Running copy-trading configs and their last errors', run: c => [...c.t.copies].map(([id, r]) => ({ id, lastError: r.lastError, outbox: r.outbox.length, inflight: r.inflight.size })) },
-    { method: 'POST', path: '/v1/copies', scope: 'trade', summary: 'Start copying leader wallets (needs a leader source configured by the host)', body: 'host-defined', run: async c => { if (!o.makeCopy) throw new SdkError('not_configured', 'this server has no leader source configured', 'Copy trading needs a chain-specific leader scanner. Create it in code with trader.addCopy(...) or pass makeCopy to createApi.', 501); return o.makeCopy(c.t, c.body); } },
+    { method: 'GET', path: '/v1/copies', scope: 'read', summary: 'Running copy-trading configs and their last errors', run: c => o.listCopies ? o.listCopies(c.t, c.userId) : [...c.t.copies].map(([id, r]) => ({ id, lastError: r.lastError, outbox: r.outbox.length, inflight: r.inflight.size })) },
+    { method: 'POST', path: '/v1/copies', scope: 'trade', summary: 'Start copying leader wallets (needs a leader source configured by the host)', body: 'host-defined', run: async c => { if (!o.makeCopy) throw new SdkError('not_configured', 'this server has no leader source configured', 'Copy trading needs a chain-specific leader scanner. Create it in code with trader.addCopy(...) or pass makeCopy to createApi.', 501); return o.makeCopy(c.t, c.body, c.userId); } },
+    { method: 'DELETE', path: '/v1/copies/:id', scope: 'trade', summary: 'Stop a copy config: no new leader trades are copied. Copies already sent finish on the chain; tokens bought stay in the wallet', run: c => o.removeCopy ? o.removeCopy(c.t, c.params.id, c.userId) : { id: c.params.id, removed: found(c.t.removeCopy(c.params.id) || undefined, 'copy', c.params.id) } },
   ];
 }
 

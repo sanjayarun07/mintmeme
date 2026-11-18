@@ -131,3 +131,12 @@ test('REDIS backend: crash after the write-ahead checkpoint, restart after the l
     } finally { r2.release(); }
   } finally { const c = new SyncRedis(); for (const k of ['lock', 'engine', 'orders', 'copy']) c.cmd('DEL', `${ns}:${k}`); c.close(); }
 });
+
+test('a one-direction venue (Jupiter style: built quote -> token, prices only that way) still prices the copy: its price is inverted, not read as zero', async () => {
+  const s = setup([ev()]), real = s.p.venues;
+  (s.p as any).venues = () => real().map(v => Object.assign(Object.create(v), {
+    supports: (a: string, b: string) => a === NATIVE && b === TOK && v.supports(a, b),
+    spotPriceE18: (a: string, b: string) => { if (a !== NATIVE || b !== TOK) throw new Error('unsupported pair'); return E18 * E18 / v.spotPriceE18!(TOK, NATIVE); } }));
+  const t = await s.runner.tick();
+  assert.equal(t.submitted.length, 1, JSON.stringify(s.runner.copy.log)); assert.ok(!s.runner.copy.log.some(d => /deviation/.test(d.decision)));
+});
