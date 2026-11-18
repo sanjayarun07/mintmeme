@@ -15,3 +15,6 @@ export * from './remotesigner.ts';
 export * from './privysigner.ts';
 export * from './priorityfee.ts';
 export * from './tokensafety.ts';
+export * from './xstocks.ts';
+export * from './stocks.ts';
+export * from './jupiterz.ts';

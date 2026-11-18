@@ -68,8 +68,10 @@ export const PROGRAMS = {
   system: '11111111111111111111111111111111',
   token: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA',
   ata: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL',
+  token2022: 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb',
 };
-export const ataAddress = (owner: string, mint: string) => findProgramAddress([pubkeyBytes(owner), pubkeyBytes(PROGRAMS.token), pubkeyBytes(mint)], PROGRAMS.ata).address;
+/** The associated token account of `owner` for `mint`. The token program is part of the seeds: pass Token-2022 for a Token-2022 mint (xStocks, newer pump.fun mints). */
+export const ataAddress = (owner: string, mint: string, tokenProgram = PROGRAMS.token) => findProgramAddress([pubkeyBytes(owner), pubkeyBytes(tokenProgram), pubkeyBytes(mint)], PROGRAMS.ata).address;
 export const createAtaIdempotent = (payer: string, owner: string, mint: string): Ix => ({ program: PROGRAMS.ata, data: Uint8Array.of(1),
   keys: [{ pubkey: payer, signer: true, writable: true }, { pubkey: ataAddress(owner, mint), writable: true }, { pubkey: owner }, { pubkey: mint }, { pubkey: PROGRAMS.system }, { pubkey: PROGRAMS.token }] });
 export const systemTransfer = (from: string, to: string, lamports: bigint): Ix => ({ program: PROGRAMS.system, data: cat(u32le(2), u64le(lamports)), keys: [{ pubkey: from, signer: true, writable: true }, { pubkey: to, writable: true }] });

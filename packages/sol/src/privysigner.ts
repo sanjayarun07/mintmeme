@@ -9,6 +9,7 @@ import { createPrivateKey, sign as ecSign } from 'node:crypto';
 import { verifySignature } from './signer.ts';
 import type { SolSigner } from './signer.ts';
 import { SignRequestError } from './remotesigner.ts';
+import { parseMessage } from './jupiterswap.ts';
 
 export interface PrivyConfig {
   appId: string; appSecret: string;
@@ -89,11 +90,14 @@ export class PrivySolSigner implements SolSigner {
     const id = this.wallets.get(wallet); if (!id) throw new SignRequestError(`no Privy wallet is set up for ${wallet.slice(0, 6)}...: nothing was sent`);
     const n = message[0] & 0x80 ? message[1] : message[0];   // required signatures: v0 messages start with a version byte
     if (n < 1 || n > 127) throw new SignRequestError('unexpected transaction: nothing was sent');
+    // the wallet's own signature slot: 0 when it pays the fee, 1 on a JupiterZ RFQ fill (the maker pays). Refused before Privy is asked when the wallet is not a signer.
+    let slot = 0; try { slot = parseMessage(message).staticKeys.slice(0, n).indexOf(wallet); } catch { slot = -1; }
+    if (slot < 0) throw new SignRequestError('the transaction does not ask this wallet to sign: nothing was sent');
     const unsigned = Buffer.concat([Buffer.of(n), Buffer.alloc(64 * n), message]);
     let signed: Buffer; try { signed = Buffer.from(await this.api.signTransaction(id, unsigned.toString('base64')), 'base64'); }
     catch (e) { throw new SignRequestError(`${(e as Error).message}: nothing was sent`); }
-    // the fee payer (the wallet) is the first signer; the rest of the bytes must be the message the engine built
-    const sig = new Uint8Array(signed.subarray(1, 65));
+    // the wallet's signature is in its own slot: slot 0 when it pays the fee, slot 1 on a JupiterZ RFQ fill (the maker pays). The rest of the bytes must be the message the engine built.
+    const sig = new Uint8Array(signed.subarray(1 + 64 * slot, 65 + 64 * slot));
     if (signed[0] !== n || !signed.subarray(1 + 64 * n).equals(Buffer.from(message)) || !verifySignature(wallet, message, sig)) throw new SignRequestError('Privy returned a signature that does not match this transaction: nothing was sent');
     return sig;
   }

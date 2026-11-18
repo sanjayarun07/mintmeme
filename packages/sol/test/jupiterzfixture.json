@@ -1,0 +1,23 @@
+{
+ "inputMint": "So11111111111111111111111111111111111111112",
+ "outputMint": "XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB",
+ "inAmount": "1343800556840",
+ "outAmount": "26025356053",
+ "otherAmountThreshold": "26025356053",
+ "swapMode": "ExactIn",
+ "feeBps": 10,
+ "feeMint": "So11111111111111111111111111111111111111112",
+ "transaction": "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAIACA0whYFOpwkQM744u0ZpPXBJtI997wfmt8bbyYgkARaioUjAG1BZAFRV2dywxrzs3LT7Wy6rwamoK1c5K6qkDwTmB4/EItTWzRLOWoUHOBxHelpp5Kh2NqOBEz2JEV7WLjbA/aQs5Pw/RVz/h0Y1Q3duqpUZ5r/HqCWHqh9swcAaMth4hXceSs2ekKlHtC2tS+xVv/exxvazeJ0znDHl6BgBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADBkZv5SEXMv/srbpyw5vnvIzlu8X3EmssQ5s6QAAAAAabiFf+q4GE+2h/Y0YYwDXaxDncGus7VZig8AAAAAABBt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKkG3fbh7nWP3hhCXbzkbM3athr8TYO5DSf+vfko2KGL/AfoNYJBH+oUgvCZS4CqUSqXyU8l3yg77Fpno4H8hitKSlhJ+3Kju+kf3FsOalf2PFoctFsgZ6btDKzTY5XIoQKMlyWPTiSJ8bs9ECkUjg2DC1oTmdr/EIQEjnvY2+n4Wf+9VwWZX9Dgy/816+u1vLjKRCR1cm2cHWgKeD8K90FrBAYACQM/HAAAAAAAAAYABQJADQMADAYBAgEKBQkBAQsLAQALAwIEBwgKCQUlqGC3o1wKKKAoPcHgOAEAABVrOw8GAAAA1Jv9agAAAAAKAAAAAAA=",
+ "gasless": true,
+ "signatureFeePayer": "4GQeEya6ZTwvXre4Br6ZfDyfe2WQMkcDz2QbkJZazVqS",
+ "rentFeePayer": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+ "requestId": "01a1eea7-e0aa-73de-ad4c-032e94f7a2bf",
+ "router": "jupiterz",
+ "quoteId": "90dce6d8-65ca-5bdd-abf8-3eb404eeb21d",
+ "maker": "4GQeEya6ZTwvXre4Br6ZfDyfe2WQMkcDz2QbkJZazVqS",
+ "taker": "5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9",
+ "expireAt": "1795005396",
+ "transactionVersion": 0,
+ "mode": "manual",
+ "_recorded": "GET https://api.jup.ag/swap/v2/order?inputMint=SOL&outputMint=TSLAx&amount=1343800556840&taker=5tzFkiKscXHK5ZXCGbXZxdw7gTjjD1mBwuoFbhUvuAi9&excludeRouters=metis,dflow,okx at 2026-11-18T12:35:41Z (read-only; the taker is a public exchange wallet; nothing was signed)"
+}

@@ -9,7 +9,7 @@ import { parseMessage } from '../src/jupiterswap.ts';
 export const POLICY_PROGRAMS = ['JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', 'pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ', '11111111111111111111111111111111',
   'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', 'ComputeBudget111111111111111111111111111111'];
 
-export function fakePrivy(o: { seed: Uint8Array; base?: string; signerId?: string; policyId?: string; delegated?: boolean | 'other-policy'; policyMethod?: string }) {
+export function fakePrivy(o: { seed: Uint8Array; base?: string; signerId?: string; policyId?: string; delegated?: boolean | 'other-policy'; policyMethod?: string; /** Programs added to the allowed-programs rule (the proposed JupiterZ Order Engine rule). */ extraPrograms?: string[] }) {
   const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
   const cfg = { appId: 'app-test', appSecret: 'secret-test-0123456789abcdef0123456789abcdef', signerId: o.signerId ?? 'quorum-1', policyId: o.policyId ?? 'policy-1',
     authKey: 'wallet-auth:' + privateKey.export({ format: 'der', type: 'pkcs8' }).toString('base64'), apiUrl: o.base ?? 'https://privy.test' };
@@ -33,7 +33,8 @@ export function fakePrivy(o: { seed: Uint8Array; base?: string; signerId?: strin
       if (state.policyMethod !== 'signTransaction') return { status: 400, json: { error: 'RPC request denied due to policy violation' } };   // no rule for this method: denied by default
       const tx = Buffer.from(b.params.transaction, 'base64'), n = tx[0], message = tx.subarray(1 + 64 * n), why = policy(message);
       if (why) { state.refused.push(why); return { status: 400, json: { error: `Policy violation: ${why}` } }; }
-      const out = Buffer.from(tx); out.set(key.sign(address, new Uint8Array(message)), 1); state.signed++;
+      const slot = parseMessage(new Uint8Array(message)).staticKeys.slice(0, n).indexOf(address); if (slot < 0) return { status: 400, json: { error: 'wallet is not a signer' } };
+      const out = Buffer.from(tx); out.set(key.sign(address, new Uint8Array(message)), 1 + 64 * slot); state.signed++;   // the wallet's own slot (slot 1 on an RFQ fill)
       return { status: 200, json: { method: 'signTransaction', data: { signed_transaction: out.toString('base64'), encoding: 'base64' } } };
     }
     return { status: 404, json: { error: 'not found' } };
@@ -42,7 +43,7 @@ export function fakePrivy(o: { seed: Uint8Array; base?: string; signerId?: strin
   function policy(message: Buffer): string | undefined {
     const m = parseMessage(new Uint8Array(message));
     for (const ix of m.ixs) {
-      const prog = m.staticKeys[ix.programIdIndex]; if (!POLICY_PROGRAMS.includes(prog)) return `program ${prog} is not allowed`;
+      const prog = m.staticKeys[ix.programIdIndex]; if (!POLICY_PROGRAMS.includes(prog) && !(o.extraPrograms ?? []).includes(prog)) return `program ${prog} is not allowed`;
       const d = Buffer.from(ix.data);
       if (prog === POLICY_PROGRAMS[3] && d.length >= 12 && d.readUInt32LE(0) === 2 && d.readBigUInt64LE(4) > 50_000_000n) return 'SOL transfer above the cap';
       if ((prog === POLICY_PROGRAMS[4] || prog === POLICY_PROGRAMS[5]) && (d[0] === 3 || d[0] === 12)) return 'token transfer';

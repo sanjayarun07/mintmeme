@@ -18,9 +18,12 @@ import type { Ix, PoolKeys } from './tx.ts';
 import { RaydiumVenue, loadPoolKeys, decodePoolState, AMM_STATUS_SWAP } from './raydium.ts';
 import type { SolRpc } from './raydium.ts';
 import type { SolSigner } from './signer.ts';
+import { readStockStates, findStock } from './stocks.ts';
 import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMessage, decodeTable, gateInstructions, walletTokenAccountsAtRisk, unsignedV0, wireV0, JupiterVenue, JupiterRefused } from './jupiterswap.ts';
 import type { JupCfg, JIx, Table } from './jupiterswap.ts';
 import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.ts';
+import { fetchRfqOrder, gateRfq, encodeRfqRaw, decodeRfqRaw, rfqWire, executeRfq, RFQ_NOT_SENT } from './jupiterz.ts';
+import type { RfqCfg } from './jupiterz.ts';
 import type { TxSubmitter } from './submitter.ts';
 import { PriorityFees, limitFromSimulation, clampPrice, PRIORITY_DEFAULTS, feeTransfers } from './priorityfee.ts';
 import type { PriorityConfig, FeeRecipient } from './priorityfee.ts';
@@ -53,8 +56,15 @@ export interface SolChainConfig { id: string; wsol: string; /** Raydium AMM v4 p
   pump?: { mints: string[] };
   jupiter?: JupCfg & { quoteUrl?: string; pairs: { inMint: string; outMint: string; refAmount: bigint }[] };
   /** How signed transactions are sent (default: the node's sendTransaction). A tip-paying submitter such as Jito adds its tip instruction to curve and Raydium transactions; Jupiter-built transactions are sent through the plain node instead (their instruction list is Jupiter's). */
-  submitter?: TxSubmitter }
+  submitter?: TxSubmitter;
+  /** JupiterZ RFQ fills for large orders (jupiterz.ts, docs/JUPITERZ.md). Off unless set. Chosen per trade only when one side of the trade is SOL (at least `minLamports`)
+   *  or a quote asset listed in `minQuote` (mint -> smallest raw amount on that side, for example USDC: market makers quote stocks closest against USDC), the trade
+   *  carries no platform fee, and the maker's output beats Jupiter's /build route by `marginBps`. `checkFill` may refuse the RFQ output (the stock share-price check). */
+  jupiterz?: RfqCfg & { minLamports: bigint; minQuote?: Record<string, bigint>; marginBps: number; maxExpirySec?: number; checkFill?: (tx: SimTx, outAmount: bigint) => Promise<string | undefined>; log?: (m: string) => void } }
 const FINAL = 32, TOKEN_ACCOUNT_SIZE = 165;
+/** A token account (classic: exactly 165 bytes; Token-2022: 165, or longer with account type 2 at byte 165 and extensions after). Mint, owner and amount sit at the same offsets in both. */
+const isTokenAccount = (x: { owner: string; data: Buffer }) => (x.owner === PROGRAMS.token && x.data.length === TOKEN_ACCOUNT_SIZE)
+  || (x.owner === PROGRAMS.token2022 && (x.data.length === TOKEN_ACCOUNT_SIZE || (x.data.length > TOKEN_ACCOUNT_SIZE && x.data[TOKEN_ACCOUNT_SIZE] === 2)));
 
 /** Solana's limit on a signed transaction, and how a too-large Jupiter route is retried with fewer accounts. */
 export const TX_MAX_BYTES = 1232; const JUP_SIZE_MARGIN = 24, JUP_MAX_ACCOUNTS_STEPS = [48, 36, 28];
@@ -66,6 +76,10 @@ export class SolanaChain implements ChainPort {
   private sentAt = new Map<string, number>(); static VISIBILITY_GRACE_MS = 4000;
   /** Set when the last Jupiter quote refresh failed (the Jupiter venue is then absent, so routing falls back to other venues). */
   jupiterError?: string;
+  /** RFQ trades by the user's own signature (the engine's hash for them): the request to resend, when the quote expires, and the landed signature once known. */
+  private rfq = new Map<string, { requestId: string; expireAt: number; wallet: string; landed?: string }>();
+  /** Why the last trade did not use JupiterZ (or that it did), for the test UI and logs. */
+  rfqNote?: string;
   constructor(cfg: SolChainConfig, private rpc: SolRpc, private signer: SolSigner) { this.cfg = { ...cfg, pools: [...cfg.pools] }; this.id = cfg.id; this.finalityDepth = cfg.finalityDepth ?? FINAL; if (cfg.priority) this.fees = new PriorityFees(rpc as any, cfg.priority); }
   venues() { return [...this.state.venues.values()]; }
   /** Add a pool to track. SnipeRunner passes `{ id, pair }`; the program defaults to the first configured pool's program. */
@@ -135,13 +149,24 @@ export class SolanaChain implements ChainPort {
   }
   private async refreshJupiter() {
     const j = this.cfg.jupiter; if (!j) return; this.jupiterError = undefined;
+    const paused = await this.pausedStocks(j.pairs.flatMap(p => [p.inMint, p.outMint]));
     for (const p of j.pairs) {
       const id = `jup:${p.inMint.slice(0, 6)}>${p.outMint.slice(0, 6)}`;
+      // a stock whose issuer paused transfers has no venue until the pause ends: orders on it WAIT (skipped, not failed) and trades say why
+      const halt = [p.inMint, p.outMint].find(m => paused.has(m)); if (halt) { this.state.venues.delete(id); this.jupiterError = `${halt}: transfers are paused by the issuer`; continue; }
       try {
         const q = await fetchJupiterQuote({ inputMint: p.inMint, outputMint: p.outMint, amount: p.refAmount, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
         this.state.venues.set(id, new JupiterVenue(id, p.inMint, p.outMint, this.cfg.wsol, p.refAmount, q.outAmount, Math.round(Math.abs(q.priceImpactPct) * 100), q.contextSlot));
       } catch (e) { this.state.venues.delete(id); this.jupiterError = (e as Error).message; }
     }
+  }
+  /** Registered stock mints (xstocks.ts) whose issuer pause is on, read at most every 15 s. A failed read pauses nothing here: the build re-reads and refuses a paused mint. */
+  private pauseRead?: { at: number; key: string; paused: Set<string> };
+  private async pausedStocks(mints: string[]): Promise<Set<string>> {
+    const stocks = [...new Set(mints)].filter(m => findStock(m)?.mint === m), key = stocks.join(','); if (!stocks.length) return new Set();
+    if (this.pauseRead && this.pauseRead.key === key && Date.now() - this.pauseRead.at < 15_000) return this.pauseRead.paused;
+    try { const st = await readStockStates(this.rpc as any, stocks); const paused = new Set([...st.values()].filter(x => x.paused).map(x => x.mint)); this.pauseRead = { at: Date.now(), key, paused }; return paused; }
+    catch { return this.pauseRead?.paused ?? new Set(); }
   }
   private loadKeys(p: { id: string; program: string }) { return loadPoolKeys(this.rpc, p.id, p.program).catch(e => { throw e instanceof SolJsonRpcError ? e : new RpcError((e as Error).message); }); }
   async confirmedNonce() { return 0; }
@@ -229,19 +254,28 @@ export class SolanaChain implements ChainPort {
     }
     if (tip && !parseMessage(message).staticKeys.includes(tip.to)) throw new JupiterRefused('the tip account ended up in a lookup table, where Jito ignores tips');
     const final = resolveMessage(parseMessage(message), tables);
-    const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each });
-    const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM), outAta = ataAddress(w, outM), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
+    // Token-2022 mints of this trade (xStocks, newer pump.fun tokens): the chain says which program owns each mint, and that program is part of the token account's address
+    const ataMints = final.filter(i => i.programId === PROGRAMS.ata).map(i => i.accounts[3]?.pubkey).filter((m): m is string => !!m);
+    const prog = await this.tokenPrograms([inM, outM, ...ataMints]), t22 = new Set([...prog].filter(([, p]) => p === PROGRAMS.token2022).map(([m]) => m));
+    // an issuer pause (Token-2022 pausable: tokenized stocks) makes every transfer fail: refuse with the reason rather than a simulation error
+    const tradeT22 = [inM, outM].filter(m => t22.has(m));
+    if (tradeT22.length) { const st = await readStockStates(this.rpc as any, tradeT22); const p = tradeT22.find(m => st.get(m)?.paused); if (p) throw new JupiterRefused(`transfers of ${p} are paused by the issuer right now; orders wait until the pause ends`); }
+    const gate = gateInstructions(final, { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each, token2022: t22 });
+    const wAta = ataAddress(w, wsol), inAta = ataAddress(w, inM, prog.get(inM)), outAta = ataAddress(w, outM, prog.get(outM)), okSet = new Set([wAta, inAta, outAta, ...gate.createdTokenAccounts]);
     const route = final[gate.swapIndex], cand = route.accounts.filter(a => a.isWritable && !a.isSigner).map(a => a.pubkey), cinfo = await this.accountsAt(cand), wb = pubkeyBytes(w);
-    const mine = new Set(cand.filter((a, i) => { const x = cinfo[i]; return !!x && x.owner === PROGRAMS.token && x.data.length === 165 && x.data.subarray(32, 64).equals(Buffer.from(wb)); }));
+    const mine = new Set(cand.filter((a, i) => { const x = cinfo[i]; return !!x && isTokenAccount(x) && x.data.subarray(32, 64).equals(Buffer.from(wb)); }));
     const risk = walletTokenAccountsAtRisk(route, w, okSet, a => mine.has(a)); if (risk.length) throw new JupiterRefused(`the route writes our token account(s) ${risk.join(', ')} that this swap is not about`);
     // Simulate and check the wallet's balances: output at least minOut, input at most the intent.
     const watch = [w, ...(tx.tokenIn === NATIVE ? [] : [inAta]), ...(tx.tokenOut === NATIVE ? [] : [outAta])];
+    const created = gate.createdTokenAccounts.filter(a => a !== wAta); for (const a of created) if (!watch.includes(a)) watch.push(a);   // their simulated size prices their rent
     const pre = await this.accountsAt(watch);
     const sim: any = await this.rpcCall('simulateTransaction', [Buffer.from(unsignedV0(message)).toString('base64'), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64', accounts: { encoding: 'base64', addresses: watch } }]);
     if (sim.value.err) throw new JupiterRefused(`simulation failed: ${JSON.stringify(sim.value.err)}${sim.value.logs?.length ? `: ${sim.value.logs[sim.value.logs.length - 1]}` : ''}`);
     const post = (sim.value.accounts as any[]).map(a => a ? { lamports: BigInt(a.lamports), data: Buffer.from(a.data[0], 'base64') } : null);
     const tok = (a: { data: Buffer } | null) => (a && a.data.length >= 72 ? a.data.readBigUInt64LE(64) : 0n), lam = (a: { lamports: number | bigint } | null) => BigInt(a?.lamports ?? 0);
-    const feeAll = 5000n + gate.priorityLamports + (tip?.maxLamports ?? 0n), rent = BigInt(gate.createdNonWsol) * await this.rentExempt();
+    // rent of the token accounts this swap creates, each at its simulated size: a Token-2022 account with extensions (an xStock account) is bigger than a classic 165-byte one
+    let rent = 0n; for (const a of created) { const x = post[watch.indexOf(a)]; rent += x && x.data.length > TOKEN_ACCOUNT_SIZE ? await this.rentFor(x.data.length) : await this.rentExempt(); }
+    const feeAll = 5000n + gate.priorityLamports + (tip?.maxLamports ?? 0n);
     let k = 1;
     if (tx.tokenIn === NATIVE) { const spent = lam(pre[0]) - lam(post[0]); if (spent > tx.amountIn + fee.total + feeAll + rent) throw new JupiterRefused(`simulated SOL spend ${spent} exceeds the intent ${tx.amountIn} plus the platform fee ${fee.total} plus fees ${feeAll} and new token-account rent ${rent}`); }
     else { const spent = tok(pre[k]) - tok(post[k]); k++; if (spent > tx.amountIn) throw new JupiterRefused(`simulated token spend ${spent} exceeds the intent ${tx.amountIn}`); }
@@ -257,7 +291,7 @@ export class SolanaChain implements ChainPort {
       const price = this.fees ? await this.fees.price(cand, limit).catch(() => clampPrice(jupPrice, limit, cap)) : clampPrice(jupPrice, limit, j.maxPriorityLamports ?? 2_000_000n);
       const cb = (data: Uint8Array): JIx => ({ programId: COMPUTE_BUDGET, accounts: [], data });
       message = compileV0(w, [cb(setComputeUnitLimit(limit).data), cb(setComputeUnitPrice(price).data), ...body.filter(i => i.programId !== COMPUTE_BUDGET)], b99(bh.value.blockhash), tables);
-      gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each });
+      gateInstructions(resolveMessage(parseMessage(message), tables), { wallet: w, wsol, tokenIn: inM, tokenOut: outM, amountIn: tx.amountIn, allowedPrograms: allowed, maxPriorityLamports: j.maxPriorityLamports ?? 2_000_000n, maxComputeUnits: j.maxComputeUnits ?? 1_400_000, tip, fees: fee.each, token2022: t22 });
     }
     if (1 + 64 + message.length > TX_MAX_BYTES) throw new JupiterRefused(`the transaction is ${1 + 64 + message.length} bytes, over the ${TX_MAX_BYTES}-byte limit`);
     return { message, simulatedOut: got, quotedOut: b.outAmount, labels: b.routeLabels };
@@ -283,6 +317,7 @@ export class SolanaChain implements ChainPort {
   async prepare(tx: SimTx) {
     const jv = this.jupVenue(tx);
     const priv = this.privateSend(tx);
+    if (jv && this.cfg.jupiterz) { const r = await this.tryRfq(tx, jv).catch(e => { this.rfqNote = `JupiterZ not used: ${(e as Error).message}`; return undefined; }); this.cfg.jupiterz.log?.(this.rfqNote ?? ''); if (r) return r; }
     if (jv) { const sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; const { message } = await this.buildJupiter(tx, jv, extra); const sig = await this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig)); return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) }; }
     const ixs = this.fees && (tx.kind ?? 'swap') === 'swap' ? await this.withPriority(this.instructions(tx), tx.wallet) : this.instructions(tx), sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; if (extra) ixs.push(extra);
     const bh: any = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
@@ -311,6 +346,7 @@ export class SolanaChain implements ChainPort {
   async submit(tx: SimTx) {
     if (!tx.raw) throw new Error('transaction was not prepared (no raw bytes)');
     this.sentAt.set(tx.hash, Date.now());
+    const z = decodeRfqRaw(tx.raw); if (z) return this.submitRfq(tx, z);
     try {
       const sub = this.cfg.submitter, viaSub = sub && (!sub.extraInstruction || tx.mev === true || this.tipped.has(tx.hash));
       const h = viaSub ? await sub!.send(tx.raw, tx.hash) : await this.rpcCall<string>('sendTransaction', [tx.raw, { encoding: 'base64', skipPreflight: false, preflightCommitment: 'confirmed', maxRetries: 0 }]);
@@ -326,23 +362,112 @@ export class SolanaChain implements ChainPort {
 
   private async status(hash: string) { const r: any = await this.rpcCall('getSignatureStatuses', [[hash], { searchTransactionHistory: true }]); return r.value[0] as { slot: number; confirmations: number | null; err: unknown; confirmationStatus?: string } | null; }
   async lookup(hash: string) {
-    if (await this.status(hash)) return 'included' as const;
+    const real = await this.resolve(hash); if (real && await this.status(real)) return 'included' as const;
     const t = this.sentAt.get(hash); return t !== undefined && Date.now() - t < SolanaChain.VISIBILITY_GRACE_MS ? 'pending' as const : 'none' as const;
   }
   async confirmations(hash: string) {
-    const s = await this.status(hash); if (!s) return 0;
+    const real = await this.resolve(hash); const s = real ? await this.status(real) : null; if (!s) return 0;
     if (s.confirmationStatus === 'finalized' || s.confirmations === null) return this.finalityDepth;
     return Math.min(this.finalityDepth - 1, (s.confirmations ?? 0) + 1);
   }
 
+  /* ---------------- JupiterZ (RFQ) ---------------- */
+  /** An RFQ fill for this trade if it is eligible and beats /build by the margin: gated, simulated and signed by the user's wallet (never sent here). Undefined: use /build. */
+  private async tryRfq(tx: SimTx, v: JupiterVenue): Promise<{ raw: string; hash: string } | undefined> {
+    const z = this.cfg.jupiterz!, j = this.cfg.jupiter!, w = tx.wallet, wsol = this.cfg.wsol, inM = this.res(tx.tokenIn), outM = this.res(tx.tokenOut);
+    const no = (why: string) => { this.rfqNote = `JupiterZ not used: ${why}`; return undefined; };
+    if ((tx.kind ?? 'swap') !== 'swap' || !v.supports(tx.tokenIn, tx.tokenOut)) return no('not a Jupiter swap');
+    // the quote side: SOL, or a listed quote asset (USDC); its size is the input when paying with it, the minimum output when receiving it
+    const quoteMin = (t: string) => (t === NATIVE ? z.minLamports : z.minQuote?.[t]);
+    const qIn = quoteMin(tx.tokenIn), qOut = quoteMin(tx.tokenOut);
+    if (qIn === undefined && qOut === undefined) return no(`RFQ is used only with SOL${z.minQuote ? ' or ' + Object.keys(z.minQuote).map(m => m.slice(0, 4)).join(', ') : ''} on one side`);
+    const [size, min, unit] = qIn !== undefined ? [tx.amountIn, qIn, tx.tokenIn === NATIVE ? 'lamports' : 'raw units'] : [tx.minOut, qOut!, tx.tokenOut === NATIVE ? 'lamports' : 'raw units'];
+    if (size < min) return no(`${size} ${unit} is below the RFQ threshold ${min}`);
+    // our platform fee is paid in SOL inside the transaction, which an RFQ transaction cannot carry
+    if (tx.platformFeeBps && (tx.tokenIn !== NATIVE && tx.tokenOut !== NATIVE ? true : this.feeSplit(tx).each.length > 0)) return no('the trade carries a platform fee, which an RFQ transaction cannot pay');
+    const [b, o] = [await fetchBuild({ ...j, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps: 50 }), await fetchRfqOrder({ ...z, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w })];
+    if ('none' in o) return no(o.none);
+    const need = b.outAmount * BigInt(10_000 + z.marginBps) / 10_000n;
+    if (o.outAmount < need) return no(`RFQ pays ${o.outAmount}, /build ${b.outAmount}: not ${z.marginBps} bps better`);
+    if (o.outAmount < tx.minOut) return no(`RFQ pays ${o.outAmount}, below the minimum ${tx.minOut}`);
+    const prog = await this.tokenPrograms([inM, outM]);
+    const t22 = [inM, outM].filter(m => prog.get(m) === PROGRAMS.token2022);
+    if (t22.length) { const st = await readStockStates(this.rpc as any, t22); const p = t22.find(m => st.get(m)?.paused); if (p) throw new JupiterRefused(`transfers of ${p} are paused by the issuer right now`); }
+    const head = Math.max(this.time, Math.floor(Date.now() / 1000));
+    const g = gateRfq(o.tx, { wallet: w, maker: o.maker, wsol, inMint: inM, outMint: outM, amountIn: tx.amountIn, minOut: tx.minOut, tokenProgram: m => prog.get(m) ?? PROGRAMS.token, nowSec: head, maxExpirySec: z.maxExpirySec });
+    if (g.fill.outputAmount !== o.outAmount) throw new JupiterRefused(`the fill pays ${g.fill.outputAmount}, the quote said ${o.outAmount}`);
+    if (g.fill.expireAt !== o.expireAt) throw new JupiterRefused('the fill expiry differs from the quote');
+    const why = await z.checkFill?.(tx, g.fill.outputAmount); if (why) throw new JupiterRefused(why);
+    // simulate (the maker's signature is missing, so without signature checks): our wallet spends at most the input plus new-account rent, and receives at least minOut
+    const inAta = ataAddress(w, inM, prog.get(inM)), outAta = ataAddress(w, outM, prog.get(outM));
+    const watch = [w, ...(tx.tokenIn === NATIVE ? [] : [inAta]), ...(tx.tokenOut === NATIVE ? [] : [outAta])], pre = await this.accountsAt(watch);
+    const sim: any = await this.rpcCall('simulateTransaction', [Buffer.from(o.tx).toString('base64'), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64', accounts: { encoding: 'base64', addresses: watch } }]);
+    if (sim.value.err) throw new JupiterRefused(`RFQ simulation failed: ${JSON.stringify(sim.value.err)}${sim.value.logs?.length ? `: ${sim.value.logs[sim.value.logs.length - 1]}` : ''}`);
+    const post = (sim.value.accounts as any[]).map(a => a ? { lamports: BigInt(a.lamports), data: Buffer.from(a.data[0], 'base64') } : null);
+    const tok = (a: { data: Buffer } | null) => (a && a.data.length >= 72 ? a.data.readBigUInt64LE(64) : 0n), lam = (a: { lamports: number | bigint } | null) => BigInt(a?.lamports ?? 0);
+    let rent = 0n; for (const a of g.createdTokenAccounts) { const x = post[watch.indexOf(a)]; if (x && !pre[watch.indexOf(a)]) rent += x.data.length > TOKEN_ACCOUNT_SIZE ? await this.rentFor(x.data.length) : await this.rentExempt(); }
+    // input: SOL from the wallet itself, or tokens from our input account; SOL beyond the trade may pay only new-account rent (the maker pays the network fee)
+    const at = (a: string) => watch.indexOf(a), solDelta = lam(post[0]) - lam(pre[0]);
+    if (tx.tokenIn === NATIVE) { if (-solDelta > tx.amountIn + rent) throw new JupiterRefused(`RFQ simulation spends ${-solDelta} lamports, the trade is ${tx.amountIn} plus rent ${rent}`); }
+    else {
+      const spent = tok(pre[at(inAta)]) - tok(post[at(inAta)]); if (spent > tx.amountIn) throw new JupiterRefused(`RFQ simulation spends ${spent} tokens, the trade is ${tx.amountIn}`);
+      if (tx.tokenOut !== NATIVE && -solDelta > rent) throw new JupiterRefused(`RFQ simulation takes ${-solDelta} lamports from the wallet, more than the new-account rent ${rent}`);
+    }
+    const got = tx.tokenOut === NATIVE ? solDelta : tok(post[at(outAta)]) - tok(pre[at(outAta)]);
+    if (got < tx.minOut) throw new JupiterRefused(`RFQ simulation pays ${got}, below the minimum ${tx.minOut}`);
+    // the user's wallet signs its own slot (1); the maker signs slot 0 inside /execute
+    const sig = await this.signer.sign(w, o.message), hash = base58(sig);
+    this.rfq.set(hash, { requestId: o.requestId, expireAt: o.expireAt, wallet: w });
+    this.rfqNote = `JupiterZ used: maker ${o.maker} pays ${o.outAmount} (/build ${b.outAmount}), quote expires at ${o.expireAt}`;
+    return { raw: encodeRfqRaw(o.requestId, o.expireAt, rfqWire(o.message, 1, sig)), hash };
+  }
+  /** Send an RFQ trade through Jupiter's /execute. Identical bytes every time, so it lands at most once. A failure is final only once the quote can no longer land
+   *  (chain time past expireAt) and the transaction is not on chain; before that it is treated like a lost ack (RpcError), so the engine looks again instead of failing it. */
+  private async submitRfq(tx: SimTx, z: { requestId: string; expireAt: number; wire: string }): Promise<string> {
+    const e = this.rfq.get(tx.hash) ?? { requestId: z.requestId, expireAt: z.expireAt, wallet: tx.wallet }; this.rfq.set(tx.hash, e);
+    if (await this.resolve(tx.hash)) return tx.hash;   // already on chain (for example sent before a restart)
+    let r; try { r = await executeRfq(this.cfg.jupiterz ?? {}, z.wire, z.requestId); } catch (err) { throw new RpcError(`JupiterZ /execute did not answer: ${(err as Error).message}`); }
+    if (r.signature) { e.landed = r.signature; }
+    if (r.status === 'Success') return tx.hash;
+    if (r.signature && await this.status(r.signature).catch(() => null)) return tx.hash;   // landed but failed on chain: the receipt reports it
+    const past = Math.max(this.time, 0) > z.expireAt + 30;
+    if (!past) throw new RpcError(`JupiterZ /execute: ${r.code}${r.error ? ' ' + r.error : ''}; the quote may still land until ${z.expireAt}`);
+    e.landed = undefined; if (await this.resolve(tx.hash)) return tx.hash;
+    throw new Error(`JupiterZ did not fill (${r.code}${RFQ_NOT_SENT.has(r.code) ? ', the maker did not sign' : ''}${r.error ? ': ' + r.error : ''}); the quote expired, so it can never land`);
+  }
+  /** The landed signature for a hash: the hash itself for ordinary transactions; for RFQ trades /execute's signature, or the wallet's recent transaction that carries our signature. */
+  private async resolve(hash: string): Promise<string | undefined> {
+    const e = this.rfq.get(hash); if (!e) return hash;
+    if (e.landed && await this.status(e.landed)) return e.landed;
+    const list: any[] = await this.rpcCall('getSignaturesForAddress', [e.wallet, { limit: 100, commitment: 'confirmed' }]);
+    for (const x of list ?? []) {
+      if (typeof x?.blockTime === 'number' && (x.blockTime < e.expireAt - 180 || x.blockTime > e.expireAt + 180)) continue;
+      const t: any = await this.rpcCall('getTransaction', [x.signature, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]);
+      if ((t?.transaction?.signatures ?? []).includes(hash)) { e.landed = x.signature; return x.signature; }
+    }
+    return undefined;
+  }
+
+  /** The token program that owns each mint (classic Token unless the chain says Token-2022). Cached: a mint never changes program. */
+  private async tokenPrograms(mints: string[]): Promise<Map<string, string>> {
+    const need = [...new Set(mints)].filter(m => !this.mintProgram.has(m)), info = need.length ? await this.accountsAt(need) : [];
+    need.forEach((m, i) => { const o = info[i]?.owner; if (o === PROGRAMS.token || o === PROGRAMS.token2022) this.mintProgram.set(m, o); });
+    return new Map(mints.map(m => [m, this.mintProgram.get(m) ?? PROGRAMS.token]));
+  }
+  private mintProgram = new Map<string, string>();
   private async rentExempt() { return this.rent ??= BigInt(await this.rpcCall<number>('getMinimumBalanceForRentExemption', [TOKEN_ACCOUNT_SIZE])); }
+  private rentBySize = new Map<number, bigint>();
+  private async rentFor(size: number) { let r = this.rentBySize.get(size); if (r === undefined) { r = BigInt(await this.rpcCall<number>('getMinimumBalanceForRentExemption', [size])); this.rentBySize.set(size, r); } return r; }
 
   /** Receipt -> the wallet's balance deltas. NATIVE = lamports, so it includes the fee and any rent paid; `network` = fee + rent of token accounts the tx created and left open. */
   async receipt(hash: string): Promise<Receipt | undefined> {
-    const s = await this.status(hash); if (!s) return undefined;
-    const t: any = await this.rpcCall('getTransaction', [hash, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); if (!t) return undefined;
-    const m = t.meta, keys: string[] = t.transaction.message.accountKeys, wallet = keys[0], block = t.slot as number, fee = BigInt(m.fee);
-    const deltas: Record<string, bigint> = { [NATIVE]: BigInt(m.postBalances[0]) - BigInt(m.preBalances[0]) };
+    const real = await this.resolve(hash); if (!real) return undefined;
+    const s = await this.status(real); if (!s) return undefined;
+    const t: any = await this.rpcCall('getTransaction', [real, { encoding: 'json', commitment: 'confirmed', maxSupportedTransactionVersion: 0 }]); if (!t) return undefined;
+    // the wallet is the signer whose signature is our hash: slot 0 normally, slot 1 on an RFQ fill (the maker is slot 0 and pays the network fee)
+    const wi = Math.max(0, ((t.transaction.signatures ?? []) as string[]).indexOf(hash));
+    const m = t.meta, keys: string[] = t.transaction.message.accountKeys, wallet = keys[wi], block = t.slot as number, fee = wi === 0 ? BigInt(m.fee) : 0n;
+    const deltas: Record<string, bigint> = { [NATIVE]: BigInt(m.postBalances[wi]) - BigInt(m.preBalances[wi]) };
     if (m.err) return { hash, status: 'reverted', reason: `${JSON.stringify(m.err)}${m.logMessages?.length ? `: ${m.logMessages[m.logMessages.length - 1]}` : ''}`, block, deltas, network: fee, platformFee: 0n, venueFee: 0n };
     const add = (mint: string, d: bigint) => { deltas[mint] = (deltas[mint] ?? 0n) + d; };
     const pre = new Set<number>((m.preTokenBalances as any[]).map(b => b.accountIndex)); let created = 0n, createdRent = 0n;
@@ -350,7 +475,7 @@ export class SolanaChain implements ChainPort {
     for (const b of m.postTokenBalances as any[]) if (b.owner === wallet) { add(b.mint, BigInt(b.uiTokenAmount.amount)); if (!pre.has(b.accountIndex) && b.mint !== this.cfg.wsol) { created++; createdRent += BigInt(m.postBalances[b.accountIndex] ?? 0); } }
     for (const k of Object.keys(deltas)) if (k !== NATIVE && deltas[k] === 0n) delete deltas[k];
     const tokenIdx = new Set<number>([...(m.postTokenBalances as any[]), ...(m.preTokenBalances as any[])].map(b => b.accountIndex)); let otherRent = 0n;
-    for (let i = 1; i < keys.length; i++) if (!tokenIdx.has(i) && BigInt(m.preBalances[i] ?? 0) === 0n && BigInt(m.postBalances[i] ?? 0) > 0n) otherRent += BigInt(m.postBalances[i]);   // program accounts the tx created and left open (pump.fun's per-user volume accumulator, for one)
+    if (wi === 0) for (let i = 1; i < keys.length; i++) if (!tokenIdx.has(i) && BigInt(m.preBalances[i] ?? 0) === 0n && BigInt(m.postBalances[i] ?? 0) > 0n) otherRent += BigInt(m.postBalances[i]);   // program accounts the tx created and left open (pump.fun's per-user volume accumulator, for one)
     const network = fee + otherRent + (createdRent > 0n ? createdRent : created * await this.rentExempt());   // rent actually paid for the new token accounts (a Token-2022 account is bigger than a classic one)
     let venueFee = 0n;
     for (const v of this.state.venues.values()) if (v instanceof RaydiumVenue) {

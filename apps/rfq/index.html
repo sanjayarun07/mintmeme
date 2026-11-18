@@ -1,0 +1,617 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RFQ Desk</title>
+<script>try{const saved=localStorage.getItem('rfq-desk-theme');document.documentElement.dataset.theme=saved==='light'||saved==='dark'?saved:matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'}catch{document.documentElement.dataset.theme=matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'}</script>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+/* tokens: one spacing scale (4/8), one radius, one border, semantic colors only */
+:root{
+  color-scheme:light;
+  --bg:#F5F6FB; --card:#FFFFFF; --sunk:#F8F9FD; --fg:#182137; --muted:#59677F; --border:#E2E6F0; --border-strong:#C8D0E0;
+  --rfq:#5948D6; --rfq-bg:#EEEAFE; --pos:#167A50; --pos-bg:#E9F7EF; --neg:#BC3648; --neg-bg:#FCECEF; --ring:#5948D6;
+  --btn:#5948D6; --btn-fg:#FFFFFF;
+  --r:6px; --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px;
+  --sans:'Fira Sans',system-ui,sans-serif; --mono:'Fira Code',ui-monospace,monospace;
+  --row:36px; --head:40px;
+}
+:root[data-theme=dark]{
+  color-scheme:dark;
+  --bg:#0B1020; --card:#151C2E; --sunk:#101729; --fg:#F1F3FF; --muted:#A7B1CB; --border:#293550; --border-strong:#3A4867;
+  --rfq:#A79BFF; --rfq-bg:#29264C; --pos:#5DD3A0; --pos-bg:#15382D; --neg:#FF8793; --neg-bg:#41232D; --ring:#C0B9FF;
+  --btn:#A79BFF; --btn-fg:#141626;
+}
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--fg);font:14px/20px var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+body{margin:0;min-height:100vh}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.mono{font-family:var(--mono);font-size:12px}
+.muted{color:var(--muted)}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+svg.i{width:16px;height:16px;flex:none}
+
+/* shell */
+.top{height:48px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:2}
+.top-in,.page{max-width:1440px;margin:0 auto;padding:0 var(--s5)}
+.top-in{height:100%;display:flex;align-items:center;gap:var(--s5)}
+.brand{font-weight:700;font-size:16px;white-space:nowrap}
+.tabs{display:flex;height:100%;gap:var(--s1)}
+.tabs a{display:flex;align-items:center;padding:0 var(--s3);color:var(--muted);text-decoration:none;font-weight:500;border-bottom:2px solid transparent;white-space:nowrap}
+.tabs a[aria-current=page]{color:var(--fg);border-bottom-color:var(--fg)}
+.tabs a:hover{color:var(--fg)}
+.meta{margin-left:auto;display:flex;align-items:center;gap:var(--s4);font-size:12px;color:var(--muted);white-space:nowrap}
+.meta .on{display:inline-flex;align-items:center;gap:6px}
+.meta .on::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--pos)}
+.badge{display:inline-flex;align-items:center;height:22px;padding:0 var(--s2);border:1px solid var(--border-strong);border-radius:var(--r);font-size:12px;font-weight:500;color:var(--fg);white-space:nowrap}
+.badge.rfq{border-color:transparent;background:var(--rfq-bg);color:var(--rfq)}
+.badge.pos{border-color:transparent;background:var(--pos-bg);color:var(--pos)}
+.badge.neg{border-color:transparent;background:var(--neg-bg);color:var(--neg)}
+.page{padding-top:var(--s5);padding-bottom:var(--s6)}
+.view[hidden]{display:none}
+
+/* layout grid: fixed order column + fluid work area */
+.split{display:grid;grid-template-columns:320px minmax(0,1fr);gap:var(--s4);align-items:start}
+.stack{display:grid;gap:var(--s4);min-width:0}
+.pair{display:grid;grid-template-columns:minmax(0,3fr) minmax(0,2fr);gap:var(--s4);align-items:start}
+
+/* panel: the only container */
+.panel{background:var(--card);border:1px solid var(--border);border-radius:var(--r);min-width:0;overflow:hidden}
+.ph{height:var(--head);display:flex;align-items:center;justify-content:space-between;gap:var(--s3);padding:0 var(--s4);border-bottom:1px solid var(--border)}
+.ph h2{margin:0;font-size:14px;font-weight:600;white-space:nowrap}
+.ph .r{display:flex;align-items:center;gap:var(--s2);min-width:0}
+.ph .muted{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pb{padding:var(--s4)}
+.empty{padding:var(--s5) var(--s4);color:var(--muted)}
+
+/* form */
+.field{display:grid;gap:6px;margin-bottom:var(--s4)}
+.field label,.lbl{font-size:12px;font-weight:500;color:var(--muted)}
+.ctl{height:36px;width:100%;border:1px solid var(--border-strong);border-radius:var(--r);background:var(--sunk);padding:0 var(--s3)}
+.ctl:focus{outline:none;border-color:var(--ring);box-shadow:0 0 0 1px var(--ring)}
+select.ctl{appearance:none;padding-right:32px;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' fill='none' stroke='%2364748B' stroke-width='1.5'%3E%3Cpath d='M3 4.5l3 3 3-3'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center}
+.affix{position:relative}
+.affix .ctl{padding-right:48px;text-align:right}
+.affix span{position:absolute;right:var(--s3);top:0;line-height:36px;color:var(--muted);font-size:13px}
+.help{font-size:12px;color:var(--muted);text-align:right;height:16px;line-height:16px}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--border-strong);border-radius:var(--r);overflow:hidden;height:32px}
+.seg button{border:0;background:var(--sunk);font-size:13px;font-weight:500;color:var(--muted)}
+.seg button+button{border-left:1px solid var(--border-strong)}
+.seg button[aria-pressed=true]{background:var(--fg);color:var(--card)}
+.btn{height:40px;width:100%;border:0;border-radius:var(--r);background:var(--btn);color:var(--btn-fg);font-weight:600}
+.btn:disabled{opacity:.5;cursor:progress}
+.btn.sm{height:32px;width:auto;padding:0 var(--s4);font-size:13px}
+.btn.ghost{background:transparent;color:var(--fg);border:1px solid var(--border-strong)}
+details.rules{border-top:1px solid var(--border);margin-top:var(--s4);padding-top:var(--s3)}
+details.rules summary{cursor:pointer;font-size:12px;font-weight:500;color:var(--muted);list-style:none;display:flex;justify-content:space-between}
+details.rules summary::-webkit-details-marker{display:none}
+details.rules summary::after{content:"Show"} details.rules[open] summary::after{content:"Hide"}
+details.rules .field{margin:var(--s3) 0 0}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:var(--s3)}
+.note{font-size:12px;color:var(--muted);margin:var(--s2) 0 0}
+
+/* checklist */
+.checks{list-style:none;margin:0;padding:0}
+.checks li{display:grid;grid-template-columns:16px minmax(0,1fr);gap:var(--s2);padding:var(--s2) var(--s4);border-top:1px solid var(--border);align-items:start}
+.checks li:first-child{border-top:0}
+.checks svg{margin-top:2px}
+.checks .ok svg{color:var(--pos)} .checks .bad svg{color:var(--neg)} .checks .wait svg{color:var(--muted)}
+.verdict{display:grid;grid-template-columns:16px minmax(0,1fr);gap:var(--s2);padding:var(--s3) var(--s4);border-bottom:1px solid var(--border);font-weight:600;align-items:start}
+.verdict svg{margin-top:2px}
+.verdict.pos{background:var(--pos-bg);color:var(--pos)} .verdict.neg{background:var(--neg-bg);color:var(--neg)}
+.verdict small{display:block;font-weight:400;color:var(--fg);margin-top:2px;font-size:13px}
+
+/* firm quote */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr))}
+.stat{padding:var(--s3) var(--s4);border-left:1px solid var(--border);min-width:0}
+.stat:first-child{border-left:0}
+.stat .v{font-size:20px;line-height:28px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat .v.mono{font-size:14px;font-weight:400}
+.stat .s{font-size:12px;line-height:16px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.expiry{height:3px;background:var(--border)}
+.expiry i{display:block;height:100%;background:var(--rfq);transition:width 1s linear}
+.expiry.low i{background:var(--neg)}
+.panel.expired .stats{opacity:.5}
+
+/* tables */
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{height:var(--row);padding:0 var(--s4);font-size:12px;font-weight:500;color:var(--muted);text-align:left;border-bottom:1px solid var(--border);white-space:nowrap;background:var(--sunk)}
+td{height:var(--row);padding:var(--s2) var(--s4);border-bottom:1px solid var(--border);vertical-align:middle;white-space:nowrap}
+td.wrap{white-space:normal}
+tbody tr:last-child td{border-bottom:0}
+td.sub{color:var(--muted);font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+tr.is-rfq td:first-child{box-shadow:inset 2px 0 0 var(--rfq)}
+.pos{color:var(--pos)} .neg{color:var(--neg)}
+.name{font-weight:500}
+.skel{display:inline-block;height:10px;width:56px;border-radius:2px;background:var(--border);animation:pulse 1.2s ease-in-out infinite;vertical-align:middle}
+@keyframes pulse{50%{opacity:.4}}
+
+/* transaction */
+.slots{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid var(--border)}
+.slots div{padding:var(--s3) var(--s4);min-width:0}
+.slots div+div{border-left:1px solid var(--border)}
+.slots b{display:block;font-weight:500}
+tr.ix{cursor:pointer}
+tr.ix:hover td{background:var(--sunk)}
+tr.ix td:first-child{color:var(--muted);width:40px}
+tr.ix .chev{transition:transform .15s;color:var(--muted)}
+tr.ix[aria-expanded=true] .chev{transform:rotate(90deg)}
+tr.acc td{padding:0;background:var(--sunk);white-space:normal}
+.acc-list{display:grid;grid-template-columns:minmax(150px,auto) minmax(0,1fr) 96px;font-size:12px}
+.acc-list>div{padding:6px var(--s4);border-top:1px solid var(--border);overflow-wrap:anywhere}
+.flags{display:flex;gap:4px;justify-content:flex-end}
+.flag{height:18px;line-height:16px;padding:0 6px;border:1px solid var(--border-strong);border-radius:4px;font-size:11px;color:var(--muted)}
+.simline{padding:var(--s3) var(--s4);border-top:1px solid var(--border);font-size:13px}
+
+/* ladder bar cell: a centred zero line, bars grow left (worse) or right (better), capped at 50 bps */
+.bar{position:relative;height:16px;min-width:160px}
+.bar::before{content:"";position:absolute;left:50%;top:-6px;bottom:-6px;width:1px;background:var(--border-strong)}
+.bar i{position:absolute;top:3px;height:10px;border-radius:2px}
+.bar i.p{left:50%;background:var(--pos)} .bar i.n{right:50%;background:var(--neg)}
+.axis{display:flex;justify-content:space-between}
+
+/* gate lab */
+.cases{list-style:none;margin:0;padding:0}
+.cases button{width:100%;display:flex;align-items:center;justify-content:space-between;height:var(--row);padding:0 var(--s4);border:0;border-top:1px solid var(--border);background:transparent;text-align:left}
+.cases li:first-child button{border-top:0}
+.cases button:hover{background:var(--sunk)}
+.cases button[aria-pressed=true]{background:var(--rfq-bg);color:var(--rfq);font-weight:500}
+.cases svg{color:var(--muted)}
+textarea.ctl{height:120px;padding:var(--s2) var(--s3);font:12px/18px var(--mono);resize:vertical;display:block}
+.chk{display:flex;align-items:center;gap:var(--s2);font-size:13px;margin:var(--s3) 0}
+
+/* how it works: a real sequence, so numbered */
+ol.steps{list-style:none;margin:0;padding:0;counter-reset:st}
+ol.steps li{counter-increment:st;display:grid;grid-template-columns:24px 140px minmax(0,1fr) 120px;gap:var(--s4);padding:var(--s3) var(--s4);border-top:1px solid var(--border);align-items:baseline}
+ol.steps li:first-child{border-top:0}
+ol.steps li::before{content:counter(st);font-weight:600;color:var(--muted)}
+ol.steps b{font-weight:600}
+ol.steps .where{text-align:right;font-size:12px}
+.err{color:var(--neg)}
+.foot{font-size:12px;color:var(--muted);margin:var(--s3) 0 0}
+
+@media (max-width:1180px){.pair{grid-template-columns:1fr}}
+@media (max-width:900px){
+  .split{grid-template-columns:1fr}
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}.stat:nth-child(3){border-left:0}.stat:nth-child(n+3){border-top:1px solid var(--border)}
+  .meta .hide-s{display:none}
+  ol.steps li{grid-template-columns:24px minmax(0,1fr)}ol.steps li>*{grid-column:2}ol.steps .where{text-align:left}
+}
+@media (max-width:640px){
+  .top-in,.page{padding-left:var(--s4);padding-right:var(--s4)}
+  .top{height:auto}.top-in{flex-wrap:wrap;height:auto;gap:0 var(--s4)}.brand{line-height:44px}.tabs{order:3;width:100%;height:40px;overflow-x:auto;border-top:1px solid var(--border);margin:0 calc(-1 * var(--s4));padding:0 var(--s2);width:calc(100% + 2 * var(--s4))}
+  .slots{grid-template-columns:1fr}.slots div+div{border-left:0;border-top:1px solid var(--border)}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+/* Quote desk presentation */
+html{scroll-behavior:smooth}
+body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(--rfq) 8%,transparent),transparent),var(--bg)}
+.top{height:64px;background:color-mix(in srgb,var(--card) 94%,transparent);backdrop-filter:blur(18px)}
+.top-in{gap:32px}
+.brand{display:inline-flex;align-items:center;gap:11px;font-size:17px;letter-spacing:-.02em}
+.brand::before{content:'///';display:grid;place-items:center;width:29px;height:29px;border-radius:8px;color:var(--btn-fg);background:var(--rfq);font-size:12px;letter-spacing:-.12em;padding-right:2px}
+.tabs a{padding-inline:15px;font-size:13px}
+.tabs a[aria-current=page]{border-bottom-color:var(--rfq);color:var(--fg)}
+.meta>.badge{background:var(--rfq-bg);color:var(--rfq);border:1px solid color-mix(in srgb,var(--rfq) 30%,transparent);border-radius:999px;padding:0 11px}
+.theme-toggle{display:inline-flex;align-items:center;gap:7px;padding:0 10px;height:30px;border:1px solid var(--border-strong);border-radius:8px;background:var(--card);color:var(--fg);font-size:12px;font-weight:600;white-space:nowrap}
+.theme-toggle:hover{border-color:var(--rfq);color:var(--rfq)}
+.theme-toggle span[aria-hidden]{font-size:14px;line-height:1}
+.page{padding-top:32px;padding-bottom:64px}
+.view-intro{display:flex;align-items:end;justify-content:space-between;gap:24px;margin-bottom:28px;padding:12px 0 0}
+.intro-kicker{display:flex;align-items:center;gap:10px;color:var(--rfq);font-size:10px;font-weight:700;letter-spacing:.16em;margin-bottom:12px}
+.intro-kicker span{width:7px;height:7px;border-radius:50%;background:var(--rfq);box-shadow:0 0 0 4px var(--rfq-bg)}
+.view-intro h1{margin:0 0 12px;font-size:clamp(28px,3.4vw,46px);line-height:1.08;letter-spacing:-.05em;font-weight:600}
+.view-intro h1 em{font-style:normal;color:var(--rfq)}
+.view-intro p{margin:0;color:var(--muted);max-width:60ch;font-size:14px;line-height:1.55}
+.intro-steps{display:flex;gap:18px;white-space:nowrap;color:var(--muted);font-size:12px;padding-bottom:4px}
+.intro-steps b{color:var(--rfq);font:500 11px var(--mono);margin-right:5px}
+.split{grid-template-columns:340px minmax(0,1fr);gap:20px}
+.stack{gap:20px}
+.panel{border-radius:12px;box-shadow:0 8px 28px #00000010}
+.ph{height:48px;padding-inline:20px}
+.pb{padding:20px}
+.field{margin-bottom:18px}
+.field label,.lbl{font-size:11px;letter-spacing:.035em}
+.ctl{height:42px;border-radius:8px;background:var(--sunk)}
+.affix span{line-height:42px}
+.seg{height:38px;border-radius:8px}
+.seg button{transition:background .15s,color .15s}
+.seg button[aria-pressed=true]{background:var(--rfq);color:var(--btn-fg)}
+.btn{height:44px;border-radius:8px;transition:filter .15s,transform .15s}
+.btn:hover:not(:disabled){filter:brightness(1.1)}
+.btn:active:not(:disabled){transform:translateY(1px)}
+.btn.sm{height:34px}
+.stats .stat{padding:18px 20px}
+.stat .v{font-size:22px;line-height:30px}
+.expiry{height:4px}
+.checks li{padding:12px 20px}
+.empty{padding:24px 20px}
+@media(max-width:1180px){.intro-steps{display:none}}
+@media(max-width:900px){.split{grid-template-columns:1fr}.view-intro{margin-bottom:22px}.page{padding-top:22px}}
+@media(max-width:640px){.top{height:auto}.top-in{gap:0 12px}.brand{line-height:56px}.tabs{height:42px}.meta{margin-left:auto}.page{padding-top:18px}.view-intro{padding-top:4px}.view-intro h1{font-size:34px}.view-intro p{font-size:13px}.stack{gap:14px}.split{gap:14px}.stats .stat{padding:14px 16px}}
+</style>
+<script src="https://unpkg.com/@solana/web3.js@1.98.0/lib/index.iife.min.js" integrity="sha384-1/Ll6ABlJDlMx1URcif2stL9Fxod/1rg71YHzGqTl6Bwzi0Vq993Jt/oVLFXfUgQ" crossorigin="anonymous" defer></script>
+<style>.trade-sum{font-weight:600;margin:0 0 var(--s2)}.trade-row{display:flex;justify-content:space-between;gap:var(--s3);font-size:13px;margin:0 0 var(--s3)}.wallets{display:grid;gap:var(--s2);margin-top:var(--s3)}.result{margin-top:var(--s3);font-size:13px;overflow-wrap:anywhere}</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-ok" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor" opacity=".15"/><path d="M5 8.2l2 2 4-4.4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-bad" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor" opacity=".15"/><path d="M5.5 5.5l5 5m0-5l-5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+  <symbol id="i-wait" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2.4"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<header class="top"><div class="top-in">
+  <span class="brand">RFQ Desk</span>
+  <nav class="tabs" aria-label="Views">
+    <a href="#quote" data-v="quote">Quote</a><a href="#ladder" data-v="ladder">Size ladder</a><a href="#lab" data-v="lab">Gate lab</a><a href="#how" data-v="how">How it works</a>
+  </nav>
+  <div class="meta"><span class="on hide-s" id="st-node">Node</span><span class="hide-s" id="st-jup">Jupiter</span><span class="hide-s" id="st-sol"></span><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><span aria-hidden="true" id="theme-icon">☀</span><span id="theme-label">Light</span></button><button class="btn sm ghost" id="connect" type="button">Connect wallet</button><span class="badge" id="mode-badge" title="The desk never signs. With a wallet connected, you can sign a checked quote in your wallet.">Read-only</span></div>
+</div></header>
+
+<main class="page">
+<!-- QUOTE -->
+<section class="view" id="v-quote" aria-label="Quote">
+  <div class="view-intro">
+    <div><div class="intro-kicker"><span></span> JUPITERZ ROUTE INTELLIGENCE</div><h1>Quote the market.<br><em>Know the route.</em></h1><p>Compare a firm market maker quote with on-chain routes, then see exactly why the engine would accept or decline it.</p></div>
+    <div class="intro-steps" aria-label="Quote workflow"><span><b>01</b> Choose stock &amp; size</span><span><b>02</b> Compare live routes</span><span><b>03</b> Inspect the gate</span></div>
+  </div>
+  <div class="split">
+    <div class="stack">
+      <form class="panel" id="f" autocomplete="off">
+        <div class="ph"><h2>New request</h2><div class="seg" role="group" aria-label="Pay with" style="width:132px;height:28px"><button type="button" data-pay="SOL" aria-pressed="true">SOL</button><button type="button" data-pay="USDC" aria-pressed="false">USDC</button></div></div>
+        <div class="pb">
+          <div class="field"><label for="mint">Stock</label><select class="ctl" id="mint"></select></div>
+          <div class="field"><label for="sol">Amount</label>
+            <div class="affix"><input class="ctl" id="sol" inputmode="decimal" value="1343.8"><span id="pay-unit">SOL</span></div>
+            <div class="help" id="usd"></div></div>
+          <div class="field"><span class="lbl" id="size-l">Size</span>
+            <div class="seg" role="group" aria-labelledby="size-l">
+              <button type="button" data-usd="10000" aria-pressed="false">$10k</button><button type="button" data-usd="50000" aria-pressed="false">$50k</button><button type="button" data-usd="100000" aria-pressed="true">$100k</button><button type="button" data-usd="250000" aria-pressed="false">$250k</button>
+            </div></div>
+          <button class="btn" id="go" type="submit">Request quotes</button>
+          <details class="rules"><summary>Engine rules</summary>
+            <div class="two">
+              <div class="field"><label for="minsol">RFQ threshold</label><div class="affix"><input class="ctl" id="minsol" inputmode="decimal" value="7500"><span>USD</span></div></div>
+              <div class="field"><label for="margin">Margin</label><div class="affix"><input class="ctl" id="margin" inputmode="numeric" value="20"><span>bps</span></div></div>
+            </div>
+            <div class="field"><label for="taker">Quote for wallet</label><input class="ctl mono" id="taker" spellcheck="false" placeholder="Automatic"></div>
+            <p class="note">Makers build a transaction only for a wallet that holds the SOL. Left empty, the desk picks a public wallet that holds enough for this size. Nothing is signed for it.</p>
+          </details>
+        </div>
+      </form>
+      <div class="panel">
+        <div class="ph"><h2>Engine decision</h2><span class="badge" id="dec-badge">Idle</span></div>
+        <ul class="checks" id="dec-list"><li class="wait"><svg class="i" aria-hidden="true"><use href="#i-wait"/></svg><span class="muted">Request quotes to see the decision.</span></li></ul>
+      </div>
+      <div class="panel" id="trade-panel">
+        <div class="ph"><h2>Trade</h2><span class="badge" id="trade-badge">No wallet</span></div>
+        <div class="pb" id="trade-body"><p class="muted" style="margin:0">Connect a wallet to trade the firm quote from it. The quote is then built for your wallet, and the gate and simulation run on your own balances. Your wallet asks you to sign, and the desk sends only the exact transaction it checked.</p></div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="panel" id="firm">
+        <div class="ph"><h2>Firm quote</h2><div class="r"><span class="muted" id="firm-meta"></span><span class="badge" id="firm-badge">None</span></div></div>
+        <div class="expiry" id="expiry" aria-hidden="true"><i style="width:0"></i></div>
+        <div class="stats">
+          <div class="stat"><div class="lbl">Shares</div><div class="v" id="q-shares">–</div><div class="s" id="q-tokens">&nbsp;</div></div>
+          <div class="stat"><div class="lbl">Per share</div><div class="v" id="q-per">–</div><div class="s" id="q-ref">&nbsp;</div></div>
+          <div class="stat"><div class="lbl">Against our route</div><div class="v" id="q-delta">–</div><div class="s" id="q-best">&nbsp;</div></div>
+          <div class="stat"><div class="lbl">Market maker</div><div class="v mono" id="q-maker">–</div><div class="s" id="q-fee">&nbsp;</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><h2>Routes</h2><span class="muted">Same size, same moment</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Route</th><th>Path</th><th class="num">Receive</th><th class="num">Shares</th><th class="num">Per share</th><th class="num">vs our route</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="6" class="muted">No quotes yet.</td></tr></tbody>
+        </table></div>
+      </div>
+
+      <div class="pair">
+        <div class="panel" id="tx-panel"><div class="ph"><h2>Transaction</h2><span class="muted">What your wallet would sign</span></div><div class="empty">The market maker's transaction appears here, decoded.</div></div>
+        <div class="panel" id="gate-panel"><div class="ph"><h2>Gate</h2><span class="muted">Checked before signing</span></div><div class="empty">The engine's checks appear here.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LADDER -->
+<section class="view" id="v-ladder" aria-label="Size ladder" hidden>
+  <div class="panel">
+    <div class="ph"><h2>Size ladder <span class="muted" id="ladder-sym" style="font-weight:400"></span></h2>
+      <div class="r"><div class="seg" role="group" aria-label="Pay with" style="width:132px"><button type="button" data-pay-l="SOL" aria-pressed="true">SOL</button><button type="button" data-pay-l="USDC" aria-pressed="false">USDC</button></div><div class="seg" role="group" aria-label="Side" style="width:144px"><button type="button" data-side="buy" aria-pressed="true">Buy</button><button type="button" data-side="sell" aria-pressed="false">Sell</button></div><button type="button" class="btn sm" id="run-ladder">Run</button></div></div>
+    <div class="tw"><table>
+      <thead><tr><th>Size</th><th class="num">JupiterZ</th><th class="num">Best other</th><th>Router</th><th class="num">Difference</th><th style="width:32%"><span class="axis"><span>−50 bps</span><span>0</span><span>+50 bps</span></span></th></tr></thead>
+      <tbody id="ladder-rows"></tbody>
+    </table></div>
+  </div>
+  <p class="foot">Each row asks Jupiter twice at the same moment for the same trade: once JupiterZ only (market makers), once every other router (on-chain routes). Difference is how much more or less the market maker pays; positive means RFQ is better. It shows where makers start quoting, where they win, and where their size runs out. Price-only quotes, no wallet needed. The stock is the one picked on the Quote tab.</p>
+</section>
+
+<!-- GATE LAB -->
+<section class="view" id="v-lab" aria-label="Gate lab" hidden>
+  <div class="split">
+    <div class="stack">
+      <div class="panel"><div class="ph"><h2>Recorded transaction</h2><span class="muted">TSLAx, 1,343.8 SOL</span></div><ul class="cases" id="cases"></ul></div>
+      <div class="panel"><div class="ph"><h2>Paste a transaction</h2></div><div class="pb">
+        <label class="sr" for="paste">Base64 transaction</label><textarea class="ctl" id="paste" placeholder="Base64 transaction from GET /swap/v2/order" spellcheck="false"></textarea>
+        <label class="chk"><input type="checkbox" id="asof"> Check as of when it was quoted</label>
+        <button type="button" class="btn ghost" id="check-paste">Check transaction</button></div></div>
+    </div>
+    <div class="pair" id="lab-out">
+      <div class="panel"><div class="ph"><h2>Transaction</h2></div><div class="empty">Pick a case or paste a transaction.</div></div>
+      <div class="panel"><div class="ph"><h2>Gate</h2></div><div class="empty">The verdict appears here.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW -->
+<section class="view" id="v-how" aria-label="How it works" hidden>
+  <div class="panel">
+    <div class="ph"><h2>How an RFQ fill moves through the engine</h2><span class="muted">packages/sol/src/solchain.ts, tryRfq</span></div>
+    <ol class="steps">
+      <li><b>Quote</b><span>Jupiter's /order is asked for JupiterZ only, for the wallet and exact amount. Our /build route is quoted alongside.</span><span class="where muted">Desk and engine</span></li>
+      <li><b>Decide</b><span>Above the size threshold, no platform fee, and better than our route by the margin. Otherwise the normal route runs.</span><span class="where muted">Desk and engine</span></li>
+      <li><b>Gate</b><span>Two signers with the maker paying, one fill for the exact input, output at least the minimum to your own account, nothing else touching your wallet.</span><span class="where muted">Desk and engine</span></li>
+      <li><b>Simulate</b><span>Against mainnet without signatures: what the wallet spends and receives. The share-price check runs on the real output.</span><span class="where muted">Desk and engine</span></li>
+      <li><b>Sign and execute</b><span>The Privy wallet signs slot 1. Jupiter's /execute adds the maker's signature and lands it. Retries resend identical bytes, so it lands at most once.</span><span class="where muted">Engine only</span></li>
+    </ol>
+  </div>
+  <p class="foot">The desk never signs or sends. Research, sources and limits: docs/JUPITERZ.md.</p>
+</section>
+</main>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s), esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const short = a => a ? `${a.slice(0, 4)}…${a.slice(-4)}` : '';
+const n = (v, d = 2) => Number(v).toLocaleString('en-US', { maximumFractionDigits: d, minimumFractionDigits: d });
+const usd = v => '$' + Number(v).toLocaleString('en-US', v >= 1000 ? { maximumFractionDigits: 0 } : { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const icon = k => `<svg class="i" aria-hidden="true"><use href="#i-${k}"/></svg>`;
+const bpsTxt = b => (b >= 0 ? '+' : '−') + (Math.abs(b) >= 1000 ? `${n(Math.abs(b) / 100, 1)}%` : `${n(Math.abs(b), 1)} bps`);
+let CFG, SOLUSD = null, S = {}, timer;
+const stockOf = m => CFG.stocks.find(s => s.mint === m);
+const tok = raw => Number(raw) / 10 ** (S.dec ?? 8), shr = raw => tok(raw) * Number(S.mult ?? 1);
+
+/* tabs, deep-linkable */
+function route() {
+  const v = location.hash.slice(1) || 'quote';
+  document.querySelectorAll('.view').forEach(x => { x.hidden = x.id !== 'v-' + v; });
+  document.querySelectorAll('.tabs a').forEach(a => { if (a.dataset.v === v) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+  if (CFG) $('#ladder-sym').textContent = stockOf($('#mint').value)?.symbol ?? '';
+}
+addEventListener('hashchange', route);
+
+async function boot() {
+  CFG = await (await fetch('/api/config')).json();
+  $('#st-node').textContent = CFG.rpc; $('#st-jup').textContent = CFG.keyed ? 'Jupiter API key' : 'Jupiter keyless';
+  $('#mint').innerHTML = CFG.stocks.map(s => `<option value="${s.mint}">${esc(s.symbol)} · ${esc(s.issuer)}</option>`).join('');
+  const t = CFG.stocks.find(s => s.symbol === 'TSLAx'); if (t) $('#mint').value = t.mint;
+  SOLUSD = CFG.solUsd ?? null; solMeta(); setUsd();
+  $('#cases').innerHTML = CFG.tamper.map(c => `<li><button type="button" data-t="${c.id}" aria-pressed="false"><span>${esc(c.label)}</span>${icon('chev')}</button></li>`).join('');
+  ladderRows(); route();
+}
+const solMeta = () => { $('#st-sol').textContent = SOLUSD ? `SOL ${usd(SOLUSD)}` : ''; };
+/* the pay asset: SOL or USDC (market makers quote stocks closest against USDC). USDC is taken at $1. */
+let PAY = 'SOL';
+const payUsd = () => (PAY === 'SOL' ? SOLUSD : 1);
+function setUsd() { const v = Number($('#sol').value.replace(/,/g, '')); $('#usd').textContent = PAY === 'SOL' && SOLUSD && v > 0 ? `≈ ${usd(v * SOLUSD)}` : ''; }
+document.querySelectorAll('[data-usd]').forEach(b => b.onclick = () => { document.querySelectorAll('[data-usd]').forEach(x => x.setAttribute('aria-pressed', x === b)); if (payUsd()) { $('#sol').value = (Number(b.dataset.usd) / payUsd()).toFixed(PAY === 'SOL' ? 1 : 0); setUsd(); } });
+document.querySelectorAll('[data-pay]').forEach(b => b.onclick = () => {
+  if (b.dataset.pay === PAY) return;
+  const v = Number($('#sol').value.replace(/,/g, '')), was = payUsd(); PAY = b.dataset.pay;
+  document.querySelectorAll('[data-pay]').forEach(x => x.setAttribute('aria-pressed', x.dataset.pay === PAY)); document.querySelectorAll('[data-pay-l]').forEach(x => x.setAttribute('aria-pressed', x.dataset.payL === PAY));
+  $('#pay-unit').textContent = PAY; if (v > 0 && was && payUsd()) $('#sol').value = (v * was / payUsd()).toFixed(PAY === 'SOL' ? 1 : 0); setUsd();
+});
+$('#sol').oninput = () => { document.querySelectorAll('[data-usd]').forEach(x => x.setAttribute('aria-pressed', 'false')); setUsd(); };
+$('#mint').onchange = route;
+
+/* ---------- quote ---------- */
+$('#f').onsubmit = async e => {
+  e.preventDefault(); const v = Number($('#sol').value.replace(/,/g, ''));
+  if (!(v > 0)) { $('#usd').innerHTML = '<span class="err">Enter an amount above zero</span>'; $('#sol').focus(); return; }
+  S = { mint: $('#mint').value, pay: PAY, amount: String(BigInt(Math.round(v * (PAY === 'SOL' ? 1e9 : 1e6)))), sym: stockOf($('#mint').value)?.symbol };
+  $('#go').disabled = true; $('#go').textContent = 'Requesting…'; clearInterval(timer);
+  firmReset('Waiting'); decision({ pending: true });
+  $('#rows').innerHTML = [['rfq', 'JupiterZ'], ['other', 'Best other'], ['build', 'Our route']].map(([k, nm]) => `<tr id="r-${k}" class="${k === 'rfq' ? 'is-rfq' : ''}"><td class="name">${nm}</td>${'<td class="num"><span class="skel"></span></td>'.repeat(5)}</tr>`).join('');
+  $('#tx-panel').innerHTML = `<div class="ph"><h2>Transaction</h2><span class="muted">What your wallet would sign</span></div><div class="empty">Decoding when the quote arrives…</div>`;
+  $('#gate-panel').innerHTML = `<div class="ph"><h2>Gate</h2><span class="muted">Checked before signing</span></div><div class="empty">Waiting for the transaction…</div>`;
+  try {
+    const res = await fetch('/api/quote', { method: 'POST', body: JSON.stringify({ mint: S.mint, pay: S.pay, amount: S.amount, taker: WALLET ? WALLET.address : $('#taker').value.trim(), forWallet: !!WALLET, minUsd: Number($('#minsol').value), marginBps: Number($('#margin').value) }) });
+    const rd = res.body.getReader(), dec = new TextDecoder(); let buf = '';
+    for (;;) { const { done, value } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true }); let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line) stage(JSON.parse(line)); } }
+  } catch (err) { decision({ error: `The desk server did not answer: ${err.message}` }); }
+  $('#go').disabled = false; $('#go').textContent = 'Request quotes';
+};
+function stage(m) {
+  if (m.stage === 'context') { SOLUSD = m.solUsd; S.takerSol = m.takerSol; S.held = m.held; solMeta(); setUsd(); }
+  if (m.stage === 'stock') Object.assign(S, { dec: m.decimals, mult: m.multiplier, share: m.sharePrice, sym: m.symbol });
+  if (m.stage === 'rfq') { S.rfq = m; firm(m); row('rfq', m, m.none ? 'No firm quote' : `Maker ${short(m.maker)}`); }
+  if (m.stage === 'other') { S.other = m; row('other', m, m.router ? `${m.router}: ${m.labels?.join(', ') ?? ''}` : ''); }
+  if (m.stage === 'build') { S.build = m; row('build', m, m.labels?.join(', ')); ['rfq', 'other', 'build'].forEach(delta); firmDelta(); }
+  if (m.stage === 'xray') xray(m, $('#tx-panel'), $('#gate-panel'));
+  if (m.stage === 'sim') sim(m, $('#gate-panel'));
+  if (m.stage === 'decision') { S.decision = m; decision(m); }
+  if (m.stage === 'trade') tradePanel(m);
+  if (m.stage === 'error') decision({ error: m.error });
+}
+function row(k, m, path) {
+  const tr = $('#r-' + k); if (!tr) return; const o = m.out, ps = m.share?.perShareUsd, txt = m.none ?? m.error ?? path ?? '';
+  tr.innerHTML = `<td class="name">${{ rfq: 'JupiterZ', other: 'Best other', build: 'Our route' }[k]}</td>
+    <td class="sub" title="${esc(txt)}">${esc(txt)}</td>
+    <td class="num">${o ? n(tok(o), 4) : '–'}</td><td class="num">${o ? n(shr(o), 4) : '–'}</td>
+    <td class="num">${o && ps ? usd(ps) : '–'}</td><td class="num" id="d-${k}">${o ? '<span class="skel"></span>' : '–'}</td>`;
+}
+function delta(k) {
+  const el = $('#d-' + k), x = S[k], b = S.build?.out; if (!el || !x?.out) return;
+  if (k === 'build') { el.innerHTML = '<span class="muted">Reference</span>'; return; }
+  if (!b) { el.textContent = '–'; return; }
+  const bps = (Number(x.out) / Number(b) - 1) * 1e4; el.innerHTML = `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`;
+}
+function firmReset(state) {
+  $('#firm').classList.remove('expired'); $('#firm-badge').className = 'badge'; $('#firm-badge').textContent = state; $('#firm-meta').textContent = ''; $('#firm-meta').title = '';
+  ['q-shares', 'q-per', 'q-delta', 'q-maker'].forEach(id => { $('#' + id).textContent = '–'; }); ['q-tokens', 'q-ref', 'q-best', 'q-fee'].forEach(id => { $('#' + id).innerHTML = '&nbsp;'; });
+  $('#expiry').className = 'expiry'; $('#expiry i').style.width = '0';
+}
+function firm(m) {
+  clearInterval(timer);
+  if (m.none) { firmReset('No quote'); $('#firm-meta').textContent = m.none; $('#firm-meta').title = m.none; return; }
+  const ps = m.share?.perShareUsd;
+  $('#q-shares').textContent = n(shr(m.out), 2); $('#q-tokens').textContent = `${n(tok(m.out), 4)} ${S.sym ?? ''}`;
+  $('#q-per').textContent = ps ? usd(ps) : '–'; $('#q-ref').textContent = S.share ? `Share ${usd(S.share)}, ${m.share.deviationPct >= 0 ? '+' : ''}${n(m.share.deviationPct, 2)}%` : 'No share price';
+  $('#q-maker').textContent = short(m.maker); $('#q-maker').title = m.maker; $('#q-fee').textContent = `Fee ${m.feeBps} bps, maker pays gas`;
+  const total = Math.max(55, m.expireAt - Math.floor(Date.now() / 1000));
+  const tick = () => { const left = m.expireAt - Date.now() / 1000;
+    if (left <= 0) { clearInterval(timer); $('#firm').classList.add('expired'); $('#firm-badge').className = 'badge'; $('#firm-badge').textContent = 'Expired'; $('#expiry i').style.width = '0'; $('#firm-meta').textContent = 'Request again for a new quote'; return; }
+    $('#firm-badge').className = 'badge rfq'; $('#firm-badge').textContent = `Live, ${Math.ceil(left)} s`; $('#expiry').classList.toggle('low', left < 10); $('#expiry i').style.width = Math.min(100, left / total * 100) + '%'; };
+  tick(); timer = setInterval(tick, 1000);
+}
+function firmDelta() {
+  const r = S.rfq?.out, b = S.build?.out, o = S.other?.out; if (!r || !b) return;
+  const bps = (Number(r) / Number(b) - 1) * 1e4; $('#q-delta').innerHTML = `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`;
+  if (o) { const vs = (Number(r) / Number(o) - 1) * 1e4; $('#q-best').textContent = `${bpsTxt(vs)} against the best other`; }
+}
+function decision(m) {
+  const b = $('#dec-badge'), l = $('#dec-list');
+  if (m.pending) { b.className = 'badge'; b.textContent = 'Working'; l.innerHTML = `<li class="wait">${icon('wait')}<span class="muted">Collecting quotes. Keyless access is paced, so this takes a few seconds.</span></li>`; return; }
+  if (m.error) { b.className = 'badge neg'; b.textContent = 'Error'; l.innerHTML = `<li class="bad">${icon('bad')}<span>${esc(m.error)}</span></li>`; return; }
+  b.className = 'badge ' + (m.useRfq ? 'rfq' : ''); b.textContent = m.useRfq ? 'Use JupiterZ' : 'Use our route';
+  l.innerHTML = m.reasons.map(r => `<li class="${r.ok ? 'ok' : 'bad'}">${icon(r.ok ? 'ok' : 'bad')}<span>${esc(r.text)}</span></li>`).join('');
+}
+
+/* ---------- transaction + gate (shared by Quote and Gate lab) ---------- */
+function xray(x, txEl, gateEl) {
+  txEl.innerHTML = `<div class="ph"><h2>Transaction</h2><span class="muted">${x.bytes} bytes, ${x.instructions.length} instructions</span></div>
+    <div class="slots">${x.signers.map(s => `<div><span class="lbl">Signature slot ${s.slot}</span><b>${esc(s.who)}</b><span class="mono muted" title="${esc(s.key)}">${esc(short(s.key))}</span></div>`).join('')}</div>
+    <div class="tw"><table><thead><tr><th>#</th><th>Program</th><th>Action</th><th class="num">Accounts</th></tr></thead><tbody>
+    ${x.instructions.map((ix, i) => `<tr class="ix" tabindex="0" aria-expanded="false" data-i="${i}"><td>${i + 1}</td><td class="name">${esc(ix.name)}</td><td class="wrap">${esc(ix.what)}</td><td class="num"><span style="display:inline-flex;align-items:center;gap:4px">${ix.accounts.length}<svg class="i chev" aria-hidden="true"><use href="#i-chev"/></svg></span></td></tr>
+      <tr class="acc" hidden data-for="${i}"><td colspan="4"><div class="acc-list">${ix.accounts.map(a => `<div class="muted">${esc(a.role ?? '')}</div><div class="mono">${esc(a.key)}</div><div class="flags">${a.signer ? '<span class="flag">signs</span>' : ''}${a.writable ? '<span class="flag">writes</span>' : ''}</div>`).join('') || '<div class="muted">No accounts</div><div></div><div></div>'}</div></td></tr>`).join('')}
+    </tbody></table></div>`;
+  txEl.querySelectorAll('tr.ix').forEach(r => { const t = () => { const o = r.getAttribute('aria-expanded') !== 'true'; r.setAttribute('aria-expanded', o); txEl.querySelector(`tr.acc[data-for="${r.dataset.i}"]`).hidden = !o; }; r.onclick = t; r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
+  gateEl.innerHTML = `<div class="ph"><h2>Gate</h2><span class="badge ${x.verdict.ok ? 'pos' : 'neg'}">${x.verdict.ok ? 'Accepted' : 'Refused'}</span></div>
+    <div class="verdict ${x.verdict.ok ? 'pos' : 'neg'}">${icon(x.verdict.ok ? 'ok' : 'bad')}<div>${x.verdict.ok ? 'Safe for your wallet to sign' : 'Your wallet would not sign this'}${x.verdict.reason ? `<small>${esc(x.verdict.reason)}</small>` : ''}</div></div>
+    <ul class="checks">${x.checks.map(c => `<li class="${c.ok ? 'ok' : 'bad'}">${icon(c.ok ? 'ok' : 'bad')}<span>${esc(c.name)}</span></li>`).join('')}</ul>
+    <div class="simline" data-sim><span class="muted">Simulation pending…</span></div>`;
+}
+function sim(s, gateEl) {
+  const el = gateEl.querySelector('[data-sim]'); if (!el) return;
+  const lg = (s.log ?? []).join(' '), short_ = /(11111111111111111111111111111111|TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA) failed: custom program error: 0x1(?![0-9a-f])/.test(lg), frozen = /failed: custom program error: 0x11(?![0-9a-f])/.test(lg);
+  el.innerHTML = s.ok ? `<b>Simulated on mainnet</b><br><span class="muted">Spends ${s.paid !== undefined ? `${n(Number(s.paid) / 1e6, 2)} USDC and ${n(Number(s.solSpent) / 1e9, 4)} SOL rent` : `${n(Number(s.solSpent) / 1e9, 4)} SOL`}, receives ${n(tok(s.tokensReceived), 4)} ${esc(S.sym ?? '')}${s.units ? `, ${Number(s.units).toLocaleString('en-US')} compute units` : ''}.</span>`
+    : `<b class="err">Simulation failed</b><br><span class="muted">${frozen ? 'A token account in this fill is frozen by its issuer, so it cannot move.' : short_ ? `The quote wallet holds ${esc(S.held ?? '')}, less than this trade.` : esc(s.error)}</span>`;
+}
+
+/* ---------- ladder ---------- */
+const SIZES = [1000, 10000, 50000, 100000, 250000]; let SIDE = 'buy';
+const ladderRows = () => { $('#ladder-rows').innerHTML = SIZES.map(u => `<tr id="u${u}"><td class="name">${usd(u)}</td><td class="num">–</td><td class="num">–</td><td class="muted">–</td><td class="num">–</td><td><div class="bar"></div></td></tr>`).join(''); };
+let LPAY = 'SOL';
+document.querySelectorAll('[data-pay-l]').forEach(b => b.onclick = () => { LPAY = b.dataset.payL; document.querySelectorAll('[data-pay-l]').forEach(x => x.setAttribute('aria-pressed', x === b)); ladderRows(); });
+document.querySelectorAll('[data-side]').forEach(b => b.onclick = () => { SIDE = b.dataset.side; document.querySelectorAll('[data-side]').forEach(x => x.setAttribute('aria-pressed', x === b)); ladderRows(); });
+$('#run-ladder').onclick = async () => {
+  const btn = $('#run-ladder'), mint = $('#mint').value;
+  btn.disabled = true; btn.textContent = 'Running…'; ladderRows();
+  for (const u of SIZES) {
+    const c = $('#u' + u).children; c[1].innerHTML = c[2].innerHTML = c[4].innerHTML = '<span class="skel"></span>';
+    try { const r = await (await fetch('/api/ladder', { method: 'POST', body: JSON.stringify({ mint, side: SIDE, pay: LPAY, usd: u }) })).json(); if (r.error) throw new Error(r.error);
+      const f = v => v ? (SIDE === 'sell' ? `${n(Number(v) / 10 ** r.outDecimals, r.pay === 'SOL' ? 3 : 2)} ${r.pay}` : n(Number(v) / 10 ** r.outDecimals, 4)) : '–';
+      c[1].textContent = f(r.rfq.out); c[1].title = r.rfq.none ?? ''; c[2].textContent = f(r.other.out); c[3].textContent = r.other.router ?? '–';
+      if (r.rfq.out && r.other.out) { const bps = (Number(r.rfq.out) / Number(r.other.out) - 1) * 1e4, w = Math.min(50, Math.abs(bps));
+        c[4].innerHTML = `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`;
+        c[5].innerHTML = `<div class="bar" role="img" aria-label="${bpsTxt(bps)}"><i class="${bps >= 0 ? 'p' : 'n'}" style="width:${w}%"></i></div>`;
+      } else c[4].innerHTML = `<span class="muted">${r.rfq.out ? 'RFQ only' : 'No RFQ quote'}</span>`;
+    } catch (e) { c[1].textContent = c[2].textContent = '–'; c[4].innerHTML = `<span class="err" title="${esc(e.message)}">Failed</span>`; }
+  }
+  btn.disabled = false; btn.textContent = 'Run';
+};
+
+/* ---------- gate lab ---------- */
+async function runGate(body) {
+  const [txEl, gateEl] = $('#lab-out').children; txEl.innerHTML = `<div class="ph"><h2>Transaction</h2></div><div class="empty">Decoding…</div>`; gateEl.innerHTML = `<div class="ph"><h2>Gate</h2></div><div class="empty">Running the gate…</div>`;
+  const r = await (await fetch('/api/gate', { method: 'POST', body: JSON.stringify(body) })).json();
+  if (r.error) { gateEl.innerHTML = `<div class="ph"><h2>Gate</h2></div><div class="empty err">${esc(r.error)}</div>`; return; }
+  Object.assign(S, { dec: 8, mult: 1, sym: stockOf(r.outMint)?.symbol ?? '' }); xray(r, txEl, gateEl);
+  gateEl.querySelector('[data-sim]').innerHTML = `<span class="muted">${r.source === 'recorded' ? `Recorded ${esc(r.recordedAt)}, checked as of 30 s before its expiry.` : 'Pasted transaction, not simulated.'}</span>`;
+}
+$('#cases').onclick = e => { const b = e.target.closest('button'); if (!b) return; document.querySelectorAll('#cases button').forEach(x => x.setAttribute('aria-pressed', x === b)); runGate({ tamper: b.dataset.t }); };
+$('#check-paste').onclick = () => { const t = $('#paste').value.trim(); if (!t) { $('#paste').focus(); $('#paste').setAttribute('aria-invalid', 'true'); $('#paste').placeholder = 'Paste the base64 transaction from a JupiterZ /order answer first'; return; } document.querySelectorAll('#cases button').forEach(x => x.setAttribute('aria-pressed', 'false')); runGate({ transaction: t, asOfQuote: $('#asof').checked }); };
+
+const themeButton=$('#theme-toggle');
+function paintThemeButton(){const next=document.documentElement.dataset.theme==='dark'?'light':'dark';themeButton.setAttribute('aria-label',`Switch to ${next} theme`);$('#theme-label').textContent=next==='light'?'Light':'Dark';$('#theme-icon').textContent=next==='light'?'☀':'☾'}
+themeButton.onclick=()=>{const next=document.documentElement.dataset.theme==='dark'?'light':'dark';document.documentElement.dataset.theme=next;try{localStorage.setItem('rfq-desk-theme',next)}catch{}paintThemeButton()};
+paintThemeButton();
+/* ---------- wallet: connect an injected Solana wallet, sign only the checked quote ---------- */
+let WALLET = null, TRADE = null, tradeTimer;
+const providers = () => [
+  ['Phantom', window.phantom?.solana?.isPhantom ? window.phantom.solana : null],
+  ['Solflare', window.solflare?.isSolflare ? window.solflare : null],
+  ['Backpack', window.backpack?.isBackpack ? window.backpack : null],
+].filter(([, p]) => p);
+const tb = () => $('#trade-body'), tbadge = (cls, txt) => { $('#trade-badge').className = 'badge ' + cls; $('#trade-badge').textContent = txt; };
+async function connectWith(name, p) {
+  try { await p.connect(); const address = p.publicKey?.toString(); if (!address) throw new Error('the wallet gave no address');
+    WALLET = { name, p, address }; $('#connect').textContent = `${name} ${short(address)}`; $('#mode-badge').className = 'badge rfq'; $('#mode-badge').textContent = 'Wallet connected';
+    $('#taker').value = address; $('#taker').disabled = true; tbadge('', 'Connected');
+    tb().innerHTML = `<p class="muted" style="margin:0">Request quotes. They are built for <span class="mono">${esc(short(address))}</span>, and you can sign the firm quote here if it passes every check.</p>`;
+    p.on?.('disconnect', disconnect);
+  } catch (e) { tb().innerHTML = `<p class="err" style="margin:0">${esc(name)} did not connect: ${esc(e.message ?? e)}</p>`; }
+}
+function disconnect() {
+  try { WALLET?.p.disconnect?.(); } catch {}
+  WALLET = null; TRADE = null; clearInterval(tradeTimer); $('#connect').textContent = 'Connect wallet'; $('#mode-badge').className = 'badge'; $('#mode-badge').textContent = 'Read-only';
+  $('#taker').disabled = false; $('#taker').value = ''; tbadge('', 'No wallet'); tb().innerHTML = '<p class="muted" style="margin:0">Wallet disconnected.</p>';
+}
+$('#connect').onclick = () => {
+  if (WALLET) return disconnect();
+  const ps = providers();
+  if (!ps.length) { tb().innerHTML = '<p style="margin:0">No Solana wallet extension found in this browser. Install Phantom, Solflare or Backpack, then reload.</p>'; tbadge('', 'No wallet'); return; }
+  if (ps.length === 1) return connectWith(ps[0][0], ps[0][1]);
+  tb().innerHTML = '<span class="lbl">Choose a wallet</span><div class="wallets">' + ps.map(([n], i) => `<button type="button" class="btn ghost" data-w="${i}">${esc(n)}</button>`).join('') + '</div>';
+  tb().querySelectorAll('[data-w]').forEach(b => b.onclick = () => { const [n, p] = ps[Number(b.dataset.w)]; connectWith(n, p); });
+};
+function tradePanel(m) {
+  TRADE = m; clearInterval(tradeTimer);
+  if (!m.tradable) { tbadge('neg', 'Not tradable'); tb().innerHTML = `<p class="trade-sum">${esc(m.summary)}</p><p class="err" style="margin:0">${esc(m.why)}</p>`; return; }
+  tbadge('rfq', 'Ready');
+  // the desk lets you take a firm quote the engine would pass on, but says so first
+  const pass = S.decision && !S.decision.useRfq ? S.decision.reasons.filter(r => !r.ok).map(r => r.text) : [];
+  tb().innerHTML = `<p class="trade-sum">${esc(m.summary)}</p>${pass.length ? `<p class="err" style="margin:0 0 var(--s3);font-size:13px">The engine would not take this quote: ${esc(pass.join('; '))}. You can still take it.</p>` : ''}<div class="trade-row"><span class="muted">The maker pays the network fee</span><span id="trade-left"></span></div>
+    <button class="btn" id="sign" type="button">Sign in ${esc(WALLET.name)} and execute</button><div class="result" id="trade-result"></div>`;
+  const tick = () => { const left = Math.ceil(m.expireAt - Date.now() / 1000), b = $('#sign'), el = $('#trade-left'); if (!el) return clearInterval(tradeTimer);
+    if (left <= 0) { clearInterval(tradeTimer); el.textContent = 'Expired'; if (b && !b.dataset.sent) { b.disabled = true; b.textContent = 'Quote expired. Request again.'; } tbadge('', 'Expired'); return; }
+    el.textContent = `${left} s left`; };
+  tick(); tradeTimer = setInterval(tick, 1000);
+  $('#sign').onclick = signAndExecute;
+}
+async function signAndExecute() {
+  const b = $('#sign'), out = $('#trade-result'), m = TRADE; if (!m || !WALLET) return;
+  if (!window.solanaWeb3) { out.innerHTML = '<span class="err">The signing library did not load. Reload the page.</span>'; return; }
+  b.disabled = true; b.textContent = `Waiting for ${WALLET.name}…`;
+  let signed;
+  try {
+    const vtx = solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(m.transaction), c => c.charCodeAt(0)));
+    const r = await WALLET.p.signTransaction(vtx); signed = btoa(String.fromCharCode(...r.serialize()));
+  } catch (e) { b.disabled = false; b.textContent = `Sign in ${WALLET.name} and execute`; out.innerHTML = `<span class="err">Not signed: ${esc(e.message ?? e)}. Nothing was sent.</span>`; return; }
+  b.dataset.sent = '1'; b.textContent = 'Executing through Jupiter…';
+  let r; try { r = await (await fetch('/api/execute', { method: 'POST', body: JSON.stringify({ requestId: m.requestId, signedTransaction: signed }) })).json(); }
+  catch (e) { out.innerHTML = `<span class="err">The desk server did not answer (${esc(e.message)}). The trade may still land; check your wallet.</span>`; return; }
+  if (!r.ok) { b.textContent = 'Not sent'; tbadge('neg', 'Refused'); out.innerHTML = `<span class="err">${esc(r.error)}</span>`; return; }
+  const link = sig => `<a href="https://solscan.io/tx/${encodeURIComponent(sig)}" target="_blank" rel="noopener">${esc(short(sig))}</a>`;
+  if (r.status === 'Success') { tbadge('pos', 'Filled'); b.textContent = 'Filled'; }
+  else if (r.status === 'Unknown') { tbadge('', 'Unknown'); b.textContent = 'Sent, outcome unknown'; }
+  else { tbadge('neg', 'Not filled'); b.textContent = 'Not filled'; }
+  out.innerHTML = `${r.status === 'Success' ? `Filled: ${esc(r.totalInputAmount ?? '')} in, ${esc(r.totalOutputAmount ?? '')} out (raw units).` : esc(r.error ?? `Jupiter answered ${r.status} (code ${r.code})`)}${r.signature ? `<br>Transaction ${link(r.signature)} <span id="trade-conf" class="muted">checking the chain…</span>` : ''}`;
+  if (r.signature) for (let i = 0; i < 30; i++) { const st = await (await fetch('/api/status?sig=' + encodeURIComponent(r.signature))).json().catch(() => ({}));
+    const el = $('#trade-conf'); if (!el) break; if (st.found) { el.textContent = st.err ? `failed on chain: ${JSON.stringify(st.err)}` : `${st.confirmation} at slot ${st.slot}`; if (st.err || st.confirmation === 'finalized') break; } await new Promise(res => setTimeout(res, 2000)); }
+}
+
+boot();
+</script>
+</body>
+</html>

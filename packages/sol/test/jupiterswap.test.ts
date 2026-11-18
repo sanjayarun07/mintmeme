@@ -59,7 +59,8 @@ test('safety gate: refuses everything outside the allowlist', () => {
   refused([...goodIxs().slice(0, 7), { ...close(wsolAta), accounts: [acc(wsolAta, true), acc(W, true), acc(EVIL)] }], /token instruction type 9/);
   refused([...goodIxs().slice(0, 7), close(wsolAta, W, EVIL)], /requires a signature from/);
   refused(goodIxs().map((x, i) => (i === 5 ? mkAta(USDC, { owner: EVIL }) : x)), /by and for our wallet/);
-  refused(goodIxs().map((x, i) => (i === 5 ? mkAta(USDC, { token: signer.add() }) : x)), /Token-2022 is not supported/);
+  refused(goodIxs().map((x, i) => (i === 5 ? mkAta(USDC, { token: signer.add() }) : x)), /classic Token programs/);
+  refused(goodIxs().map((x, i) => (i === 5 ? mkAta(USDC, { token: PROGRAMS.token2022 }) : x)), /classic Token programs/);   // Token-2022 only when the chain said this mint is Token-2022
   refused(goodIxs().map((x, i) => (i === 1 ? cuPrice(500_000_000n) : x)), /priority fee/);
   refused(goodIxs().map((x, i) => (i === 0 ? cuLimit(9_000_000) : x)), /compute unit limit/);
   refused([cuLimit(1), { programId: COMPUTE_BUDGET, accounts: [], data: Uint8Array.of(4, 0, 0, 0, 0) }, route()], /compute budget instruction type 4/);
@@ -67,6 +68,19 @@ test('safety gate: refuses everything outside the allowlist', () => {
   refused([...goodIxs(), { programId: DEX, accounts: [], data: new Uint8Array() }], /only be invoked through the Jupiter aggregator/);
   refused(goodIxs().map((x, i) => (i === 3 ? { ...sysTransfer(W, wsolAta, 5n), data: cat(u32le(0), u64le(5n), u64le(0n)) } : x)), /plain System transfer/);
   refused([...goodIxs(), route()], /more than one Jupiter route/);
+});
+
+test('safety gate: a Token-2022 mint (an xStock, or a Token-2022 token on the route) gets its associated token account from Token-2022 only when the chain vouches for it', () => {
+  const XS = signer.add(), xsAta = ataAddress(W, XS, PROGRAMS.token2022), t22 = (mint: string, owner = W): JIx => ({ ...mkAta(mint, { owner, token: PROGRAMS.token2022 }), accounts: [acc(W, true, true), acc(ataAddress(owner, mint, PROGRAMS.token2022), true), acc(owner), acc(mint), acc(PROGRAMS.system), acc(PROGRAMS.token2022)] });
+  const ixs = goodIxs().map((x, i) => (i === 5 ? t22(XS) : x)), c = ctx({ tokenOut: XS, token2022: new Set([XS]) });
+  const r = gateInstructions(ixs, c); assert.deepEqual(r.createdTokenAccounts, [wsolAta, xsAta]); assert.equal(r.createdNonWsol, 1);
+  assert.notEqual(xsAta, ataAddress(W, XS), 'the token program is part of the address');
+  refused(ixs, /classic Token programs/, ctx({ tokenOut: XS }));                                              // the chain did not say XS is Token-2022
+  const MID22 = signer.add(), mid = [...goodIxs().slice(0, 6), t22(MID22), ...goodIxs().slice(6)];   // a Token-2022 token the route passes through (seen on mainnet for HOODx)
+  assert.deepEqual(gateInstructions(mid, ctx({ token2022: new Set([MID22]) })).createdTokenAccounts, [wsolAta, usdcAta, ataAddress(W, MID22, PROGRAMS.token2022)]);
+  refused(mid, /classic Token programs/);                                                                     // ...only when the chain vouches for it
+  refused(goodIxs().map((x, i) => (i === 5 ? { ...t22(XS), accounts: t22(XS).accounts.map((a, k) => (k === 1 ? acc(ataAddress(W, XS), true) : a)) } : x)), /does not match/, c);   // classic-derived address with the Token-2022 program
+  refused(goodIxs().map((x, i) => (i === 5 ? t22(XS, EVIL) : x)), /by and for our wallet/, c);
 });
 
 // ---- the chain flow with scripted Jupiter and RPC
@@ -145,4 +159,24 @@ test('chain: a route too large for one transaction is asked for again with fewer
   assert.ok(Buffer.from(p.raw, 'base64').length <= 1232, 'the signed transaction fits');
   const never = world({ jup: () => { const b = world().build(); return { ...b, swapInstruction: wire({ ...route(), data: new Uint8Array(700) }) }; } });
   await assert.rejects(never.c.prepare(tx({})), /every Jupiter route for this trade is too large/);
+});
+
+test('chain: buying a Token-2022 xStock through Jupiter: its account comes from Token-2022, our own Token-2022 accounts are recognised, and its bigger rent is priced at its simulated size', async () => {
+  const T22 = PROGRAMS.token2022, XS = signer.add(), xsAta = ataAddress(W, XS, T22), wire = (ix: JIx) => ({ programId: ix.programId, data: Buffer.from(ix.data).toString('base64'), accounts: ix.accounts });
+  const t22Ata: JIx = { programId: PROGRAMS.ata, data: Uint8Array.of(1), accounts: [acc(W, true, true), acc(xsAta, true), acc(W), acc(XS), acc(PROGRAMS.system), acc(T22)] };
+  const xsRoute: JIx = { ...route(), accounts: [acc(PROGRAMS.token), acc(T22), acc(W, false, true), acc(wsolAta, true), acc(xsAta, true), acc(DEX), acc(POOL, true), acc(POOL2)] };
+  const size = 182, rent = (n: number) => n * 6960 + 890_880;   // the network's rent formula: 165 bytes -> 2,039,280
+  const xsAcct = (amount: bigint) => { const b = Buffer.alloc(size); Buffer.from(b58decode(XS)).copy(b, 0); Buffer.from(b58decode(W)).copy(b, 32); b.writeBigUInt64LE(amount, 64); b[165] = 2; return b; };
+  const mk = (accounts: Record<string, any> = {}) => { const w = world({ accounts: { [XS]: { lamports: 1, owner: T22, data: Buffer.alloc(82) }, ...accounts },
+      jup: () => ({ ...w0.build(), outputMint: XS, setupInstructions: [wire(mkAta(WSOL)), wire(sysTransfer(W, wsolAta, 1_000_000_000n)), wire(sync(wsolAta)), wire(t22Ata)], swapInstruction: wire(xsRoute) }),
+      sim: () => ({ value: { err: null, accounts: [{ lamports: 5_000_000_000 - 1_000_000_000 - 5_200 - rent(size), owner: PROGRAMS.system, data: b64(Buffer.alloc(0)) }, { lamports: rent(size), owner: T22, data: b64(xsAcct(149_900_000n)) }] } }) });
+    w.s.h.getMinimumBalanceForRentExemption = ([n]) => rent(n); w.c.state.venues.set('jupx', new JupiterVenue('jupx', WSOL, XS, WSOL, 10n ** 9n, 150_000_000n, 5)); return w; }, w0 = world();
+  const { c, s } = mk();
+  const r = await c.simulate(tx({ venue: 'jupx', tokenOut: XS })); assert.equal(r.receipt.status, 'success', r.receipt.reason); assert.equal(r.receipt.deltas[XS], 149_900_000n);
+  const simAsked = s.log.find(l => l[0] === 'simulateTransaction')![1][1].accounts.addresses; assert.deepEqual(simAsked, [W, xsAta], 'the balance check watches the Token-2022 account, not the classic-derived one');
+  assert.ok(s.log.some(l => l[0] === 'getMinimumBalanceForRentExemption' && l[1][0] === size), 'rent asked for the simulated account size');
+  // a route that writes another of OUR Token-2022 token accounts (extensions after byte 165) is refused just like a classic one
+  const ours = mk({ [POOL]: { lamports: 1, owner: T22, data: xsAcct(5n) } }); assert.match((await ours.c.simulate(tx({ venue: 'jupx', tokenOut: XS }))).receipt.reason!, /writes our token account/);
+  // a Token-2022 account the chain does not vouch for (mint missing: treated as classic) is refused by the gate
+  const noMint = mk({ [XS]: null }); assert.match((await noMint.c.simulate(tx({ venue: 'jupx', tokenOut: XS }))).receipt.reason!, /classic Token programs/);
 });

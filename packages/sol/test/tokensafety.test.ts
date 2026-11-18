@@ -44,3 +44,38 @@ test('not a mint, a missing mint, and the cache', async () => {
   const calls: string[] = [], now = { t: 0 }, s = new TokenSafety(rpc({}, TOKEN, [], calls), { cacheMs: 1000, now: () => now.t });
   await s.check('M'); await s.check('M'); assert.equal(calls.filter(c => c === 'getAccountInfo').length, 1); now.t = 2000; await s.check('M'); assert.equal(calls.filter(c => c === 'getAccountInfo').length, 2);
 });
+
+// xStocks (Backed): Token-2022 with the issuer's freeze authority, permanent delegate and pause, read from the TSLAx mint on mainnet (2026-11-18). The allowance is pinned to those keys.
+const XS_KEYS = { freezeAuthority: 'JDq14BWvqCRFNu1krb12bcRpbGtJZ1FLEakMw6FdxJNs', permanentDelegate: '5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq', pauseAuthority: 'JDq14BWvqCRFNu1krb12bcRpbGtJZ1FLEakMw6FdxJNs' };
+const xstockMint = (o: { freeze?: string; delegate?: string; pause?: string; paused?: boolean; hook?: string | null } = {}) => ({ decimals: 8, mintAuthority: '7pt9tkctJPK7PPNQJ77GKg8ZffSF6QxoMiCFYHxrtaCj', freezeAuthority: o.freeze ?? XS_KEYS.freezeAuthority, extensions: [
+  { extension: 'metadataPointer', state: {} }, { extension: 'permanentDelegate', state: { delegate: o.delegate ?? XS_KEYS.permanentDelegate } }, { extension: 'defaultAccountState', state: { accountState: 'initialized' } },
+  { extension: 'scaledUiAmountConfig', state: { multiplier: '1.0032690125398187' } }, { extension: 'pausableConfig', state: { authority: o.pause ?? XS_KEYS.pauseAuthority, paused: o.paused ?? false } },
+  { extension: 'confidentialTransferMint', state: {} }, { extension: 'transferHook', state: { authority: XS_KEYS.permanentDelegate, programId: o.hook ?? null } }, { extension: 'tokenMetadata', state: { symbol: 'TSLAx' } }] });
+const XS = [{ mint: 'XS1', symbol: 'TSLAx', issuer: 'Backed (xStocks)', keys: XS_KEYS }];
+
+test('an xStock with the issuer\'s pinned keys is not blocked: freeze, pause and permanent delegate are reported as issuer controls (warnings)', async () => {
+  const r = await new TokenSafety(rpc(xstockMint(), T22), { issuedAssets: XS, sellRoute: async () => true }).check('XS1');
+  assert.equal(r.verdict, 'warn'); assert.deepEqual(codes(r), ['issuer_freeze:warn', 'mint_authority:warn', 'issuer_delegate:warn', 'issuer_pause:warn']);
+  assert.deepEqual(r.facts.issuedAsset, { symbol: 'TSLAx', issuer: 'Backed (xStocks)' });
+});
+
+test('the xStock allowance does not weaken the check: unlisted lookalikes, changed keys, a paused token, a live transfer hook and no sell route are still blocked', async () => {
+  const one = (info: any, mint = 'XS1', o: any = {}) => new TokenSafety(rpc(info, T22), { issuedAssets: XS, ...o }).check(mint);
+  const look = await one(xstockMint(), 'FAKE'); assert.equal(look.verdict, 'block'); assert.deepEqual(codes(look).filter((c: string) => c.endsWith(':block')), ['freeze_authority:block', 'permanent_delegate:block', 'pausable:block']); assert.equal(look.facts.issuedAsset, null);
+  for (const changed of [{ freeze: 'X' }, { delegate: 'X' }, { pause: 'X' }]) { const r = await one(xstockMint(changed)); assert.equal(r.verdict, 'block'); assert.ok(codes(r).includes('issuer_keys_changed:block'), JSON.stringify(changed)); assert.equal(r.facts.issuedAsset, null); }
+  assert.ok(codes(await one(xstockMint({ paused: true }))).includes('paused:block'));
+  assert.ok(codes(await one(xstockMint({ hook: 'HookProgram1111' }))).includes('transfer_hook:block'));
+  assert.ok(codes(await one(xstockMint(), 'XS1', { sellRoute: async () => false })).includes('no_sell_route:block'));
+  assert.equal((await new TokenSafety(rpc(xstockMint(), T22), { issuedAssets: [] }).check('XS1')).verdict, 'block', 'issuedAssets: [] turns the allowance off');
+  assert.equal((await new TokenSafety(rpc(xstockMint(), TOKEN), { issuedAssets: XS }).check('XS1')).verdict, 'block', 'only a Token-2022 mint qualifies');
+});
+
+test('Ondo-style issued assets keep no permanent delegate: pinned as none, so a delegate appearing breaks the allowance; the real registry covers xStocks, Ondo and Backpack', async () => {
+  const OK = { freezeAuthority: 'F1', permanentDelegate: null, pauseAuthority: 'P1' }, ONDO = [{ mint: 'ON1', symbol: 'TSLAon', issuer: 'Ondo Global Markets', keys: OK }];
+  const mint = (delegate?: string) => ({ decimals: 9, mintAuthority: 'M', freezeAuthority: 'F1', extensions: [{ extension: 'pausableConfig', state: { authority: 'P1', paused: false } }, ...(delegate ? [{ extension: 'permanentDelegate', state: { delegate } }] : [])] });
+  const ok = await new TokenSafety(rpc(mint(), T22), { issuedAssets: ONDO }).check('ON1'); assert.equal(ok.verdict, 'warn'); assert.deepEqual(codes(ok), ['issuer_freeze:warn', 'mint_authority:warn', 'issuer_pause:warn']);
+  const bad = await new TokenSafety(rpc(mint('EVIL'), T22), { issuedAssets: ONDO }).check('ON1'); assert.equal(bad.verdict, 'block'); assert.ok(codes(bad).includes('permanent_delegate:block'));
+  const { STOCKS_SOLANA, stockBySymbol } = await import('../src/xstocks.ts');
+  assert.equal(new Set(STOCKS_SOLANA.map(a => a.mint)).size, STOCKS_SOLANA.length, 'no mint listed twice');
+  assert.deepEqual(['TSLAx', 'TSLAon', 'TSLA'].map(s => stockBySymbol(s)?.issuer), ['Backed (xStocks)', 'Ondo Global Markets', 'Backpack Securities']);
+});

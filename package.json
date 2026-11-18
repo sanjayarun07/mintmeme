@@ -19,6 +19,10 @@
     "server:loadtest": "node --experimental-transform-types --no-warnings apps/server/loadtest.ts",
     "verify:evm": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/traderfork.ts",
     "verify:base-relay": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/baserelayread.ts",
+    "rfq": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/rfq/server.ts",
+    "stocks:registry": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/stockregistry.ts",
+    "verify:stocks": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/xstocksread.ts",
+    "verify:jupiterz-live": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/jupiterzlive.ts",
     "setup:check": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/setup-check.ts",
     "test:pg": "PG_TEST_URL=${PG_TEST_URL:-postgres://memedesk:memedesk-local-pw@127.0.0.1:55433/memedesk_test} npm test"
   },
