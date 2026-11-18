@@ -41,6 +41,20 @@ export interface SolanaTraderOptions {
     /** Jupiter API key (optional; your key from Jupiter's portal). Sent as x-api-key on route building, quotes and SOL/USD, so trades are not held to the keyless
      *  rate limit (about one request every 2 seconds). Without it everything still works, keyless. */
     jupiterApiKey?: string;
+    /** JupiterZ RFQ fills for large orders (off when absent; docs/JUPITERZ.md). A trade whose SOL side is at least `minLamports` and carries no platform fee asks Jupiter's
+     *  market makers for a firm quote; it is used only when it beats the normal /build route by `marginBps`, passes the RFQ gate and the simulation, and `checkFill`
+     *  (the stock share-price check) does not refuse it. Otherwise the normal route runs. Signing still goes through Privy, whose policy must allow the Order Engine program. */
+    jupiterz?: {
+        minLamports: bigint;
+        marginBps: number;
+        maxExpirySec?: number;
+        checkFill?: (tx: {
+            tokenIn: string;
+            tokenOut: string;
+            amountIn: bigint;
+            minOut: bigint;
+        }, outAmount: bigint) => Promise<string | undefined>;
+    };
     log?: (m: string) => void;
 }
 export interface SolanaTrader {

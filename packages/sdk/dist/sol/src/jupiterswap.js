@@ -130,9 +130,16 @@ const big = (v, name) => { if (typeof v !== 'string' || !/^\d+$/.test(v))
     throw new JupiterRefused(`Jupiter field ${name} is not an integer string`); return BigInt(v); };
 async function getJson(url, c) {
     const f = c.fetchFn ?? fetch;
-    let last = '';
+    let last = '', useKey = !!c.apiKey;
     for (let a = 0; a < 4; a++) { // keyless access is 0.5 requests/s: back off on 429 instead of hammering
-        const res = await f(url, { headers: c.apiKey ? { 'x-api-key': c.apiKey } : {}, signal: AbortSignal.timeout(c.timeoutMs ?? 15_000) });
+        const res = await f(url, { headers: useKey ? { 'x-api-key': c.apiKey } : {}, signal: AbortSignal.timeout(c.timeoutMs ?? 15_000) });
+        // a key whose quota is used up answers 429 too: go on keyless (the same public data) rather than fail the trade
+        if (res.status === 429 && useKey) {
+            useKey = false;
+            last = 'HTTP 429 (API key rate limited)';
+            await new Promise(r => setTimeout(r, 300));
+            continue;
+        }
         if (res.status === 429) {
             last = 'HTTP 429';
             await new Promise(r => setTimeout(r, 2200 * (a + 1)));
@@ -238,6 +245,13 @@ export function gateInstructions(ixs, c) {
             if (t === 9 && ix.data.length === 1 && k.length >= 3 && k[1] === c.wallet && k[2] === c.wallet)
                 return; // CloseAccount: destination and authority are our wallet
             refuse(`token instruction type ${t} is not allowed (only SyncNative on our wSOL account and CloseAccount back to our wallet)`);
+        }
+        else if (p === PROGRAMS.token2022) {
+            // only closing a token account this same transaction created (an in-between Token-2022 account of the route), its rent back to our wallet
+            const t = ix.data[0], k = ix.accounts.map(a => a.pubkey);
+            if (t === 9 && ix.data.length === 1 && k.length >= 3 && created.includes(k[0]) && k[1] === c.wallet && k[2] === c.wallet)
+                return;
+            refuse(`Token-2022 instruction type ${t} is not allowed (only CloseAccount of a token account this transaction created, back to our wallet)`);
         }
         else if (p === PROGRAMS.ata) {
             const k = ix.accounts.map(a => a.pubkey);

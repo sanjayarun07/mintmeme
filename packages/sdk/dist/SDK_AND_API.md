@@ -583,6 +583,8 @@ TWAP: `id`, `walletId`, `token`, `side`, `total`, `slices` (2 to 100), `interval
 
 ## 8. API reference
 
+Integrating from another service? Start with [HTTP_API.md](HTTP_API.md): authentication, app keys, plain units, idempotency, wallet linking, webhooks, errors and limits, with examples.
+
 Base path `/v1`. Auth: `Authorization: Bearer <key>`. Open routes: `GET /v1/health`, `GET /v1/openapi.json` (the machine-readable list of every route; use it to generate a client in any language).
 
 **Keys.** Set `API_KEYS="key:user[:scope],..."`. Keys are at least 16 characters, kept only as SHA-256 hashes in memory, compared in constant time, never logged. Scope `trade` (default) can do everything; `read` can only call `GET` and `POST /v1/quote`.

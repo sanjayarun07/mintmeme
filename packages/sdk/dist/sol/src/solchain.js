@@ -324,7 +324,7 @@ export class SolanaChain {
     }
     /** Ask Jupiter for the route, compile it ourselves, run the safety gate on the exact bytes to be signed, then SIMULATE and check the wallet's balances. Throws JupiterRefused to stop. */
     /** `maxAccounts`: set when a route came out too large for one transaction and Jupiter is asked again for a simpler one (see the size check below). */
-    async buildJupiter(tx, v, extra, maxAccounts) {
+    async buildJupiter(tx, v, extra, maxAccounts, keepAccounts = false) {
         const original = tx;
         // a Jito tip (submitter.ts) travels inside the swap transaction; the gate allows exactly this transfer and no other
         const tipIx = extra ? { programId: extra.program, accounts: extra.keys.map(k => ({ pubkey: k.pubkey, isSigner: !!k.signer, isWritable: !!k.writable })), data: extra.data } : undefined;
@@ -371,15 +371,25 @@ export class SolanaChain {
             tables.push(t);
         });
         const bh = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-        const body = [...(buying ? feeIxs : []), ...b.ixs, ...(buying ? [] : feeIxs), ...(tipIx ? [tipIx] : [])];
+        // Jupiter's /build opens a token account in our wallet for every token the route passes through (USDC, JUP, a pump token ...) and closes only wrapped SOL, so
+        // their rent (about 0.0015 SOL each) would stay locked in empty accounts (mainnet 2026-11-18: 0.003 SOL on a 0.01 SOL stock buy). Close each one this trade CREATES
+        // (never an account the wallet already had, never the input or output token's) after the swap, rent back to our wallet. If that makes the transaction too large
+        // or the simulation fails (a route left dust behind), build again without the closes rather than refuse the trade.
+        const mid = keepAccounts ? [] : b.ixs.filter(i => i.programId === PROGRAMS.ata && i.accounts[2]?.pubkey === w && ![inM, outM, wsol].includes(i.accounts[3]?.pubkey)).map(i => ({ ata: i.accounts[1].pubkey, program: i.accounts[5].pubkey }));
+        const midNew = mid.length ? (await this.accountsAt(mid.map(m => m.ata))).flatMap((a, i) => (a ? [] : [mid[i]])) : [];
+        const closeIxs = midNew.map(m => ({ programId: m.program, accounts: [{ pubkey: m.ata, isSigner: false, isWritable: true }, { pubkey: w, isSigner: false, isWritable: true }, { pubkey: w, isSigner: true, isWritable: false }], data: Uint8Array.of(9) }));
+        const closed = new Set(midNew.map(m => m.ata));
+        const body = [...(buying ? feeIxs : []), ...b.ixs, ...closeIxs, ...(buying ? [] : feeIxs), ...(tipIx ? [tipIx] : [])];
         let message = compileV0(w, body, b99(bh.value.blockhash), tables);
         // A transaction is at most 1,232 bytes signed. Jupiter routes can come close on their own; our tip, fee and compute-budget instructions add up to about 100 bytes.
         // Too large (with room for the compute-unit limit added below): ask Jupiter again for a route that touches fewer accounts, down to 28; then refuse.
         if (1 + 64 + message.length + JUP_SIZE_MARGIN > TX_MAX_BYTES) {
+            if (closeIxs.length)
+                return this.buildJupiter(original, v, extra, maxAccounts, true); // keep the best route: drop the account closes first
             const next = JUP_MAX_ACCOUNTS_STEPS.find(n => n < (maxAccounts ?? j.maxAccounts ?? 64));
             if (next === undefined)
                 throw new JupiterRefused(`every Jupiter route for this trade is too large for one transaction (${1 + 64 + message.length} bytes, the limit is ${TX_MAX_BYTES})`);
-            return this.buildJupiter(original, v, extra, next);
+            return this.buildJupiter(original, v, extra, next, keepAccounts);
         }
         if (tip && !parseMessage(message).staticKeys.includes(tip.to))
             throw new JupiterRefused('the tip account ended up in a lookup table, where Jito ignores tips');
@@ -410,6 +420,8 @@ export class SolanaChain {
                 watch.push(a); // their simulated size prices their rent
         const pre = await this.accountsAt(watch);
         const sim = await this.rpcCall('simulateTransaction', [Buffer.from(unsignedV0(message)).toString('base64'), { sigVerify: false, replaceRecentBlockhash: true, commitment: 'confirmed', encoding: 'base64', accounts: { encoding: 'base64', addresses: watch } }]);
+        if (sim.value.err && closeIxs.length)
+            return this.buildJupiter(original, v, extra, maxAccounts, true); // e.g. dust left in an in-between account: without the closes
         if (sim.value.err)
             throw new JupiterRefused(`simulation failed: ${JSON.stringify(sim.value.err)}${sim.value.logs?.length ? `: ${sim.value.logs[sim.value.logs.length - 1]}` : ''}`);
         const post = sim.value.accounts.map(a => a ? { lamports: BigInt(a.lamports), data: Buffer.from(a.data[0], 'base64') } : null);
@@ -417,6 +429,8 @@ export class SolanaChain {
         // rent of the token accounts this swap creates, each at its simulated size: a Token-2022 account with extensions (an xStock account) is bigger than a classic 165-byte one
         let rent = 0n;
         for (const a of created) {
+            if (closed.has(a))
+                continue;
             const x = post[watch.indexOf(a)];
             rent += x && x.data.length > TOKEN_ACCOUNT_SIZE ? await this.rentFor(x.data.length) : await this.rentExempt();
         }

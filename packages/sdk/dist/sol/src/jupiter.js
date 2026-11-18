@@ -7,7 +7,13 @@ export async function fetchJupiterQuote(o) {
         throw new Error('amount must be positive');
     const u = new URL(o.url ?? (o.apiKey ? JUPITER_KEYED_QUOTE_URL : JUPITER_QUOTE_URL));
     u.search = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), slippageBps: String(slip), restrictIntermediateTokens: 'true' }).toString();
-    const res = await (o.fetchFn ?? fetch)(u.toString(), { headers: o.apiKey ? { 'x-api-key': o.apiKey } : {}, signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
+    let res = await (o.fetchFn ?? fetch)(u.toString(), { headers: o.apiKey ? { 'x-api-key': o.apiKey } : {}, signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
+    // the key's quota used up (429) or the keyed host failing: the same quote from the keyless host
+    if (!res.ok && o.apiKey && !o.url && (res.status === 429 || res.status >= 500)) {
+        const k = new URL(JUPITER_QUOTE_URL);
+        k.search = u.search;
+        res = await (o.fetchFn ?? fetch)(k.toString(), { signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
+    }
     if (!res.ok)
         throw new Error(`Jupiter quote failed: HTTP ${res.status}`);
     const j = await res.json();

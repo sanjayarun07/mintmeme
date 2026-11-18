@@ -70,7 +70,10 @@ export class JupiterStockPrices {
         }
         if (need.length)
             try {
-                const res = await (this.o.fetchFn ?? fetch)(`${this.o.url ?? (this.o.apiKey ? 'https://api.jup.ag/price/v3' : 'https://lite-api.jup.ag/price/v3')}?ids=${need.join(',')}`, { headers: this.o.apiKey ? { 'x-api-key': this.o.apiKey } : {}, signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
+                let res = await (this.o.fetchFn ?? fetch)(`${this.o.url ?? (this.o.apiKey ? 'https://api.jup.ag/price/v3' : 'https://lite-api.jup.ag/price/v3')}?ids=${need.join(',')}`, { headers: this.o.apiKey ? { 'x-api-key': this.o.apiKey } : {}, signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
+                // the key's quota used up (429) or the keyed host failing: the same public prices from the keyless host, so a stock trade is not refused for it
+                if (!res.ok && this.o.apiKey && !this.o.url && (res.status === 429 || res.status >= 500))
+                    res = await (this.o.fetchFn ?? fetch)(`https://lite-api.jup.ag/price/v3?ids=${need.join(',')}`, { signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
                 if (res.ok) {
                     const j = await res.json();
                     for (const m of need) {

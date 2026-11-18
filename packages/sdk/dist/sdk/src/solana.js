@@ -146,7 +146,8 @@ export async function createSolanaTrader(o) {
         else
             why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why;
     }
-    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.jupiterz ? { jupiterz: { ...o.jupiterz, ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}), log: (m) => { if (m)
+                    log(m); } } } : {}), ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
     const policies = new Map(), owners = new Map();
     if (o.address) {
         owners.set(o.address, 'x');
