@@ -6,6 +6,6 @@ export * from './snipe.ts';
 export * from './portfolio.ts';
 export * from './alerts.ts';
 export * from './chains.ts';
-export * from './orderrunner.ts'; export * from './copyrunner.ts'; export * from './sniperunner.ts'; export * from './durable.ts'; export * from './resp.ts'; export * from './redis.ts';
+export * from './orderrunner.ts'; export * from './copyrunner.ts'; export * from './sniperunner.ts'; export * from './durable.ts'; export * from './resp.ts'; export * from './redis.ts'; export * from './pg.ts';
 export * from './bulk.ts'; export * from './twap.ts';
 export * from './feed.ts';

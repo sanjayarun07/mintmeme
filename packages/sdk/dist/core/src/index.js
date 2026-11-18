@@ -24,6 +24,7 @@ export * from './sniperunner.js';
 export * from './durable.js';
 export * from './resp.js';
 export * from './redis.js';
+export * from './pg.js';
 export * from './bulk.js';
 export * from './twap.js';
 export * from './feed.js';

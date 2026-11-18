@@ -7,6 +7,7 @@
  *    PORT=3500  HOST=127.0.0.1 (0.0.0.0 in a container)  NAMESPACE=memedesk  MODE=practice
  *    LEASE_TTL_MS=15000  MAX_USERS_PER_NODE=300  SWEEP_MS=2000  RATE_PER_SECOND=20  RATE_BURST=40  REDIS_REQUIRE_AOF=true
  *    SOLANA_SAMPLE_URL   optional, e.g. http://127.0.0.1:3000: serve the /solana test page (and its /api/sol/* calls) from that running terminal, to THIS machine only
+ *    PG_URL              optional: postgres://user:pass@host:5432/db?sslmode=require   stored trade history and audit log (/v1/records/*, the status page)
  *    MAX_USERS_PER_APP=10000   end users one app key may create;  WEBHOOKS_ALLOW_HTTP=true only for local testing (http and private hosts as webhook targets)
  *    PLATFORM_FEE_WALLET + PLATFORM_FEE_BPS=0..100   the operator's fee on every real trade (paid in SOL);  APP_FEE_MAX_BPS=100   the most an app may set with PUT /v1/app/fees
  *  MODE: `practice` (simulated chain, fake funds) or `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY). */
@@ -51,7 +52,13 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
   const fees = (userId: string): FeeRecipient[] => { const out: FeeRecipient[] = []; if (pbps > 0) out.push({ address: pw!, bps: pbps });
     const i = userId.indexOf(':'); if (i > 0) { const f = appFee(userId.slice(0, i)); if (f && f.bps > 0) out.push({ address: f.wallet, bps: f.bps }); } return out; };
   const acc = solanaAccounts({ rpcUrl, privy: privy!, fees });
-  return { makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }) };
+  // status page checks: reachability of what real trading depends on (no secrets in what is shown)
+  const statusChecks = [
+    { name: 'Solana RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
+    { name: 'Privy', run: async () => { await fetch('https://api.privy.io', { signal: AbortSignal.timeout(5_000) }); } },
+    { name: 'Jito block engine', run: async () => { const r = await fetch('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },
+  ];
+  return { statusChecks, makeAccount: acc.make, extraRoutes: (h: Parameters<NonNullable<Parameters<typeof createNode>[0]['extraRoutes']>>[0]) => linkRoutes({ privy: acc.privy, status: acc.status, safety: acc.safety, ...h }) };
 }
 
 if (import.meta.main) {
@@ -66,7 +73,7 @@ if (import.meta.main) {
     redisUrl: need('REDIS_URL'), namespace: env.NAMESPACE ?? 'memedesk', publicUrl, keys, makeAccount: real?.makeAccount ?? practiceAccount, extraRoutes: real?.extraRoutes,
     leaseTtlMs: int('LEASE_TTL_MS', 15_000, 3_000, 300_000), maxUsers: int('MAX_USERS_PER_NODE', 300, 1, 100_000), sweepMs: int('SWEEP_MS', 2000, 200, 60_000),
     rate: { perSecond: int('RATE_PER_SECOND', 20, 1, 10_000), burst: int('RATE_BURST', 40, 1, 20_000) }, requireAof: env.REDIS_REQUIRE_AOF !== 'false',
-    solanaSampleUrl: env.SOLANA_SAMPLE_URL || undefined,
+    solanaSampleUrl: env.SOLANA_SAMPLE_URL || undefined, pgUrl: env.PG_URL || undefined, statusChecks: real?.statusChecks,
     maxUsersPerApp: int('MAX_USERS_PER_APP', 10_000, 1, 10_000_000), maxAppFeeBps: int('APP_FEE_MAX_BPS', 100, 0, 500), webhooks: { allowHttp: env.WEBHOOKS_ALLOW_HTTP === 'true' },
   }).catch(e => fail((e as Error).message));
   if (env.SOLANA_SAMPLE_URL) console.log(`sample page: http://127.0.0.1:${env.PORT ?? 3500}/solana -> ${env.SOLANA_SAMPLE_URL} (this machine only; 404 for remote requests)`);

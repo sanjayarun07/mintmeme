@@ -19,6 +19,8 @@ import type { Backend } from '../../packages/core/src/index.ts';
 import type { Trader } from '../../packages/sdk/src/trader.ts';
 import { UserLease, ownerOf, ownersOf, usersKey } from './lease.ts';
 import { Webhooks, appRoutes, appUsersKey } from './webhooks.ts';
+import { History, auditBody } from './history.ts';
+import { recordRoutes, clusterStatus, statusHtml, nodeKey, nodesKey, nodeId } from './status.ts';
 import type { WebhookOptions } from './webhooks.ts';
 
 /** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
@@ -43,6 +45,10 @@ export interface NodeOptions {
   solanaSampleUrl?: string;
   /** Webhooks for app keys (webhooks.ts): retry timing, http for local tests. */
   webhooks?: WebhookOptions;
+  /** Trade history and audit log in Postgres (history.ts), e.g. postgres://user:pass@host:5432/db?sslmode=require. Optional. */
+  pgUrl?: string;
+  /** Extra checks shown on the status page (a Solana RPC, Jito, Privy...): each resolves when healthy, throws when not. */
+  statusChecks?: { name: string; run: () => Promise<unknown> }[];
   /** The most end users one app key may create. Default 10,000. */
   maxUsersPerApp?: number;
   /** The highest fee an app may set on its users' trades (PUT /v1/app/fees). Default 100 bps (1%). */
@@ -89,9 +95,10 @@ export async function createNode(o: NodeOptions) {
     registered.add(user); return undefined;
   };
   /** Every event of an app's end user goes to the app's webhook (if it set one). Internal error events are not sent. */
-  const wire = (user: string, t: Trader) => t.on(e => { if (e.type !== 'error') void hooks.emit(user, e.type, e); });
+  const history = o.pgUrl ? new History(o.pgUrl, { log }) : undefined; if (history) await history.start();
+  const wire = (user: string, t: Trader) => t.on(e => { if (e.type !== 'error') void hooks.emit(user, e.type, e); if (e.type === 'trade') history?.recordTrade(user, t.trade_(e.key)); });
   const extra = o.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? (n: string) => x.lease.backend(n) : undefined; }, reload });
-  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: extra, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path), appRoutes: appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100) });
+  const api = createApi({ keys: o.keys, traderFor: u => owned.get(u)?.acct.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: history ? e => history.audit({ ...e, node: o.publicUrl, body: auditBody(e.body) }) : undefined, prepare: (u, body, path) => owned.get(u)?.acct.prepare?.(body, path), appRoutes: [...appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100), ...recordRoutes(history, true)] });
 
   /** Take the user's lease and start its Trader from the state in Redis. Concurrent claims for one user share one attempt. */
   const claim = (user: string): Promise<boolean> => {
@@ -118,6 +125,13 @@ export async function createNode(o: NodeOptions) {
     x.lease.release();   // also on 'lost': if a renewal merely errored the lease may still be ours, and holding it would lock the user out until the TTL
     if (why === 'released') m.released++; else { m.leasesLost++; log(`LOST the lease for ${user}: its Trader is stopped here`); }
   };
+  // heartbeat for the status page: every node says it is alive (and how busy) every 5 s; the key expires 15 s after the last one
+  const startedAt = Date.now();
+  const heartbeat = () => { let orders = 0; for (const x of owned.values()) orders += x.acct.trader.listOrders({ status: 'active' }).length;
+    r.cmd('SET', nodeKey(o.namespace, o.publicUrl), JSON.stringify({ id: nodeId(o.publicUrl), startedAt, users: owned.size, orders, draining, webhooks: hooks.stats, history: history?.stats ?? null, at: Date.now() }), 'PX', '15000'); r.cmd('SADD', nodesKey(o.namespace), o.publicUrl); };
+  heartbeat(); const beat = setInterval(() => { try { heartbeat(); } catch { /* the next beat retries */ } }, 5_000); beat.unref?.();
+  let statusCache: { at: number; v: Awaited<ReturnType<typeof clusterStatus>> } | undefined;
+  const status = async () => { if (statusCache && Date.now() - statusCache.at < 10_000) return statusCache.v; const v = await clusterStatus({ r, ns: o.namespace, history, checks: o.statusChecks ?? [] }); statusCache = { at: Date.now(), v }; return v; };
   const renewTimer = setInterval(() => {
     const list = [...owned]; let held: boolean[]; try { held = UserLease.renewAll(r, list.map(([, x]) => x.lease)); } catch { held = list.map(() => false); }
     list.forEach(([u], i) => { if (!held[i]) drop(u, 'lost'); });
@@ -179,6 +193,7 @@ export async function createNode(o: NodeOptions) {
       if (!/^\/(?!\/)/.test(req.url ?? '')) return json(res, 400, { error: { code: 'bad_request', message: 'Request target must be a path.' } });
       const path = new URL(req.url!, 'http://x').pathname;
       if (path === '/healthz') return json(res, 200, { ok: true, node: o.publicUrl, users: owned.size });
+      if (path === '/status.json' || path === '/status') { const s = await status(); if (path === '/status.json') return json(res, 200, s); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); return res.end(statusHtml(s)); }
       if (path === '/readyz') { let ok = !draining; try { ok = ok && r.cmd('PING') === 'PONG'; } catch { ok = false; } return json(res, ok ? 200 : 503, { ready: ok, draining }); }
       if (path === '/metrics') { const body = metrics(); res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); return res.end(body); }   // build first: a throw must not leave a half-sent response
       if (path === '/console' || path === '/') { res.writeHead(200, CONSOLE_HEADERS); return res.end(CONSOLE_HTML); }
@@ -205,8 +220,8 @@ export async function createNode(o: NodeOptions) {
     server, owned, metrics: m, sweep, claim,
     listen: (port: number, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))),
     /** Graceful shutdown: stop claiming (after claims in progress settle), stop every Trader, release every lease (others take over at once), close HTTP and Redis. */
-    async drain() { await stopServing(); hooks.stop(); for (const u of [...owned.keys()]) drop(u, 'released'); await closeHttp(); await api.close().catch(() => {}); r.close(); log('drained'); },
+    async drain() { await stopServing(); hooks.stop(); clearInterval(beat); try { r.cmd('DEL', nodeKey(o.namespace, o.publicUrl)); } catch { /* going away anyway */ } await history?.stop().catch(() => {}); for (const u of [...owned.keys()]) drop(u, 'released'); await closeHttp(); await api.close().catch(() => {}); r.close(); log('drained'); },
     /** Test hook: stop renewing and serving WITHOUT releasing (what a crashed or frozen node looks like to the others). */
-    async crash() { await stopServing(); hooks.stop(); for (const x of owned.values()) stopAcct(x.acct); owned.clear(); await closeHttp(); r.close(); },
+    async crash() { await stopServing(); hooks.stop(); clearInterval(beat); history?.abort(); for (const x of owned.values()) stopAcct(x.acct); owned.clear(); await closeHttp(); r.close(); },
   };
 }

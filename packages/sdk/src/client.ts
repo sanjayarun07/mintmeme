@@ -30,6 +30,12 @@ export class MemeClient {
   appFees() { return this.req('GET', '/v1/app/fees'); }
   setAppFees(wallet: string, bps: number) { return this.req('PUT', '/v1/app/fees', { wallet, bps }); }
   deleteAppFees() { return this.req('DELETE', '/v1/app/fees'); }
+  // ── stored records (servers with PG_URL): newest first; `before` pages back (an updated_at for trades, an id for the audit log) ──
+  recordTrades(q: { limit?: number; before?: string } = {}) { return this.req('GET', '/v1/records/trades' + qs(q)); }
+  auditLog(q: { limit?: number; before?: string } = {}) { return this.req('GET', '/v1/records/audit' + qs(q)); }
+  /** App keys: records of all the app's end users. */
+  appRecordTrades(q: { limit?: number; before?: string } = {}) { return this.req('GET', '/v1/app/records/trades' + qs(q)); }
+  appAuditLog(q: { limit?: number; before?: string } = {}) { return this.req('GET', '/v1/app/records/audit' + qs(q)); }
   overview() { return this.req('GET', '/v1/overview'); }
   // ── plain units (servers in MODE=solana-mainnet): one call per action, amounts as decimal strings, the linked wallet by default ──
   /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */

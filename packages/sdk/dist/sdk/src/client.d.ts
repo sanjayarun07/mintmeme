@@ -24,6 +24,23 @@ export declare class MemeClient {
     appFees(): Promise<any>;
     setAppFees(wallet: string, bps: number): Promise<any>;
     deleteAppFees(): Promise<any>;
+    recordTrades(q?: {
+        limit?: number;
+        before?: string;
+    }): Promise<any>;
+    auditLog(q?: {
+        limit?: number;
+        before?: string;
+    }): Promise<any>;
+    /** App keys: records of all the app's end users. */
+    appRecordTrades(q?: {
+        limit?: number;
+        before?: string;
+    }): Promise<any>;
+    appAuditLog(q?: {
+        limit?: number;
+        before?: string;
+    }): Promise<any>;
     overview(): Promise<any>;
     /** Buy with `sol`, or sell `pct` of the holding or `tokens`. Resolves with the trade (state, fill, failure). Same `key` again never trades twice. */
     swap(p: {

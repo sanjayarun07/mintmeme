@@ -24,6 +24,8 @@ export interface ApiOptions {
   extraRoutes?: Route[];
   /** Routes for app keys only, under /v1/app/ (webhook settings, the app's users). `userId` in their context is the app id; there is no Trader. */
   appRoutes?: Route[];
+  /** Called after every authenticated request that changes something (POST, PUT, PATCH, DELETE), for an audit log. `body` is the parsed request body (the host removes secrets). */
+  onChange?: (e: { userId: string; keyId: string; method: string; path: string; status: number; ms: number; body?: unknown; ip?: string }) => void;
   /** Runs before every route with the caller's body (a real chain learns the token here, or refuses early with an SdkError). */
   prepare?: (userId: string, body: any, path: string) => Promise<any> | any;
 }
@@ -112,6 +114,8 @@ export function createApi(o: ApiOptions) {
       if (path === '/v1/openapi.json') return send(res, 200, openapi([...rs, ...(o.appRoutes ?? [])]));
       const k = keyOf(req); if (!k) return send(res, 401, { error: { code: 'unauthorized', message: 'Missing or unknown API key.', fix: 'Send Authorization: Bearer <your key>.' } }, { 'www-authenticate': 'Bearer' });
       const p = who(req, k);
+      let seenBody: unknown; const t0 = Date.now(), mutating = req.method !== 'GET' && req.method !== 'HEAD';
+      if (mutating && o.onChange && !('error' in p)) res.once('finish', () => { try { o.onChange!({ userId: (p.userId ?? p.appId)!, keyId: k.h.toString('hex').slice(0, 12), method: req.method!, path, status: res.statusCode, ms: Date.now() - t0, body: seenBody, ip: req.socket.remoteAddress }); } catch { /* auditing never breaks a request */ } });
       if ('error' in p) return send(res, 400, { error: { code: 'missing_user', message: 'An app key acts for one of the app\'s end users: name them in the X-User-Id header.', fix: 'Send X-User-Id: <your user id> (1 to 64 letters, digits, dot, dash, underscore).' } });
       const bk = k.h.toString('hex') + (p.endUser ? ':' + p.endUser : ''), b = buckets.get(bk) ?? { tokens: rate.burst, at: now() }; b.tokens = Math.min(rate.burst, b.tokens + (now() - b.at) / 1000 * rate.perSecond); b.at = now(); buckets.set(bk, b);   // app keys: one budget per end user
       if (b.tokens < 1) return send(res, 429, { error: { code: 'rate_limited', message: 'Too many requests.', fix: `Slow down to ${rate.perSecond} requests per second.` } }, { 'retry-after': '1' }); b.tokens -= 1;
@@ -119,7 +123,7 @@ export function createApi(o: ApiOptions) {
         if (k.scope !== 'app') return send(res, 403, { error: { code: 'not_an_app_key', message: 'Only an app key can manage app settings.', fix: 'Use your app key.' } });
         const ah = appCompiled.find(x => x.r.method === req.method && x.re.test(path)); if (!ah) return send(res, 404, { error: { code: 'not_found', message: `No route ${req.method} ${path}.`, fix: 'See GET /v1/openapi.json for the list of routes.' } });
         const params = Object.fromEntries(Object.entries(ah.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
-        const body = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
+        const body = req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {}; seenBody = body;
         return send(res, 200, plain(await ah.r.run({ t: undefined as unknown as Trader, userId: p.appId!, body, params, query: url.searchParams, headers: req.headers })));
       }
       const uid = p.userId!;
@@ -134,7 +138,7 @@ export function createApi(o: ApiOptions) {
       if (!hit) { const other = compiled.some(x => x.re.test(path)); return send(res, other ? 405 : 404, { error: { code: other ? 'method_not_allowed' : 'not_found', message: other ? `${req.method} is not allowed here.` : `No route ${path}.`, fix: 'See GET /v1/openapi.json for the list of routes.' } }); }
       if (hit.r.scope === 'trade' && k.scope === 'read') return send(res, 403, { error: { code: 'read_only_key', message: 'This API key is read-only.', fix: 'Use a key with the trade scope for this call.' } });
       const params = Object.fromEntries(Object.entries(hit.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
-      let body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {};
+      let body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {}; seenBody = body;
       if (o.prepare && !(hit.r.path === '/v1/wallet' || hit.r.path.startsWith('/v1/wallet/link'))) body = (await o.prepare(uid, body, hit.r.path)) ?? body;   // linking must work while the account cannot trade yet; a host may return a rewritten body (plain units)
       send(res, 200, plain(await hit.r.run({ t, userId: uid, body, params, query: url.searchParams, headers: req.headers })));
     } catch (e) { fail(res, e); }

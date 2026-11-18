@@ -111,6 +111,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `RATE_PER_SECOND`, `RATE_BURST` | 20, 40 | Per key, **per node**. |
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
 | `SOLANA_SAMPLE_URL` | none | Serve the `/solana` test page from a running terminal (`apps/web`), to this machine only. |
+| `PG_URL` | none | Optional Postgres for the stored trade history and audit log, e.g. `postgres://user:pass@host:5432/db?sslmode=require` (or `verify-full`). Tables are created on start. |
 | `MAX_USERS_PER_APP` | 10000 | End users one app key may create (each is a separate account; section 4.6 of SDK_AND_API.md). |
 | `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS` | none, 0 | The operator's fee on every real trade, paid in SOL inside the trade (0 to 100 bps; SDK_AND_API.md 4.8). |
 | `APP_FEE_MAX_BPS` | 100 | The most an app may charge its users with `PUT /v1/app/fees`. |
@@ -129,6 +130,20 @@ Endpoints besides the API: `/healthz` (process up), `/readyz` (Redis reachable a
 users owned, requests, forwarded, forward errors, claims, leases lost, capacity refusals, draining). `nginx.conf` hides `/metrics` from the public entry: scrape each
 node on the private network.
 
+## Trade history, audit log and the status page
+
+- **Postgres (`PG_URL`, optional):** `trades` (one row per trade, upserted as its state changes, with its fill), `trade_states` (every state it was seen in) and `audit_log`
+  (every API call that changed something: account, key id, method, path, a summary of the body with secrets and signatures removed, status, duration, node).
+  Written in batches every second by the node that served the call or runs the account, never on the trading path: if Postgres is slow or down, trading continues
+  and records wait in a bounded buffer (10,000; the oldest are dropped beyond that, and counted). A crashed node loses its last unwritten second.
+  The client (`packages/core/src/pg.ts`) has no dependencies: TLS (`sslmode=require` or `verify-full`), SCRAM-SHA-256, MD5 or cleartext passwords, parameters never interpolated.
+- **Status page:** every node serves `/status` (HTML, refreshes every 15 s) and `/status.json`: Redis, the nodes (each writes a heartbeat every 5 s; a node not
+  heard from for 15 s, or drained, leaves the list), Postgres with trades landed in the last hour, and in `MODE=solana-mainnet` reachability of the Solana RPC, Privy and
+  Jito. It shows no user data, no secrets, and node addresses only as short hashes, so it can be public. Unlike `/metrics`, nginx can pass it through.
+- **Verified** (`apps/server/records.test.ts` with `PG_TEST_URL`, two real nodes): stored trades and fills, the audit log without the webhook secret anywhere in
+  the table, app-wide records, the status page with both nodes and then one after a drain, and a trade finishing while Postgres was paused, its record written once it
+  was back. On the local validator (`verify:server-sol` with `PG_TEST_URL`, S16): a buy stored with the states it went through on the chain.
+
 ## The `/solana` sample page
 
 With `SOLANA_SAMPLE_URL=http://127.0.0.1:3000`, a node serves the Solana terminal page at `/solana` and forwards its `/api/sol/*` calls to that terminal. It answers
@@ -141,7 +156,7 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 - **Real accounts: Solana only.** `MODE=solana-mainnet` (above): local validator, plus one small mainnet buy. Orders, failover and sells through the server have not run on mainnet. EVM still has no real signer.
   Server-held hot keys in files are not production custody.
-- **No Postgres.** Redis is the only store and the single source of truth. Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
+- **Postgres is a record, not the source of truth.** Redis holds running accounts; with `PG_URL`, trades and an audit log are copied to Postgres in the background (below). Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.
 - **Rate limits are per node**, not cluster-wide. With app keys the limit is per end user.
 - **Webhooks are best effort:** retried in memory (2 s, 10 s, 60 s) by the node that runs the end user; lost if that node stops before delivery. Every registered end user is

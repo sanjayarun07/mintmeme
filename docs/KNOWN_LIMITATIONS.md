@@ -44,7 +44,7 @@ After the 2026-11-17 review and the Privy work: `npm test` 384 of 384 pass; `npm
     consensus lock, so a Redis failover that loses the lease key can briefly allow two writers.
 13. Redis durability is the server's: without `appendonly yes` a Redis crash can lose recent checkpoints. Nodes refuse such a Redis unless told otherwise. No TLS client,
     no Sentinel or Cluster. Redis calls are synchronous (block the event loop for each call).
-14. No Postgres backend.
+14. Postgres (optional, `PG_URL`) keeps a trade history and an audit log copied in the background; it is not the source of truth (Redis is), and a crashed node loses its last unwritten second of records.
 
 ## SDK and HTTP API
 15. Tested on the practice chain, an Ethereum mainnet fork and a Solana validator. Snipe and copy creation over HTTP answer 501 unless the host supplies a launch or leader
