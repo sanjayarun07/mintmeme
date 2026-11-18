@@ -181,6 +181,8 @@ Limits:
 - No token safety check and no fee sharing on Base yet.
 - Base has no public mempool, so there is no MEV setting.
 
+Mainnet, 2026-11-18 (user-approved): a 0.0002 ETH KEYCAT buy through the execution server (`MODE=base-mainnet`) from the user's Privy embedded wallet, signed by real Privy under the `memedesk-base` policy and checked by `PrivyEvmSigner`, finalized as tx `0x431b6ace637580d2f7e054c1759036dce6b1b7cae482f657df41a6d5d96ca8d7` (Uniswap V2 router, 973.33 KEYCAT received, exactly as quoted; network fee 0.00000067 ETH).
+
 Tested: `packages/sdk/test/base.test.ts`, and `npm run verify:server-base` (13 checks on a local Base fork with a Privy stand-in, buying and selling KEYCAT).
 
 **B. EVM via ERC-4337, if not using Privy smart wallets:** choose the smart-account implementation (for example ZeroDev Kernel, Safe with ERC-7579 modules,
