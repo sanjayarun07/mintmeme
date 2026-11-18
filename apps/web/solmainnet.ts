@@ -19,6 +19,8 @@ import { SolanaChain, SolJsonRpc, DevSolSigner, RemoteSolSigner, SignRequestErro
 import type { PrivyConfig } from '../../packages/sol/src/index.ts';
 import type { SolSigner } from '../../packages/sol/src/index.ts';
 import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
+/** Jupiter API key from .env (optional): route building and quotes use the keyed host instead of the keyless rate limit. */
+const JUP_KEY = process.env.JUPITER_API_KEY?.trim() || undefined;
 import { Trader } from '../../packages/sdk/src/trader.ts';
 import { urls } from '../../packages/live/src/config.ts';
 import { TradeGuard, GuardError, DEFAULT_LIMITS } from './solguard.ts';
@@ -74,7 +76,7 @@ export class SolMainnet {
   private attach(address: string, signer: SolSigner) {
     if (this.conn) throw bad('a wallet is already connected: disconnect it first', 409);
     const rpc = new SolJsonRpc(this.rpcEndpoint());
-    const chain = new SolanaChain({ id: 'sol-main', wsol: WSOL, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, priority: {} }, rpc, signer);   // priority fees from recent network fees, at most 0.0001 SOL per transaction
+    const chain = new SolanaChain({ id: 'sol-main', wsol: WSOL, pools: [], pump: { mints: [] }, jupiter: { pairs: [], apiKey: JUP_KEY }, priority: {} }, rpc, signer);   // priority fees from recent network fees, at most 0.0001 SOL per transaction
     const policy: WalletPolicy = { userId: 'u1', chains: ['sol-main'], allowedVenues: this.families, maxPerTx: { [NATIVE]: this.guard.limits.maxTradeLamports }, dailyLimit: { [NATIVE]: this.guard.limits.dailyCapLamports }, destinations: [], deviceSecret: 'local' };
     const store = Store.open(join(this.dir, `engine-${address.slice(0, 8)}.json`));
     const engine = new Engine({ store, chain, signer: new PolicySigner(new Map([[address, 'x']]), new Map([[address, policy]]), fileLedger(join(this.dir, `ledger-${address.slice(0, 8)}.json`))), router: new Router(chain), platformFeeBps: 0 });
@@ -279,7 +281,7 @@ export class SolMainnet {
   async solUsd(): Promise<number | null> {
     if (this.usdCache && Date.now() - this.usdCache.t < 30_000) return this.usdCache.v;
     try {
-      const q = await fetchJupiterQuote({ inputMint: 'So11111111111111111111111111111111111111112', outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amount: 1_000_000_000n, slippageBps: 50, timeoutMs: 8000 });
+      const q = await fetchJupiterQuote({ inputMint: 'So11111111111111111111111111111111111111112', outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amount: 1_000_000_000n, slippageBps: 50, timeoutMs: 8000, apiKey: JUP_KEY });
       const v = Number(q.outAmount) / 1e6; if (!(v > 0)) return null; this.usdCache = { v, t: Date.now() }; return v;
     } catch { return this.usdCache?.v ?? null; }
   }
@@ -296,7 +298,7 @@ export class SolMainnet {
     const solUsd = await this.solUsd(), rows: any[] = [];
     for (const [mint, h] of [...by].slice(0, 25)) {
       let valueSol: number | null = null;
-      if (rows.length < 12) { try { const q = await fetchJupiterQuote({ inputMint: mint, outputMint: 'So11111111111111111111111111111111111111112', amount: h.raw, slippageBps: 50, timeoutMs: 6000 }); valueSol = Number(q.outAmount) / 1e9; } catch { /* no route: balance only */ } }
+      if (rows.length < 12) { try { const q = await fetchJupiterQuote({ inputMint: mint, outputMint: 'So11111111111111111111111111111111111111112', amount: h.raw, slippageBps: 50, timeoutMs: 6000, apiKey: JUP_KEY }); valueSol = Number(q.outAmount) / 1e9; } catch { /* no route: balance only */ } }
       rows.push({ mint, decimals: h.dec, balanceRaw: h.raw.toString(), balanceTokens: Number(h.raw) / 10 ** h.dec, valueSol, valueUsd: valueSol != null && solUsd ? valueSol * solUsd : null });
     }
     rows.sort((x, y) => (y.valueSol ?? -1) - (x.valueSol ?? -1));

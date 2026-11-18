@@ -17,6 +17,8 @@ export interface JupiterQuote {
     }[];
 }
 export declare const JUPITER_QUOTE_URL = "https://lite-api.jup.ag/swap/v1/quote";
+/** With an API key (x-api-key): the keyed host, at the key's rate limit instead of the keyless one. */
+export declare const JUPITER_KEYED_QUOTE_URL = "https://api.jup.ag/swap/v1/quote";
 export declare function fetchJupiterQuote(o: {
     inputMint: string;
     outputMint: string;
@@ -24,7 +26,8 @@ export declare function fetchJupiterQuote(o: {
     slippageBps?: number;
     fetchFn?: typeof fetch;
     url?: string;
-    timeoutMs?: number;
+    timeoutMs?: number; /** Jupiter API key: sent as x-api-key, and the keyed host is used unless `url` is given. */
+    apiKey?: string;
 }): Promise<JupiterQuote>;
 /** How far our own quote is from Jupiter's, in bps of Jupiter's output (positive = ours is lower). Jupiter may route over several pools, so a gap is expected; this is a sanity bound, not a pass/fail oracle. */
 export declare const quoteGapBps: (ours: bigint, jup: JupiterQuote) => number;

@@ -1,11 +1,13 @@
 export const JUPITER_QUOTE_URL = 'https://lite-api.jup.ag/swap/v1/quote';
+/** With an API key (x-api-key): the keyed host, at the key's rate limit instead of the keyless one. */
+export const JUPITER_KEYED_QUOTE_URL = 'https://api.jup.ag/swap/v1/quote';
 export async function fetchJupiterQuote(o) {
     const slip = o.slippageBps ?? 50;
     if (!(o.amount > 0n))
         throw new Error('amount must be positive');
-    const u = new URL(o.url ?? JUPITER_QUOTE_URL);
+    const u = new URL(o.url ?? (o.apiKey ? JUPITER_KEYED_QUOTE_URL : JUPITER_QUOTE_URL));
     u.search = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), slippageBps: String(slip), restrictIntermediateTokens: 'true' }).toString();
-    const res = await (o.fetchFn ?? fetch)(u.toString(), { signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
+    const res = await (o.fetchFn ?? fetch)(u.toString(), { headers: o.apiKey ? { 'x-api-key': o.apiKey } : {}, signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
     if (!res.ok)
         throw new Error(`Jupiter quote failed: HTTP ${res.status}`);
     const j = await res.json();

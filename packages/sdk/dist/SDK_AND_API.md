@@ -186,7 +186,8 @@ await api.placeOrder({ type: 'trailing-stop', mint, tokens: '150000', trailPct: 
 ```ts
 import { createSolanaTrader } from 'memedesk-sdk';
 const s = await createSolanaTrader({ userId: 'u1', address: userWallet, rpcUrl: SOLANA_RPC_URL, persistDir: `state/u1`,
-  privy: { appId, appSecret, authKey: PRIVY_AUTH_PRIVATE_KEY, signerId: PRIVY_AUTH_KEY_ID, policyId: PRIVY_SOLANA_POLICY_ID } });
+  privy: { appId, appSecret, authKey: PRIVY_AUTH_PRIVATE_KEY, signerId: PRIVY_AUTH_KEY_ID, policyId: PRIVY_SOLANA_POLICY_ID },
+  jupiterApiKey: JUPITER_API_KEY });                      // optional: Jupiter's keyed host and your key's rate limit
 if (!s.active) console.warn(s.why);                       // not allowed in Privy (yet): reads work, trades are refused with this reason
 await s.trader.resume(); s.trader.start(2000);           // restored orders keep firing
 await s.prepare(mint); await s.sync();                    // learn the token, then read the chain's clock and pools, before a market trade
@@ -194,6 +195,9 @@ await s.trader.buy({ walletId: userWallet, token: mint, amount: 5_000_000n, slip
 await s.prepare(mint); await s.trader.limitBuy({ walletId: userWallet, token: mint, amount: 5_000_000n, priceUsd: '0.0000023' });
 s.trader.on(e => console.log(e));
 ```
+
+**Jupiter API key** (`jupiterApiKey`, optional) is sent as `x-api-key` on route building, quotes, SOL/USD and share prices. Without it everything works keyless,
+but at Jupiter's keyless rate limit (about one request every 2 seconds), which a busy server reaches quickly. The execution server reads it from `JUPITER_API_KEY`.
 
 **Priority fees** are on by default (`priority` option; `false` turns them off). Each transaction gets a compute-unit limit from a simulation (units used × 1.2, as
 Jupiter's compute-unit guide recommends; Jupiter's `/build` sets no limit, so the fee would otherwise be charged on up to 1.4M units) and a price from Solana's

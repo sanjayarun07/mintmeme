@@ -21,7 +21,7 @@ import type { SolSigner } from './signer.ts';
 import { readStockStates, findStock } from './stocks.ts';
 import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMessage, decodeTable, gateInstructions, walletTokenAccountsAtRisk, unsignedV0, wireV0, JupiterVenue, JupiterRefused } from './jupiterswap.ts';
 import type { JupCfg, JIx, Table } from './jupiterswap.ts';
-import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.ts';
+import { fetchJupiterQuote } from './jupiter.ts';
 import { fetchRfqOrder, gateRfq, encodeRfqRaw, decodeRfqRaw, rfqWire, executeRfq, RFQ_NOT_SENT } from './jupiterz.ts';
 import type { RfqCfg } from './jupiterz.ts';
 import type { TxSubmitter } from './submitter.ts';
@@ -141,7 +141,7 @@ export class SolanaChain implements ChainPort {
     const j = this.cfg.jupiter;
     if (!j) notes.push('Jupiter routing is not configured on this chain');
     else try {
-      const ref = o.refLamports ?? 50_000_000n, q = await fetchJupiterQuote({ inputMint: this.cfg.wsol, outputMint: mint, amount: ref, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
+      const ref = o.refLamports ?? 50_000_000n, q = await fetchJupiterQuote({ inputMint: this.cfg.wsol, outputMint: mint, amount: ref, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl, apiKey: j.apiKey, timeoutMs: j.timeoutMs });
       if (q.outAmount > 0n) { const add = (inMint: string, outMint: string, refAmount: bigint) => { if (!j.pairs.some(p => p.inMint === inMint && p.outMint === outMint)) j.pairs.push({ inMint, outMint, refAmount }); }; add(this.cfg.wsol, mint, ref); add(mint, this.cfg.wsol, q.outAmount); await this.refreshJupiter(); jupiter = this.state.venues.has(`jup:${this.cfg.wsol.slice(0, 6)}>${mint.slice(0, 6)}`); }
       else notes.push('Jupiter found no route');
     } catch (e) { notes.push(`no Jupiter route: ${(e as Error).message}`); }
@@ -155,7 +155,7 @@ export class SolanaChain implements ChainPort {
       // a stock whose issuer paused transfers has no venue until the pause ends: orders on it WAIT (skipped, not failed) and trades say why
       const halt = [p.inMint, p.outMint].find(m => paused.has(m)); if (halt) { this.state.venues.delete(id); this.jupiterError = `${halt}: transfers are paused by the issuer`; continue; }
       try {
-        const q = await fetchJupiterQuote({ inputMint: p.inMint, outputMint: p.outMint, amount: p.refAmount, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
+        const q = await fetchJupiterQuote({ inputMint: p.inMint, outputMint: p.outMint, amount: p.refAmount, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl, apiKey: j.apiKey, timeoutMs: j.timeoutMs });
         this.state.venues.set(id, new JupiterVenue(id, p.inMint, p.outMint, this.cfg.wsol, p.refAmount, q.outAmount, Math.round(Math.abs(q.priceImpactPct) * 100), q.contextSlot));
       } catch (e) { this.state.venues.delete(id); this.jupiterError = (e as Error).message; }
     }

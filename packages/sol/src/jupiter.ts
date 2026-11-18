@@ -3,11 +3,13 @@
  *  the legacy one in tx.ts; that is NOT implemented. Treat the result as a benchmark or a second opinion on price, never as something the engine can sign. */
 export interface JupiterQuote { inputMint: string; outputMint: string; inAmount: bigint; outAmount: bigint; minOut: bigint; slippageBps: number; priceImpactPct: number; contextSlot: number; route: { label: string; percent: number; ammKey: string }[] }
 export const JUPITER_QUOTE_URL = 'https://lite-api.jup.ag/swap/v1/quote';
+/** With an API key (x-api-key): the keyed host, at the key's rate limit instead of the keyless one. */
+export const JUPITER_KEYED_QUOTE_URL = 'https://api.jup.ag/swap/v1/quote';
 
-export async function fetchJupiterQuote(o: { inputMint: string; outputMint: string; amount: bigint; slippageBps?: number; fetchFn?: typeof fetch; url?: string; timeoutMs?: number }): Promise<JupiterQuote> {
+export async function fetchJupiterQuote(o: { inputMint: string; outputMint: string; amount: bigint; slippageBps?: number; fetchFn?: typeof fetch; url?: string; timeoutMs?: number; /** Jupiter API key: sent as x-api-key, and the keyed host is used unless `url` is given. */ apiKey?: string }): Promise<JupiterQuote> {
   const slip = o.slippageBps ?? 50; if (!(o.amount > 0n)) throw new Error('amount must be positive');
-  const u = new URL(o.url ?? JUPITER_QUOTE_URL); u.search = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), slippageBps: String(slip), restrictIntermediateTokens: 'true' }).toString();
-  const res = await (o.fetchFn ?? fetch)(u.toString(), { signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
+  const u = new URL(o.url ?? (o.apiKey ? JUPITER_KEYED_QUOTE_URL : JUPITER_QUOTE_URL)); u.search = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), slippageBps: String(slip), restrictIntermediateTokens: 'true' }).toString();
+  const res = await (o.fetchFn ?? fetch)(u.toString(), { headers: o.apiKey ? { 'x-api-key': o.apiKey } : {}, signal: AbortSignal.timeout(o.timeoutMs ?? 15_000) });
   if (!res.ok) throw new Error(`Jupiter quote failed: HTTP ${res.status}`);
   const j: any = await res.json(); if (j?.error) throw new Error(`Jupiter quote error: ${String(j.error).slice(0, 200)}`);
   if (j.inputMint !== o.inputMint || j.outputMint !== o.outputMint) throw new Error('Jupiter answered for a different pair than requested: refusing it');

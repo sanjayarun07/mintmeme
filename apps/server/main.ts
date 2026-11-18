@@ -9,6 +9,7 @@
  *    SOLANA_SAMPLE_URL   optional, e.g. http://127.0.0.1:3000: serve the /solana test page (and its /api/sol/* calls) from that running terminal, to THIS machine only
  *    PG_URL              optional: postgres://user:pass@host:5432/db?sslmode=require   stored trade history and audit log (/v1/records/*, the status page)
  *    MAX_USERS_PER_APP=10000   end users one app key may create;  WEBHOOKS_ALLOW_HTTP=true only for local testing (http and private hosts as webhook targets)
+ *    JUPITER_API_KEY     optional: Jupiter's API key (x-api-key) for route building, quotes and prices in MODE=solana-mainnet; keyless (about 1 request / 2 s) without it
  *    PLATFORM_FEE_WALLET + PLATFORM_FEE_BPS=0..100   the operator's fee on every real trade (paid in SOL);  APP_FEE_MAX_BPS=100   the most an app may set with PUT /v1/app/fees
  *  MODE: `practice` (simulated chain, fake funds), `solana-mainnet` (REAL funds: each user links their Privy wallet; needs PRIVY_* and SOLANA_RPC_URL or ALCHEMY_API_KEY)
  *        or `base-mainnet` (REAL funds on Base, Uniswap V2, plus Relay for tokens with no V2 pool (BASE_RELAY=off turns it off, RELAY_API_KEY): each user links their Privy Ethereum wallet; needs PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID,
@@ -55,7 +56,7 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
   const appFee = (app: string) => { const h = cache.get(app); if (h && Date.now() - h.at < 30_000) return h.v; const v = readAppFee(fr, ns, app); cache.set(app, { at: Date.now(), v }); return v; };
   const fees = (userId: string): FeeRecipient[] => { const out: FeeRecipient[] = []; if (pbps > 0) out.push({ address: pw!, bps: pbps });
     const i = userId.indexOf(':'); if (i > 0) { const f = appFee(userId.slice(0, i)); if (f && f.bps > 0) out.push({ address: f.wallet, bps: f.bps }); } return out; };
-  const acc = solanaAccounts({ rpcUrl, privy: privy!, fees });
+  const acc = solanaAccounts({ rpcUrl, privy: privy!, fees, jupiterApiKey: e.JUPITER_API_KEY?.trim() || undefined });
   // status page checks: reachability of what real trading depends on (no secrets in what is shown)
   const statusChecks = [
     { name: 'Solana RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },

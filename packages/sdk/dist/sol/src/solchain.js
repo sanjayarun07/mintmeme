@@ -3,7 +3,7 @@ import { base58, ataAddress, createAtaIdempotent, systemTransfer, syncNative, cl
 import { RaydiumVenue, loadPoolKeys, decodePoolState, AMM_STATUS_SWAP } from './raydium.js';
 import { readStockStates, findStock } from './stocks.js';
 import { fetchBuild, fetchRoutableProgramIds, compileV0, parseMessage, resolveMessage, decodeTable, gateInstructions, walletTokenAccountsAtRisk, unsignedV0, wireV0, JupiterVenue, JupiterRefused } from './jupiterswap.js';
-import { fetchJupiterQuote, JUPITER_QUOTE_URL } from './jupiter.js';
+import { fetchJupiterQuote } from './jupiter.js';
 import { fetchRfqOrder, gateRfq, encodeRfqRaw, decodeRfqRaw, rfqWire, executeRfq, RFQ_NOT_SENT } from './jupiterz.js';
 import { PriorityFees, limitFromSimulation, clampPrice, PRIORITY_DEFAULTS, feeTransfers } from './priorityfee.js';
 import { PROGRAMS, pubkeyBytes, COMPUTE_BUDGET } from './tx.js';
@@ -199,7 +199,7 @@ export class SolanaChain {
             notes.push('Jupiter routing is not configured on this chain');
         else
             try {
-                const ref = o.refLamports ?? 50000000n, q = await fetchJupiterQuote({ inputMint: this.cfg.wsol, outputMint: mint, amount: ref, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
+                const ref = o.refLamports ?? 50000000n, q = await fetchJupiterQuote({ inputMint: this.cfg.wsol, outputMint: mint, amount: ref, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl, apiKey: j.apiKey, timeoutMs: j.timeoutMs });
                 if (q.outAmount > 0n) {
                     const add = (inMint, outMint, refAmount) => { if (!j.pairs.some(p => p.inMint === inMint && p.outMint === outMint))
                         j.pairs.push({ inMint, outMint, refAmount }); };
@@ -232,7 +232,7 @@ export class SolanaChain {
                 continue;
             }
             try {
-                const q = await fetchJupiterQuote({ inputMint: p.inMint, outputMint: p.outMint, amount: p.refAmount, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl ?? JUPITER_QUOTE_URL, timeoutMs: j.timeoutMs });
+                const q = await fetchJupiterQuote({ inputMint: p.inMint, outputMint: p.outMint, amount: p.refAmount, slippageBps: 50, fetchFn: j.fetchFn, url: j.quoteUrl, apiKey: j.apiKey, timeoutMs: j.timeoutMs });
                 this.state.venues.set(id, new JupiterVenue(id, p.inMint, p.outMint, this.cfg.wsol, p.refAmount, q.outAmount, Math.round(Math.abs(q.priceImpactPct) * 100), q.contextSlot));
             }
             catch (e) {

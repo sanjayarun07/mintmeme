@@ -104,11 +104,11 @@ export async function simpleBody(path, b, o) {
     return x;
 }
 /** A shared SOL/USD source (one cache for many Traders). */
-export function jupiterSolUsd(ttlMs = 30_000) {
+export function jupiterSolUsd(ttlMs = 30_000, /** Jupiter API key (optional): the keyed host and its rate limit. */ apiKey) {
     let cache, inflight;
     return async () => {
         if (!cache || Date.now() - cache.at > ttlMs)
-            inflight ??= fetchJupiterQuote({ inputMint: WSOL_MINT, outputMint: USDC, amount: 1000000000n, slippageBps: 50, timeoutMs: 8000 })
+            inflight ??= fetchJupiterQuote({ inputMint: WSOL_MINT, outputMint: USDC, amount: 1000000000n, slippageBps: 50, timeoutMs: 8000, apiKey })
                 .then(q => { const v = Number(q.outAmount) / 1e6; if (v > 0)
                 cache = { price: v, at: Date.now() }; }).catch(() => { }).finally(() => { inflight = undefined; });
         if (inflight)
@@ -146,7 +146,7 @@ export async function createSolanaTrader(o) {
         else
             why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why;
     }
-    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+    const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
     const policies = new Map(), owners = new Map();
     if (o.address) {
         owners.set(o.address, 'x');
@@ -180,7 +180,7 @@ export async function createSolanaTrader(o) {
             p.dailyLimit[mint] = BIG;
         }
     };
-    const usd = o.solUsd ?? jupiterSolUsd();
+    const usd = o.solUsd ?? jupiterSolUsd(30_000, o.jupiterApiKey);
     const trader = new Trader({ engine, chain, userId: o.userId, venues, state, usd: { quoteUsd: usd, quoteDecimals: 9, tokenDecimals: decimals, maxAgeMs: 120_000 },
         // every tick: fresh pool state for the triggers, and venues for tokens of orders restored from storage (nobody has asked for them since the restart)
         advanceChain: async () => { syncFees(); await chain.refresh('venues'); for (const x of trader.listOrders({ status: 'active' }))

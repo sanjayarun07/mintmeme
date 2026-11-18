@@ -43,6 +43,9 @@ export interface SolanaTraderOptions {
   /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
    *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
   mevProtection?: boolean | MevOptions;
+  /** Jupiter API key (optional; your key from Jupiter's portal). Sent as x-api-key on route building, quotes and SOL/USD, so trades are not held to the keyless
+   *  rate limit (about one request every 2 seconds). Without it everything still works, keyless. */
+  jupiterApiKey?: string;
   log?: (m: string) => void;
 }
 export interface SolanaTrader { trader: Trader; chain: SolanaChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
@@ -87,10 +90,10 @@ export async function simpleBody(path: string, b: any, o: { address?: string; de
 }
 
 /** A shared SOL/USD source (one cache for many Traders). */
-export function jupiterSolUsd(ttlMs = 30_000) {
+export function jupiterSolUsd(ttlMs = 30_000, /** Jupiter API key (optional): the keyed host and its rate limit. */ apiKey?: string) {
   let cache: { price: number; at: number } | undefined, inflight: Promise<void> | undefined;
   return async () => {
-    if (!cache || Date.now() - cache.at > ttlMs) inflight ??= fetchJupiterQuote({ inputMint: WSOL_MINT, outputMint: USDC, amount: 1_000_000_000n, slippageBps: 50, timeoutMs: 8000 })
+    if (!cache || Date.now() - cache.at > ttlMs) inflight ??= fetchJupiterQuote({ inputMint: WSOL_MINT, outputMint: USDC, amount: 1_000_000_000n, slippageBps: 50, timeoutMs: 8000, apiKey })
       .then(q => { const v = Number(q.outAmount) / 1e6; if (v > 0) cache = { price: v, at: Date.now() }; }).catch(() => {}).finally(() => { inflight = undefined; });
     if (inflight) await inflight; return cache ?? null;
   };
@@ -110,7 +113,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   if (!o.address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(o.address);   // throws when Privy is unreachable: nothing can be signed, so the caller should retry rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[o.address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
-  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [] }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (o.address) { owners.set(o.address, 'x'); policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });
@@ -122,7 +125,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   const prepare = async (mint: string) => { if (added.has(mint) || mint === NATIVE || mint === WSOL_MINT) return; if (!looksLikeMint(mint)) throw new SdkError('bad_token', 'token must be a Solana mint address');
     try { await chain.addToken(mint); } catch (e) { throw new SdkError('no_route', `this token cannot be traded: ${(e as Error).message}`, 'Check the mint address.'); }
     added.add(mint); for (const p of policies.values()) { p.maxPerTx[mint] = BIG; p.dailyLimit[mint] = BIG; } };
-  const usd = o.solUsd ?? jupiterSolUsd();
+  const usd = o.solUsd ?? jupiterSolUsd(30_000, o.jupiterApiKey);
   const trader: Trader = new Trader({ engine, chain, userId: o.userId, venues, state, usd: { quoteUsd: usd, quoteDecimals: 9, tokenDecimals: decimals, maxAgeMs: 120_000 },
     // every tick: fresh pool state for the triggers, and venues for tokens of orders restored from storage (nobody has asked for them since the restart)
     advanceChain: async () => { syncFees(); await chain.refresh('venues'); for (const x of trader.listOrders({ status: 'active' })) if (!added.has(x.token)) await prepare(x.token).catch(e => log(`${o.userId}: ${x.token}: ${(e as Error).message}`)); } });

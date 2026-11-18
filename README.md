@@ -36,6 +36,7 @@ npm test                    # unit, HTTP and cluster tests (cluster tests need a
 | `REDIS_URL`, `NODE_PUBLIC_URL`, `API_KEYS_FILE` | execution server (`npm run server`) | See the server section. |
 | `PRIVY_APP_SECRET`, `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`, `PRIVY_SOLANA_POLICY_ID` | delegated signing: `/solana` automatic trading and `MODE=solana-mainnet` | Secrets: `.env` only. Steps in the custody section's setup checklist. |
 | `PRIVY_BASE_POLICY_ID`, `BASE_RPC_URL` | `MODE=base-mainnet` | The Base policy (custody section → Base policy rules). `BASE_RPC_URL` defaults to Alchemy with `ALCHEMY_API_KEY` (enable Base on the Alchemy app). |
+| `JUPITER_API_KEY`, `RELAY_API_KEY` | Jupiter (Solana routes, quotes, prices, JupiterZ, the RFQ Desk) and Relay (Base) | Optional but recommended: without them each service holds you to its keyless rate limit. Get them from Jupiter's and Relay's developer portals. |
 | `STOCKS_ENABLED` | buying tokenized stocks through `MODE=solana-mainnet` | Off by default. No issuer offers them to US persons: set `1` only behind your own eligibility checks. [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §4.9, [`docs/XSTOCKS.md`](docs/XSTOCKS.md). |
 
 Optional tools: Redis (cluster tests and the server), Solana CLI with `solana-test-validator` (`verify:sol-guard`), Foundry's `anvil` (`verify:evm`), Docker (3-node stack).

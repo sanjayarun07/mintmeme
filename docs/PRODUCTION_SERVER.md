@@ -133,6 +133,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS` | none, 0 | The operator's fee on every real trade, paid in SOL inside the trade (0 to 100 bps; SDK_AND_API.md 4.8). |
 | `APP_FEE_MAX_BPS` | 100 | The most an app may charge its users with `PUT /v1/app/fees`. |
 | `WEBHOOKS_ALLOW_HTTP` | false | Local testing only: allow http and private hosts as webhook targets. |
+| `JUPITER_API_KEY` | none | `MODE=solana-mainnet`: Jupiter's API key, sent as `x-api-key` on route building, quotes, SOL/USD and share prices. Without it the node is held to Jupiter's keyless rate limit (about one request every 2 seconds) across all its users. |
 | `STOCKS_ENABLED` | off | `1` lets users of a `solana-mainnet` server **buy** tokenized stocks (SDK_AND_API.md 4.9). Off: stock buys fail with `stocks_disabled` 403; sells always work. No issuer offers these tokens to US persons: enable only behind your own eligibility checks. |
 | `BASE_RPC_URL`, `PRIVY_BASE_POLICY_ID`, `BASE_MAX_TRADE_ETH`, `BASE_DAILY_CAP_ETH` | Alchemy, none, 0.01, 0.05 | `MODE=base-mainnet` (section above). |
 | `RELAY_API_KEY`, `BASE_RELAY` | none, on | `MODE=base-mainnet`: Relay's API key (needed for production; Relay's docs say from 2 Oct 2026), and `BASE_RELAY=off` to trade only Uniswap V2 pools. |

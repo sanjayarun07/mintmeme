@@ -44,7 +44,8 @@ export declare class JupiterStockPrices {
         fetchFn?: typeof fetch;
         ttlMs?: number;
         timeoutMs?: number;
-        now?: () => number;
+        now?: () => number; /** Jupiter API key: x-api-key on the keyed host (api.jup.ag) unless `url` is given. */
+        apiKey?: string;
     });
     get(mints: string[]): Promise<Map<string, StockPrice>>;
 }

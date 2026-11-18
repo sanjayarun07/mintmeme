@@ -38,6 +38,9 @@ export interface SolanaTraderOptions {
     /** MEV protection (off by default): send every trade privately through Jito with a tip from the live tip floor (75th percentile, at most `maxTipLamports`, default
      *  0.0001 SOL), revert protection and the jitodontfront sandwich flag (packages/sol/src/submitter.ts). `jito` passes block-engine options (region URL, uuid, tests). */
     mevProtection?: boolean | MevOptions;
+    /** Jupiter API key (optional; your key from Jupiter's portal). Sent as x-api-key on route building, quotes and SOL/USD, so trades are not held to the keyless
+     *  rate limit (about one request every 2 seconds). Without it everything still works, keyless. */
+    jupiterApiKey?: string;
     log?: (m: string) => void;
 }
 export interface SolanaTrader {
@@ -68,7 +71,7 @@ export declare function simpleBody(path: string, b: any, o: {
     };
 }): Promise<any>;
 /** A shared SOL/USD source (one cache for many Traders). */
-export declare function jupiterSolUsd(ttlMs?: number): () => Promise<{
+export declare function jupiterSolUsd(ttlMs?: number, /** Jupiter API key (optional): the keyed host and its rate limit. */ apiKey?: string): () => Promise<{
     price: number;
     at: number;
 } | null>;

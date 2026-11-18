@@ -61,12 +61,12 @@ export interface StockPrice { usdPrice?: number; /** The underlying share price,
 /** Jupiter Price API V3, cached per mint (default 30 s). Failures return an empty map: callers treat "no reference" explicitly. */
 export class JupiterStockPrices {
   private cache = new Map<string, { at: number; p: StockPrice }>();
-  constructor(private o: { url?: string; fetchFn?: typeof fetch; ttlMs?: number; timeoutMs?: number; now?: () => number } = {}) {}
+  constructor(private o: { url?: string; fetchFn?: typeof fetch; ttlMs?: number; timeoutMs?: number; now?: () => number; /** Jupiter API key: x-api-key on the keyed host (api.jup.ag) unless `url` is given. */ apiKey?: string } = {}) {}
   async get(mints: string[]): Promise<Map<string, StockPrice>> {
     const now = (this.o.now ?? Date.now)(), ttl = this.o.ttlMs ?? 30_000, out = new Map<string, StockPrice>(), need: string[] = [];
     for (const m of mints) { const c = this.cache.get(m); if (c && now - c.at < ttl) out.set(m, c.p); else need.push(m); }
     if (need.length) try {
-      const res = await (this.o.fetchFn ?? fetch)(`${this.o.url ?? 'https://lite-api.jup.ag/price/v3'}?ids=${need.join(',')}`, { signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
+      const res = await (this.o.fetchFn ?? fetch)(`${this.o.url ?? (this.o.apiKey ? 'https://api.jup.ag/price/v3' : 'https://lite-api.jup.ag/price/v3')}?ids=${need.join(',')}`, { headers: this.o.apiKey ? { 'x-api-key': this.o.apiKey } : {}, signal: AbortSignal.timeout(this.o.timeoutMs ?? 8000) });
       if (res.ok) { const j: any = await res.json();
         for (const m of need) { const r = j?.[m]; if (!r) continue; const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x > 0 ? x : undefined);
           const p: StockPrice = { usdPrice: n(r.usdPrice), stockPrice: n(r.stockData?.price) }; this.cache.set(m, { at: now, p }); out.set(m, p); } }
