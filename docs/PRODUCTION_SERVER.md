@@ -89,7 +89,7 @@ The Base account code with another network's contracts (`EVM_NETWORKS` in packag
 | Chain | Chain id | DEX | Wrapped native | USD price from | Env |
 |---|---|---|---|---|---|
 | BNB Chain | 56 | PancakeSwap V2 (router `0x10ed43c7…024e`, 0.25% pool fee) | WBNB | WBNB/USDT pool | `BNB_RPC_URL` (or `ALCHEMY_API_KEY` with BNB enabled), `PRIVY_BNB_POLICY_ID`, `BNB_MAX_TRADE_ETH=0.02`, `BNB_DAILY_CAP_ETH=0.1` (in BNB) |
-| Robinhood Chain | 4663 | Uniswap V2 (router `0x89e5db8b…9eba`) | WETH | WETH/USDG pool | `ROBINHOOD_RPC_URL` (or `ALCHEMY_API_KEY` with Robinhood enabled), `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_MAX_TRADE_ETH=0.01`, `ROBINHOOD_DAILY_CAP_ETH=0.05` |
+| Robinhood Chain | 4663 | Uniswap V2 (router `0x89e5db8b…9eba`), and KyberSwap (router `0x6131b5fa…37b5`, chain name `robinhood`) for tokens with no usable V2 pool: `ROBINHOOD_AGGREGATOR=kyberswap` (default) or `off` | WETH | WETH/USDG pool | `ROBINHOOD_RPC_URL` (or `ALCHEMY_API_KEY` with Robinhood enabled), `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_MAX_TRADE_ETH=0.01`, `ROBINHOOD_DAILY_CAP_ETH=0.05` |
 
 Plain units: `bnb` for BNB amounts on BNB Chain (`eth` on Base and Robinhood). Tokens trade only against their V2 pool with the wrapped native coin: Relay and KyberSwap
 are not wired on these chains (`no_route` otherwise). The quote venue is reported as `uniswap-v2` on both (PancakeSwap V2 is a Uniswap V2 fork with a 0.25% fee, which
@@ -194,6 +194,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `CHAINS` | none | Several chains on one server, default first: `solana,base,bnb,robinhood` (section above). Wins over `MODE`. |
 | `BNB_RPC_URL`, `PRIVY_BNB_POLICY_ID`, `BNB_MAX_TRADE_ETH`, `BNB_DAILY_CAP_ETH` | Alchemy, none, 0.02, 0.1 | `bnb` in `CHAINS` (section above; caps in BNB). |
 | `ROBINHOOD_RPC_URL`, `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_MAX_TRADE_ETH`, `ROBINHOOD_DAILY_CAP_ETH` | Alchemy, none, 0.01, 0.05 | `robinhood` in `CHAINS`. |
+| `ROBINHOOD_AGGREGATOR` | kyberswap | `robinhood` in `CHAINS`: `kyberswap` routes tokens with no usable V2 pool through KyberSwap (the Robinhood Privy policy needs the KyberSwap rules with chain id 4663), `off` trades V2 pools only. Relay does not serve this chain. |
 | `MODE` | practice | `practice` (fake funds), `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`) or `base-mainnet` (real funds on Base, Privy Ethereum wallets; needs `PRIVY_BASE_POLICY_ID`). |
 
 **API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it

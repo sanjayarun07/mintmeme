@@ -108,3 +108,16 @@ test('chain with KyberSwap: a sell\'s receipt reads the ETH received from the wa
   (chain as any).cfg.kyber = undefined; (chain as any).cfg.relay = { client: {} };
   assert.equal((await chain.receipt('0xh'))!.deltas[NATIVE], 2_000_000_000n, 'a KyberSwap sell is still recognised after switching aggregator');
 });
+
+// Real KyberSwap builds on Robinhood Chain (chain 4663, chain name 'robinhood'): ETH -> TSLA and TSLA -> ETH, recorded read-only 2026-11-19. The router there is the same
+// address with its own code (13,724 bytes); the calldata decodes the same way, so the same gate applies.
+const RH = JSON.parse(readFileSync(new URL('./kyberfixture-robinhood.json', import.meta.url), 'utf8'));
+test('gateKyber on Robinhood Chain: the real TSLA buy and sell pass; another receiver or a low minimum is refused', () => {
+  for (const s of [RH.buy, RH.sell]) {
+    const b = built(s), c = { wallet: RH.wallet, tokenIn: s.tokenIn, tokenOut: s.tokenOut, amountIn: BigInt(s.amountIn), minOut: decodeKyberSwap(s.data).minReturnAmount };
+    assert.equal(gateKyber(b, c).swap.to, KYBER.router);
+    assert.throws(() => gateKyber(b, { ...c, minOut: c.minOut + 1n }), (e: Error) => e instanceof AggRefused && /on-chain minimum/.test(e.message));
+    assert.throws(() => gateKyber({ ...b, data: swapWord(b.data, RH.wallet.slice(2), '66'.repeat(20)) }, c), (e: Error) => e instanceof AggRefused && /pays 0x6666/.test(e.message));
+  }
+  assert.equal(RH.chainId, 4663);
+});

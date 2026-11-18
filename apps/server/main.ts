@@ -111,10 +111,13 @@ export function evmMode(spec: ChainSpec, e: NodeJS.ProcessEnv) {
   const caps = { maxTradeWei: eth(`${v.capsPrefix}_MAX_TRADE_ETH`, v.maxTradeDefault), dailyCapWei: eth(`${v.capsPrefix}_DAILY_CAP_ETH`, v.dailyCapDefault) };
   if (caps.dailyCapWei < caps.maxTradeWei) throw new Error(`${v.capsPrefix}_DAILY_CAP_ETH must be at least ${v.capsPrefix}_MAX_TRADE_ETH`);
   // Relay routes for tokens without a direct pool (Coinbase stocks on Base): on unless <relayEnv>=off; the Relay API key is sent when set (Relay's docs require one for quotes)
-  const relay = !v.relayEnv || e[v.relayEnv] === 'off' ? false as const : { apiKey: (v.relayKeyEnv && e[v.relayKeyEnv]?.trim()) || undefined };
-  // which aggregator routes tokens with no direct pool: relay (default) or kyberswap (KYBER_CLIENT_ID is sent as x-client-id)
-  const agg = ((v.aggregatorEnv && e[v.aggregatorEnv]?.trim().toLowerCase()) || 'relay') as 'relay' | 'kyberswap';
-  if (agg !== 'relay' && agg !== 'kyberswap') throw new Error(`${v.aggregatorEnv} must be relay or kyberswap`);
+  // which aggregator routes tokens with no direct pool: relay, kyberswap (KYBER_CLIENT_ID is sent as x-client-id) or off; the chain's default when unset
+  const aggRaw = ((v.aggregatorEnv && e[v.aggregatorEnv]?.trim().toLowerCase()) || v.defaultAggregator || 'relay');
+  if (aggRaw !== 'relay' && aggRaw !== 'kyberswap' && aggRaw !== 'off') throw new Error(`${v.aggregatorEnv} must be relay, kyberswap or off`);
+  const agg = aggRaw === 'off' ? 'relay' as const : aggRaw;
+  // routes off when the aggregator is off, or Relay is chosen and turned off (<relayEnv>=off) or not available on this chain (no relayEnv); KyberSwap needs no Relay switch
+  const relayOff = aggRaw === 'off' || (agg === 'relay' && (!v.relayEnv || e[v.relayEnv] === 'off')) || (agg === 'kyberswap' && !!v.relayEnv && e[v.relayEnv] === 'off');
+  const relay = relayOff ? false as const : { apiKey: (v.relayKeyEnv && e[v.relayKeyEnv]?.trim()) || undefined };
   const acc = baseAccounts({ rpcUrl, privy: { ...(c as Record<keyof typeof c, string>), apiUrl: e.PRIVY_API_URL || undefined }, caps, relay, aggregator: agg, kyber: agg === 'kyberswap' ? { clientId: e.KYBER_CLIENT_ID?.trim() || undefined } : undefined, network: v.network });
   const statusChecks = [
     { name: `${spec.label} RPC`, run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); const j: any = await r.json(); if (Number(j.result) !== v.chainId) throw new Error(`the RPC is chain ${Number(j.result)}, not ${v.chainId}`); } },

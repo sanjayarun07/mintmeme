@@ -54,7 +54,7 @@ async function main() {
   const chains: ChainAccounts[] = [];
   if (sol) { const sa = solanaAccounts({ rpcUrl: sol.url, privy: { ...fps.cfg, fetchFn: fps.fetchFn }, venues: ['pump'], solUsd: async () => ({ price: 150, at: Date.now() }) });
     chains.push({ id: 'solana', makeAccount: sa.make, extraRoutes: h => linkRoutes({ privy: sa.privy, status: sa.status, safety: sa.safety, ...h }), legacyMarks: ['solwallet'] }); }
-  EVM.forEach((c, i) => { const acc = baseAccounts({ rpcUrl: forks[i].node.url, privy: { ...fpe[i].cfg, apiUrl: srv[i].url }, relay: false, network: c.id, caps: { maxTradeWei: c.cap, dailyCapWei: c.cap * 5n } });
+  EVM.forEach((c, i) => { const acc = baseAccounts({ rpcUrl: forks[i].node.url, privy: { ...fpe[i].cfg, apiUrl: srv[i].url }, relay: c.id === 'robinhood' ? undefined : false, aggregator: c.id === 'robinhood' ? 'kyberswap' : undefined, network: c.id, caps: { maxTradeWei: c.cap, dailyCapWei: c.cap * 5n } });
     chains.push({ id: c.id, makeAccount: acc.make, extraRoutes: h => baseLinkRoutes({ privy: acc.privy, status: acc.status, chain: c.id, ...h }), legacyMarks: [walletState(c.id)] }); });
   const nodes: { nd: Awaited<ReturnType<typeof createNode>>; url: string }[] = [];
   const mk = async () => { const port = await freePort(), url = `http://127.0.0.1:${port}`; const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: ns, publicUrl: url, keys, chains, leaseTtlMs: 3000, sweepMs: 1000, requireAof: false, log: () => {} }); await nd.listen(port); const x = { nd, url }; nodes.push(x); return x; };
@@ -119,13 +119,26 @@ async function main() {
     await call(other, 'DELETE', '/v1/bnb/wallet');
     const nb = await call(other, 'POST', '/v1/bnb/trades/buy', { token: EVM[1].token, bnb: '0.001', key: 'after-unlink' }), rb = await runEvm(other, 2, '/trades/buy', { token: EVM[2].token, eth: '0.001', slippagePct: 3, key: 'after-unlink' });
     check('M11 unlinking BNB refuses BNB trades (wallet_not_active) and leaves Robinhood trading', nb.j.error?.code === 'wallet_not_active' && rb.t.state === 'finalized', `${JSON.stringify(nb.j).slice(0, 200)} ${rb.t.state} ${rb.t.failure ?? ''}`);
+    // Robinhood's own stock tokens have no usable V2 pool: KyberSwap (the chain's default aggregator) routes them. Its quotes are LIVE mainnet state while this fork is
+    // frozen at its start block, so a route can revert here (the simulation then refuses it and nothing is sent): up to three attempts, each a new trade key.
+    { const TSLA = '0x322f0929c4625ed5bad873c95208d54e1c003b2d', KR = '0x6131b5fae19ea4f9d964eac0408e4408b66337b5';
+      const tb = async () => { const q = erc20.balanceOf(TSLA, evmAddr); return erc20.decodeUint(await forks[2].node.call<string>('eth_call', [{ to: q.to, data: q.data }, 'latest'])); };
+      const tries = async (path: string, body: any) => { let x: any; for (let k = 1; k <= 3; k++) { x = await runEvm(other, 2, path, { ...body, key: `${body.key}-${k}` }); if (x.t.state === 'finalized' || !/simulation|KyberSwap/.test(x.t.failure ?? '')) break; await sleep(3000); } return x; };
+      const t0 = await tb(), kb = await tries('/trades/buy', { token: TSLA, eth: '0.002', slippagePct: 3, key: 'kyber-tsla' }), t1 = await tb();
+      const btx: any = kb.t.txHash ? await forks[2].node.call('eth_getTransactionByHash', [kb.t.txHash]) : null;
+      check('M12 robinhood: buy 0.002 ETH of Robinhood\'s TSLA (no usable V2 pool) through KyberSwap\'s router, gated and simulated, finalized, tokens arrived',
+        kb.t.state === 'finalized' && t1 > t0 && String(btx?.to).toLowerCase() === KR && String(kb.t.venue ?? '').startsWith('kyber:'), `${kb.t.state} ${kb.t.failure ?? ''} venue ${kb.t.venue} to ${btx?.to} tokens ${t0}->${t1}`);
+      const signed = fpe[2].state.signed, n0 = await native(2), ks = await tries('/trades/sell', { token: TSLA, pct: 100, slippagePct: 5, key: 'kyber-tsla-sell' });
+      const stx: any = ks.t.txHash ? await forks[2].node.call('eth_getTransactionByHash', [ks.t.txHash]) : null;
+      check('M13 robinhood: sell 100% of that TSLA through KyberSwap: exact approval of the router + swap signed, tokens gone, ETH back',
+        ks.t.state === 'finalized' && (await tb()) === t0 && (await native(2)) > n0 && String(stx?.to).toLowerCase() === KR && fpe[2].state.signed - signed >= 1, `${ks.t.state} ${ks.t.failure ?? ''} venue ${ks.t.venue} to ${stx?.to} signed ${fpe[2].state.signed - signed}`); }
   } catch (e) { check('run', false, (e as Error).stack ?? String(e)); }
   finally { for (const x of nodes) await x.nd.drain().catch(() => {}); const c = new SyncRedis(); try { for (const k of (c.cmd('KEYS', `${ns}:*`) ?? []) as string[]) c.cmd('DEL', k); } finally { c.close(); } for (const s of stops) try { s(); } catch { /* stopping */ } }
   const pass = checks.every(c => c.pass);
   const text = ['# Execution server, CHAINS=solana,base,bnb,robinhood, on local forks', '', `Run: ${new Date().toISOString()}`,
     'Two nodes, local Redis, one API key. Solana: solana-test-validator with pump.fun and one live curve cloned. Base, BNB Chain, Robinhood Chain: anvil forks of mainnet. Privy stand-ins (one policy per chain). NOT mainnet. Fake funds, throwaway keys.', '',
     `Result: **${pass ? 'PASS' : 'FAIL'}** (${checks.filter(c => c.pass).length}/${checks.length} checks)`, '', ...checks.map(c => `- ${c.pass ? 'pass' : 'FAIL'}: ${c.name}${c.pass ? '' : ` (${c.detail.slice(0, 300)})`}`), '',
-    '## Not covered', '- Real Privy (its policy engine) and real chains: a tiny mainnet trade per chain, approved by the user, covers them.', '- Aggregators (Relay, KyberSwap) on BNB and Robinhood: those chains trade on their V2 pools only.'].join('\n');
+    '## Not covered', '- Real Privy (its policy engine) and real chains: a tiny mainnet trade per chain, approved by the user, covers them.', '- Relay and KyberSwap on BNB; Relay on Robinhood (KyberSwap on Robinhood is covered: M12, M13): those chains trade on their V2 pools only.'].join('\n');
   mkdirSync('docs/live-verification', { recursive: true }); const file = `docs/live-verification/${new Date().toISOString().replace(/[:.]/g, '-')}-server-multi.md`; writeFileSync(file, text + '\n');
   console.log(`\n${pass ? 'PASS' : 'FAIL'}: ${checks.filter(c => c.pass).length}/${checks.length}. Report: ${file}`); process.exit(pass ? 0 : 1);
 }

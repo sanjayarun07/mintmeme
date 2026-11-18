@@ -43,7 +43,7 @@ export const EVM_NETWORKS: Record<string, EvmNetwork> = {
   // Robinhood Chain (Arbitrum Nitro, ETH gas), Uniswap V2 against WETH; ETH/USD from the WETH/USDG (Paxos Global Dollar, 6 decimals) pool
   robinhood: { id: 'robinhood', label: 'Robinhood Chain', engineChain: 'robinhood-main', chainId: 4663, router: '0x89e5db8b5aa49aa85ac63f691524311aeb649eba', factory: '0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f',
     weth: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', native: 'ETH', dex: 'Uniswap V2', usd: { token: '0x5fc5360d0400a0fd4f2af552add042d716f1d168', decimals: 6, pair: '0x8803c117ccae7b5146297876c2a25df135141c4d' },
-    finalityDepth: 10, relay: false },
+    finalityDepth: 10, relay: false, kyberChain: 'robinhood' },   // KyberSwap 'robinhood': router 0x6131…37b5 has code here (13,724 bytes), builds decode as on Base (2026-11-19)
 };
 /** Defaults: at most 0.01 ETH per buy and 0.05 ETH of buys per day. The Privy policy should cap the value separately. */
 export const BASE_DEFAULT_CAPS = { maxTradeWei: 10n ** 16n, dailyCapWei: 5n * 10n ** 16n };

@@ -55,7 +55,9 @@ test('buildChains: each chain names the settings it is missing; EVM chains read 
   assert.deepEqual(b.chains.map(c => [c.id, c.legacyMarks]), [['base', ['basewallet']], ['bnb', ['bnbwallet']], ['robinhood', ['robinhoodwallet']]]);
   assert.deepEqual(b.statusChecks.map(c => c.name), ['Base mainnet RPC', 'Privy', 'BNB Chain RPC', 'Robinhood Chain RPC'], 'Privy is checked once');
   assert.throws(() => buildChains({ ...env, BNB_MAX_TRADE_ETH: '1', BNB_DAILY_CAP_ETH: '0.5' }), /BNB_DAILY_CAP_ETH must be at least/);
-  assert.throws(() => buildChains({ ...env, BASE_AGGREGATOR: 'uniswap' }), /BASE_AGGREGATOR must be relay or kyberswap/);
+  assert.throws(() => buildChains({ ...env, BASE_AGGREGATOR: 'uniswap' }), /BASE_AGGREGATOR must be relay, kyberswap or off/);
+  assert.throws(() => buildChains({ ...env, ROBINHOOD_AGGREGATOR: 'relay2' }), /ROBINHOOD_AGGREGATOR must be relay, kyberswap or off/, 'Robinhood has its own aggregator setting (default kyberswap)');
+  assert.doesNotThrow(() => buildChains({ ...env, ROBINHOOD_AGGREGATOR: 'off', BASE_AGGREGATOR: 'kyberswap' }));
 });
 
 let up = false; try { const c = new SyncRedis('redis://127.0.0.1:6379', 1500); up = c.cmd('PING') === 'PONG'; c.close(); } catch { up = false; }
