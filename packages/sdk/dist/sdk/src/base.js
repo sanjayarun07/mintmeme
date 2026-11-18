@@ -225,7 +225,7 @@ export async function createBaseTrader(o) {
     const active = signable.size > 0;
     const balance = async (t) => { const q = erc20.balanceOf(lc(t), address); return erc20.decodeUint(await rpc.call('eth_call', [{ to: q.to, data: q.data }, 'latest'])); };
     const simple = async (path, body) => { const b = body && typeof body === 'object' && typeof body.token === 'string' && body.token !== NATIVE ? { ...body, token: lc(body.token) } : body; return simpleBody(path, b, { address, decimals, balance, native: { key: net.native.toLowerCase(), decimals: 18 } }); };
-    return { trader, chain, active, why, prepare, simple, sync: async () => { await chain.refresh('venues'); },
+    return { trader, chain, active, why, prepare, simple, decimals, sync: async () => { await chain.refresh('venues'); },
         refuseIfInactive: () => { if (!active)
             throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', `Link a Privy wallet that allows this server (signer + ${NET} policy).`, 409); } };
 }

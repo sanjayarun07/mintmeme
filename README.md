@@ -205,6 +205,7 @@ The server checks every transaction Privy signs, field by field, against what it
 
 Limits:
 - Uniswap V2 pools against WETH directly. A token with no V2 pool, or only a thin one (most Base memecoins and Coinbase's stock tokens, on Uniswap V3/V4 or Aerodrome), goes through an aggregator instead: Relay by default, or KyberSwap with `BASE_AGGREGATOR=kyberswap`. Each aggregator transaction is gated (Relay: its pinned contracts and the reviewed inner swap contracts; KyberSwap: its pinned router and the decoded swap), then simulated with `eth_simulateV1`. A token with neither is refused with `no_route`.
+- **Coinbase stocks** (NVDAc, TSLAc and 8 more, `packages/evm/src/basestocks.ts`): name them by symbol or ticker (`"token": "TSLAc"`, `"stock": "TSLA"`). Buying them needs `STOCKS_ENABLED=1` on the server (off by default; no issuer offers them to US persons), selling always works. A stock trade must fill within 3% of the share price (Jupiter's price for the same ticker), or it is refused with `bad_price`; `allowRiskyToken: true` skips that check.
 - A Relay sell's ETH is read from the wallet's balance change in its block. If the wallet's other transactions in that block are anything but approvals or self-sends, the trade waits instead of guessing.
 - No token safety check and no fee sharing on Base yet.
 - Base has no public mempool, so there is no MEV setting.

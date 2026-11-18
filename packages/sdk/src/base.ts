@@ -103,6 +103,8 @@ export interface BaseTraderOptions {
   network?: string | EvmNetwork;
 }
 export interface BaseTrader { trader: Trader; chain: EvmRpcChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;
+  /** A token's decimals, read on chain once and cached (18 for the native coin). */
+  decimals: (token: string) => Promise<number>;
   /** Plain units for one API call: `token` (0x address), `eth` for ETH amounts, `tokens` or `pct` to sell, `price` in ETH per token or `priceUsd`, `slippagePct` ... */
   simple: (path: string, body: any) => Promise<any> }
 
@@ -174,6 +176,6 @@ export async function createBaseTrader(o: BaseTraderOptions): Promise<BaseTrader
   const active = signable.size > 0;
   const balance = async (t: string) => { const q = erc20.balanceOf(lc(t), address!); return erc20.decodeUint(await rpc.call<string>('eth_call', [{ to: q.to, data: q.data }, 'latest'])); };
   const simple = async (path: string, body: any) => { const b = body && typeof body === 'object' && typeof body.token === 'string' && body.token !== NATIVE ? { ...body, token: lc(body.token) } : body; return simpleBody(path, b, { address, decimals, balance, native: { key: net.native.toLowerCase(), decimals: 18 } }); };
-  return { trader, chain, active, why, prepare, simple, sync: async () => { await chain.refresh('venues'); },
+  return { trader, chain, active, why, prepare, simple, decimals, sync: async () => { await chain.refresh('venues'); },
     refuseIfInactive: () => { if (!active) throw new SdkError('wallet_not_active', why ?? 'no wallet can sign for this account', `Link a Privy wallet that allows this server (signer + ${NET} policy).`, 409); } };
 }

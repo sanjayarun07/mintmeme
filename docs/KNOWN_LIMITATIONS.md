@@ -55,7 +55,7 @@ After the 2026-11-18 review: `npm test` 465 of 466 pass (the Postgres test is sk
 16. The package archive `memedesk-sdk-0.1.0.tgz` is not rebuilt automatically: run `npm run pack:sdk` after source changes.
 
 ## Execution server (`apps/server`)
-17. Real accounts on Solana (`MODE=solana-mainnet`) and Base (`MODE=base-mainnet`); each user links a Privy wallet. Solana: local validator with two nodes, and small mainnet buys through the API. Base: local Base fork (15 checks) and two small mainnet buys; Uniswap V2 WETH pools and Relay (same-chain), or KyberSwap instead (`BASE_AGGREGATOR=kyberswap`: fork-tested 15 of 15, no mainnet trade through it yet), no token safety check, no fee sharing on Base. Orders, sells and failover through the server not yet on mainnet. One server runs one mode. See `docs/PRODUCTION_SERVER.md` for what was measured
+17. Real accounts on Solana (`MODE=solana-mainnet`) and Base (`MODE=base-mainnet`); each user links a Privy wallet. Solana: local validator with two nodes, and small mainnet buys through the API. Base: local Base fork (15 checks) and two small mainnet buys; Uniswap V2 WETH pools and Relay (same-chain), or KyberSwap instead (`BASE_AGGREGATOR=kyberswap`: fork-tested 15 of 15, no mainnet trade through it yet), no token safety check, no fee sharing on Base. Coinbase stocks on Base: ticker lookup, the STOCKS_ENABLED switch and the 3% share-price check, checked read-only on mainnet; no real stock trade since the NVDAc buy. Orders, sells and failover through the server not yet on mainnet. One server runs one mode. See `docs/PRODUCTION_SERVER.md` for what was measured
     (failover 1 s graceful, 15 s after a crash) and its other limits (per-node rate limits, no throughput test).
 
 ## Solana test UI (`/solana`)

@@ -111,6 +111,8 @@ export interface BaseTrader {
     prepare: (token: string) => Promise<void>;
     sync: () => Promise<void>;
     refuseIfInactive: () => void;
+    /** A token's decimals, read on chain once and cached (18 for the native coin). */
+    decimals: (token: string) => Promise<number>;
     /** Plain units for one API call: `token` (0x address), `eth` for ETH amounts, `tokens` or `pct` to sell, `price` in ETH per token or `priceUsd`, `slippagePct` ... */
     simple: (path: string, body: any) => Promise<any>;
 }
