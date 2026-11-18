@@ -29,8 +29,10 @@ export declare const PROGRAMS: {
     system: string;
     token: string;
     ata: string;
+    token2022: string;
 };
-export declare const ataAddress: (owner: string, mint: string) => string;
+/** The associated token account of `owner` for `mint`. The token program is part of the seeds: pass Token-2022 for a Token-2022 mint (xStocks, newer pump.fun mints). */
+export declare const ataAddress: (owner: string, mint: string, tokenProgram?: string) => string;
 export declare const createAtaIdempotent: (payer: string, owner: string, mint: string) => Ix;
 export declare const systemTransfer: (from: string, to: string, lamports: bigint) => Ix;
 export declare const syncNative: (account: string) => Ix;

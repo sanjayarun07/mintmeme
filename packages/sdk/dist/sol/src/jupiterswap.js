@@ -7,7 +7,7 @@
  *   - Swap API V2 base URL, `/build` request/response shape, keyless limit 0.5 requests/s, `x-api-key` header: https://developers.jup.ag/docs/swap/build/index.md and https://developers.jup.ag/docs/swap/index.md
  *   - DEX program ids Jupiter can route through (112 on the day): `GET https://api.jup.ag/swap/v2/program-id-to-label` (https://developers.jup.ag/docs/api-reference/swap/program-id-to-label.md). Fetched live and cached; if it cannot be fetched we REFUSE to trade.
  *   - Jupiter v6 swap aggregator program `JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4`: named in https://developers.jup.ag/docs/swap/routing/rfq/v2/streaming.md ("the Jupiter v6 swap aggregator program"), and it is what `/build` returned as `swapInstruction.programId`.
- *  What is NOT done: no Jito/tips (tipInstruction is refused), no Token-2022 (refused), no platform fee, priority fee: the compute-unit limit is set from our simulation and the price from priorityfee.ts (or Jupiter's, capped) by SolanaChain, no `/execute` or `/submit` (we send through our own node).
+ *  What is NOT done: no Jito/tips (tipInstruction is refused), Token-2022 associated token accounts only for mints the chain says are Token-2022, no platform fee, priority fee: the compute-unit limit is set from our simulation and the price from priorityfee.ts (or Jupiter's, capped) by SolanaChain, no `/execute` or `/submit` (we send through our own node).
  *  The gate cannot read the aggregator's instruction data, so protection for the swap itself is (a) the on-chain slippage we pass, set so Jupiter's own minimum output is >= the engine's minOut, and (b) the simulated balance check. */
 import { b58decode, base58, cat, pubkeyBytes, shortvec, ataAddress, PROGRAMS, COMPUTE_BUDGET, u64le, u32le } from './tx.js';
 export const JUPITER = {
@@ -245,10 +245,12 @@ export function gateInstructions(ixs, c) {
                 refuse('unexpected associated-token-account instruction');
             if (k.length < 6 || k[0] !== c.wallet || k[2] !== c.wallet)
                 refuse('an associated token account may only be created by and for our wallet');
-            if (k[1] !== ataAddress(c.wallet, k[3]))
+            // Token-2022 only for a mint the chain says is owned by Token-2022 (c.token2022): the traded xStock, or a Token-2022 token the route passes through. Still created by and for our wallet.
+            const t22 = k[5] === PROGRAMS.token2022 && !!c.token2022?.has(k[3]);
+            if (k[4] !== PROGRAMS.system || (k[5] !== PROGRAMS.token && !t22))
+                refuse('associated token accounts must use the System and classic Token programs (Token-2022 only for a mint the chain says is Token-2022)');
+            if (k[1] !== ataAddress(c.wallet, k[3], k[5]))
                 refuse('associated token account address does not match its mint and owner');
-            if (k[4] !== PROGRAMS.system || k[5] !== PROGRAMS.token)
-                refuse('associated token accounts must use the System and classic Token programs (Token-2022 is not supported)');
             created.push(k[1]);
             if (k[3] !== c.wsol)
                 createdNonWsol++;

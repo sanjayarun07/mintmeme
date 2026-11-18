@@ -8,3 +8,6 @@ export * from './rpcchain.js';
 export * from './leaderwatch.js';
 export * from './v2launch.js';
 export * from './httpsigner.js';
+export * from './secp256k1.js';
+export * from './aggregator.js';
+export * from './relay.js';

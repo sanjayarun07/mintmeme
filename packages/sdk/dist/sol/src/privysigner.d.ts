@@ -10,6 +10,8 @@ export interface PrivyConfig {
     apiUrl?: string;
     fetchFn?: typeof fetch;
     timeoutMs?: number;
+    /** Which wallets this client works with: 'solana' (default, method signTransaction) or 'ethereum' (EVM chains such as Base, method eth_signTransaction). */
+    chainType?: 'solana' | 'ethereum';
 }
 /** RFC 8785 JSON canonicalization for the values Privy requests carry (objects, arrays, strings, integers, booleans, null). Keys sort by UTF-16 code units, as JS sort does. */
 export declare function canonical(v: unknown): string;
@@ -24,7 +26,10 @@ export declare class PrivyApi {
     private base;
     constructor(c: PrivyConfig);
     private req;
-    /** The Privy wallet with this Solana address, or undefined when this app has none. */
+    get chainType(): "ethereum" | "solana";
+    /** The method this client signs with (what the policy must ALLOW). */
+    get signMethod(): "eth_signTransaction" | "signTransaction";
+    /** The Privy wallet with this address (Solana, or 0x for ethereum: compared without case), or undefined when this app has none. */
     walletByAddress(address: string): Promise<{
         id: string;
         address: string;
@@ -43,6 +48,8 @@ export declare class PrivyApi {
     }>;
     /** Privy signs a serialized transaction (base64, signatures zeroed) and returns it signed. */
     signTransaction(walletId: string, txBase64: string): Promise<string>;
+    /** EVM: Privy signs an unsigned type-2 transaction (fields as in @privy-io/api-types UnsignedStandardEthereumTransaction) and returns the signed RLP hex. */
+    signEthTransaction(walletId: string, transaction: Record<string, string | number>): Promise<string>;
 }
 /** A SolSigner backed by Privy. `wallets` maps each address it may sign for to its Privy wallet id (checked with PrivyApi.delegation first). */
 export declare class PrivySolSigner implements SolSigner {

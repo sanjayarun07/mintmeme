@@ -35,6 +35,7 @@ const BUY_PATHS = new Set(['/v1/trades/buy', '/v1/orders/limit-buy']);
  *  `slippagePct`, `trailPct`, `tpUsd` / `slUsd`; the wallet defaults to the linked one. Raw fields (`token`, `amount`, `priceE18`, `slippageBps`, ...) still work and win.
  *  `pct` on a sell order is taken from the wallet's balance now. Returns a new body; the input is not changed. */
 export async function simpleBody(path, b, o) {
+    const nat = o.native ?? { key: 'sol', decimals: 9 };
     if (!b || typeof b !== 'object')
         return b;
     const x = { ...b };
@@ -60,8 +61,8 @@ export async function simpleBody(path, b, o) {
     const buying = BUY_PATHS.has(path) || ((path === '/v1/twap' || path === '/v1/quote') && x.side === 'buy');
     const dec = async () => o.decimals(String(x.token));
     if (x.amount === undefined && x.total === undefined) {
-        if (x.sol !== undefined) {
-            const v = toUnits(x.sol, 9, 'sol');
+        if (x[nat.key] !== undefined) {
+            const v = toUnits(x[nat.key], nat.decimals, nat.key);
             if (path === '/v1/twap')
                 x.total = v;
             else
@@ -92,8 +93,8 @@ export async function simpleBody(path, b, o) {
         }
     }
     if (x.priceE18 === undefined && x.priceUsd === undefined && x.price !== undefined)
-        x.priceE18 = toUnits(x.price, 27 - await dec(), 'price'); // SOL per token -> lamports per raw unit x 1e18
-    delete x.sol;
+        x.priceE18 = toUnits(x.price, 18 + nat.decimals - await dec(), 'price'); // native per token -> native raw units per raw token unit x 1e18
+    delete x[nat.key];
     delete x.tokens;
     delete x.pct;
     delete x.price;

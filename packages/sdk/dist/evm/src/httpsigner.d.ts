@@ -1,4 +1,6 @@
 import type { Eip1559Request, RawSigner } from './rpcchain.ts';
+/** Minimal RLP decoder, just enough to read an EIP-1559 transaction. */
+export type Rlp = Uint8Array | Rlp[];
 /** Reads the signed fields of a type-2 transaction. Throws if it is not a well-formed, signed EIP-1559 transaction. */
 export declare function decodeEip1559(raw: string): {
     chainId: bigint;
@@ -10,6 +12,10 @@ export declare function decodeEip1559(raw: string): {
     value: bigint;
     data: string;
 };
+/** RLP encoding of bytes and nested lists (canonical). */
+export declare function rlpEncode(x: Rlp): Uint8Array;
+/** The address that signed a type-2 transaction: recovered from its signature over keccak256(0x02 ‖ rlp(the nine unsigned fields)). */
+export declare function signerOf(raw: string): string;
 /** Compares what the signing service returned with what we asked it to sign. Returns the first difference, or undefined when they agree. */
 export declare function mismatch(raw: string, q: Eip1559Request): string | undefined;
 export interface HttpSignerOpts {

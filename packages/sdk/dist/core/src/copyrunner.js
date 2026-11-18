@@ -51,8 +51,7 @@ export class CopyRunner {
             if (v.status !== 'active' || !(allowed.has(v.id) || allowed.has(v.family)) || !v.supports(quote, token) || !v.spotPriceE18)
                 continue;
             try {
-                const q = v.quote(quote, token, this.d.probeAmount ?? 10n ** 12n);
-                const m = { priceE18: v.spotPriceE18(token, quote), liquidity: q.liquidity };
+                const q = v.quote(quote, token, this.d.probeAmount ?? 10n ** 12n), m = { priceE18: priceOf(v, token, quote), liquidity: q.liquidity };
                 if (!best || m.liquidity > best.liquidity) {
                     best = m;
                     bestV = v;
@@ -135,5 +134,15 @@ export class CopyRunner {
             this.inflight.delete(key);
             this.checkpoint();
         }
+    }
+}
+/** Quote units per token x1e18. A one-direction venue (Jupiter: built quote -> token) only prices its own direction: invert that one. */
+function priceOf(v, token, quote) {
+    try {
+        return v.spotPriceE18(token, quote);
+    }
+    catch {
+        const inv = v.spotPriceE18(quote, token);
+        return inv > 0n ? 10n ** 36n / inv : 0n;
     }
 }

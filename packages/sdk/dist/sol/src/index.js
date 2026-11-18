@@ -15,3 +15,6 @@ export * from './remotesigner.js';
 export * from './privysigner.js';
 export * from './priorityfee.js';
 export * from './tokensafety.js';
+export * from './xstocks.js';
+export * from './stocks.js';
+export * from './jupiterz.js';

@@ -1,3 +1,4 @@
+import { stockByMint } from './xstocks.js';
 const TOKEN = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', TOKEN_2022 = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 /** Token-2022 extensions that do not affect a holder's ability to sell or keep the token. Anything not listed here or handled below is reported as unknown. */
 const HARMLESS = new Set(['metadataPointer', 'tokenMetadata', 'groupPointer', 'tokenGroup', 'groupMemberPointer', 'tokenGroupMember', 'immutableOwner', 'interestBearingConfig', 'scaledUiAmountConfig',
@@ -26,22 +27,43 @@ export class TokenSafety {
         const risks = [], add = (code, level, message) => risks.push({ code, level, message });
         const exts = info.extensions ?? [], names = exts.map(e => e.extension);
         let feeBps = null;
-        if (info.freezeAuthority)
-            add('freeze_authority', 'block', 'The issuer can freeze your token account, so you might never be able to sell.');
+        // a known issued asset (xStock) whose authorities still equal the issuer's pinned keys: its freeze, pause and permanent delegate are the issuer's legal controls, reported as warnings
+        const known = this.o.issuedAssets ? this.o.issuedAssets.find(a => a.mint === mint) : stockByMint(mint), st = (n) => exts.find(e => e.extension === n)?.state ?? {};
+        const pinned = !!known && v.owner === TOKEN_2022 && info.freezeAuthority === known.keys.freezeAuthority && (st('permanentDelegate').delegate ?? null) === known.keys.permanentDelegate
+            && (st('pausableConfig').authority ?? st('pausable').authority) === known.keys.pauseAuthority;
+        if (known && !pinned)
+            add('issuer_keys_changed', 'block', `This mint is listed as ${known.symbol} (${known.issuer}) but its freeze, pause or delegate keys are not the issuer's pinned keys: checked like any other token.`);
+        const issuer = pinned ? known.issuer : '';
+        if (info.freezeAuthority) {
+            if (pinned)
+                add('issuer_freeze', 'warn', `${issuer} can freeze any holder's account (for sanctions or court orders): a frozen account cannot sell.`);
+            else
+                add('freeze_authority', 'block', 'The issuer can freeze your token account, so you might never be able to sell.');
+        }
         if (info.mintAuthority)
-            add('mint_authority', 'warn', 'The issuer can create more tokens at will, which dilutes holders.');
+            add('mint_authority', 'warn', pinned ? `${issuer} mints and burns this token against the shares it holds.` : 'The issuer can create more tokens at will, which dilutes holders.');
         for (const e of exts) {
             const s = e.state ?? {};
-            if (e.extension === 'permanentDelegate' && s.delegate)
-                add('permanent_delegate', 'block', 'A permanent delegate can move or burn tokens from any holder\'s account, including yours.');
+            if (e.extension === 'permanentDelegate' && s.delegate) {
+                if (pinned)
+                    add('issuer_delegate', 'warn', `${issuer} keeps a permanent delegate that can move or burn tokens from any account (legal seizure, corporate actions).`);
+                else
+                    add('permanent_delegate', 'block', 'A permanent delegate can move or burn tokens from any holder\'s account, including yours.');
+            }
             else if (e.extension === 'transferHook' && s.programId)
                 add('transfer_hook', 'block', `Every transfer runs another program (${s.programId}), which can block sells.`);
             else if (e.extension === 'nonTransferable')
                 add('non_transferable', 'block', 'The token cannot be transferred, so it cannot be sold.');
             else if (e.extension === 'defaultAccountState' && s.accountState === 'frozen')
                 add('default_frozen', 'block', 'New token accounts start frozen: you could not sell until the issuer unfreezes you.');
-            else if (e.extension === 'pausableConfig' || e.extension === 'pausable')
-                add('pausable', 'block', 'The issuer can pause all transfers.');
+            else if ((e.extension === 'pausableConfig' || e.extension === 'pausable') && s.paused === true)
+                add('paused', 'block', 'Transfers of this token are paused by the issuer right now: it cannot be bought or sold.');
+            else if (e.extension === 'pausableConfig' || e.extension === 'pausable') {
+                if (pinned)
+                    add('issuer_pause', 'warn', `${issuer} can pause all transfers (it does so around corporate actions and market closures).`);
+                else
+                    add('pausable', 'block', 'The issuer can pause all transfers.');
+            }
             else if (e.extension === 'transferFeeConfig') {
                 feeBps = Number(s.newerTransferFee?.transferFeeBasisPoints ?? 0);
                 if (feeBps > 0)
@@ -95,7 +117,8 @@ export class TokenSafety {
             add('thin_liquidity', 'warn', `Buying 1 SOL of it would move the price by ${impact}%: liquidity is thin.`);
         const verdict = risks.some(r => r.level === 'block') ? 'block' : risks.length ? 'warn' : 'ok';
         const r = { mint, verdict, risks, facts: { program: v.owner === TOKEN ? 'spl-token' : 'token-2022', decimals: Number(info.decimals), supply: supply.toString(), mintAuthority: info.mintAuthority ?? null,
-                freezeAuthority: info.freezeAuthority ?? null, extensions: names, transferFeeBps: feeBps, topHolderPct: top, top10Pct: top10, excludedHolders: [...excluded], sellRoute: sell, buyImpactPct: impact },
+                freezeAuthority: info.freezeAuthority ?? null, extensions: names, transferFeeBps: feeBps, topHolderPct: top, top10Pct: top10, excludedHolders: [...excluded], sellRoute: sell, buyImpactPct: impact,
+                issuedAsset: pinned ? { symbol: known.symbol, issuer: known.issuer } : null },
             checkedAt: new Date(now).toISOString(), disclaimer: 'Read from the mint, its largest holders and current routes. Not a safety certification: a token that passes can still go to zero.' };
         this.cache.set(mint, { at: now, r });
         return r;

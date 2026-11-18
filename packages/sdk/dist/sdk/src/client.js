@@ -60,6 +60,13 @@ export class MemeClient {
     /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */
     settings() { return this.req('GET', '/v1/settings'); }
     updateSettings(p) { return this.req('PATCH', '/v1/settings', p); }
+    /** Token safety report (MODE=solana-mainnet): freeze/mint authority, Token-2022 extensions, holder concentration, a sell route, 1-SOL impact, and a verdict. */
+    tokenSafety(mint) { return this.req('GET', `/v1/tokens/${enc(mint)}/safety`); }
+    // ── tokenized stocks on Solana (MODE=solana-mainnet; buying needs STOCKS_ENABLED=1 on the server; not for US persons) ──
+    /** Registered stocks (xStocks, Ondo, Backpack): by default the tradable ones, most liquid first. `all` lists every verified mint; `q` a ticker or underlying (TSLA). */
+    stocks(q = {}) { return this.req('GET', '/v1/stocks' + qs(q)); }
+    /** One stock: shares per token (multiplier), issuer pause, the share price, what the best route pays per share now, and your holding in shares. */
+    stock(symbol) { return this.req('GET', `/v1/stocks/${enc(symbol)}`); }
     quote(p) { return this.req('POST', '/v1/quote', p); }
     /** `key` becomes the Idempotency-Key: retrying the same key never trades twice. */
     buy(p) { const { key, ...b } = p; return this.req('POST', '/v1/trades/buy', b, key ? { 'idempotency-key': key } : {}); }
@@ -93,8 +100,13 @@ export class MemeClient {
     resumeEntries() { return this.req('POST', '/v1/entries/resume', {}); }
     snipes() { return this.req('GET', '/v1/snipes'); }
     addSnipe(p) { return this.req('POST', '/v1/snipes', p); }
+    /** Copy configs with their state: running, lastError, inflight, the last decisions (bought, sold, skipped and why) and skippedByChecks. */
     copies() { return this.req('GET', '/v1/copies'); }
+    /** Follow leader wallets. On a `MODE=solana-mainnet` server: plain units, the linked wallet is the follower (docs/SDK_AND_API.md 4.10); copied buys pass the same token
+     *  safety and stock checks as manual buys, within the account's SOL caps. Elsewhere the host supplies the leader source and the body is the engine's CopyConfig. */
     addCopy(p) { return this.req('POST', '/v1/copies', p); }
+    /** Stop a copy config: nothing more is copied; a copy already sent finishes; the tokens stay in the wallet. */
+    removeCopy(id) { return this.req('DELETE', `/v1/copies/${enc(id)}`); }
     /** Server-sent events: order, trade, bulk, twap, snipe and alert changes. Resolves when the stream ends; pass an AbortSignal to stop listening. */
     async events(on, signal) {
         const f = this.o.fetch ?? fetch, r = await f(this.o.baseUrl.replace(/\/$/, '') + '/v1/events', { headers: { authorization: `Bearer ${this.o.apiKey}`, accept: 'text/event-stream' }, signal });

@@ -27,6 +27,11 @@ export interface SafetyReport {
         excludedHolders: string[];
         sellRoute: boolean | null;
         buyImpactPct: number | null;
+        /** Set when the mint is a known issued asset (an xStock) AND its on-chain authorities match the issuer's pinned keys: the issuer controls are then warnings, not blocks. */
+        issuedAsset: {
+            symbol: string;
+            issuer: string;
+        } | null;
     };
     checkedAt: string;
     disclaimer: string;
@@ -44,6 +49,20 @@ export interface SafetyOptions {
     maxImpactPct?: number;
     cacheMs?: number;
     now?: () => number;
+    /** Known issued assets (tokenized stocks) whose issuer controls are expected: default STOCKS_SOLANA (xstocks.ts: xStocks, Ondo, Backpack). Pass [] to treat every mint the same. */
+    issuedAssets?: readonly IssuedAsset[];
+}
+/** A REGULATED, ISSUER-CONTROLLED token (a tokenized stock): the issuer keeps freeze, pause and a permanent delegate on purpose (sanctions, court orders, corporate actions).
+ *  The allowance applies only while the mint's authorities equal these pinned keys: a lookalike mint, or a change of keys, is checked like any other token. */
+export interface IssuedAsset {
+    mint: string;
+    symbol: string;
+    issuer: string; /** permanentDelegate null: the issuer keeps none, and one appearing breaks the pin. */
+    keys: {
+        freezeAuthority: string;
+        permanentDelegate: string | null;
+        pauseAuthority: string;
+    };
 }
 export declare class TokenSafety {
     private rpc;

@@ -61,7 +61,11 @@ export declare function toUnits(v: unknown, decimals: number, what: string): big
 export declare function simpleBody(path: string, b: any, o: {
     address?: string;
     decimals: (mint: string) => Promise<number>;
-    balance: (mint: string) => Promise<bigint>;
+    balance: (mint: string) => Promise<bigint>; /** The native coin's field and decimals: SOL (default) or { key: 'eth', decimals: 18 } on Base. */
+    native?: {
+        key: string;
+        decimals: number;
+    };
 }): Promise<any>;
 /** A shared SOL/USD source (one cache for many Traders). */
 export declare function jupiterSolUsd(ttlMs?: number): () => Promise<{

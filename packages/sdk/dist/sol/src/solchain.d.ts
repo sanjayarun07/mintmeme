@@ -15,6 +15,7 @@ import type { ChainPort, SimTx, Receipt, Venue } from '../../core/src/index.ts';
 import type { SolRpc } from './raydium.ts';
 import type { SolSigner } from './signer.ts';
 import type { JupCfg } from './jupiterswap.ts';
+import type { RfqCfg } from './jupiterz.ts';
 import type { TxSubmitter } from './submitter.ts';
 import type { PriorityConfig, FeeRecipient } from './priorityfee.ts';
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
@@ -62,6 +63,17 @@ export interface SolChainConfig {
     };
     /** How signed transactions are sent (default: the node's sendTransaction). A tip-paying submitter such as Jito adds its tip instruction to curve and Raydium transactions; Jupiter-built transactions are sent through the plain node instead (their instruction list is Jupiter's). */
     submitter?: TxSubmitter;
+    /** JupiterZ RFQ fills for large orders (jupiterz.ts, docs/JUPITERZ.md). Off unless set. Chosen per trade only when one side of the trade is SOL (at least `minLamports`)
+     *  or a quote asset listed in `minQuote` (mint -> smallest raw amount on that side, for example USDC: market makers quote stocks closest against USDC), the trade
+     *  carries no platform fee, and the maker's output beats Jupiter's /build route by `marginBps`. `checkFill` may refuse the RFQ output (the stock share-price check). */
+    jupiterz?: RfqCfg & {
+        minLamports: bigint;
+        minQuote?: Record<string, bigint>;
+        marginBps: number;
+        maxExpirySec?: number;
+        checkFill?: (tx: SimTx, outAmount: bigint) => Promise<string | undefined>;
+        log?: (m: string) => void;
+    };
 }
 /** Solana's limit on a signed transaction, and how a too-large Jupiter route is retried with fewer accounts. */
 export declare const TX_MAX_BYTES = 1232;
@@ -86,6 +98,10 @@ export declare class SolanaChain implements ChainPort {
     static VISIBILITY_GRACE_MS: number;
     /** Set when the last Jupiter quote refresh failed (the Jupiter venue is then absent, so routing falls back to other venues). */
     jupiterError?: string;
+    /** RFQ trades by the user's own signature (the engine's hash for them): the request to resend, when the quote expires, and the landed signature once known. */
+    private rfq;
+    /** Why the last trade did not use JupiterZ (or that it did), for the test UI and logs. */
+    rfqNote?: string;
     constructor(cfg: SolChainConfig, rpc: SolRpc, signer: SolSigner);
     venues(): Venue[];
     /** Add a pool to track. SnipeRunner passes `{ id, pair }`; the program defaults to the first configured pool's program. */
@@ -112,6 +128,9 @@ export declare class SolanaChain implements ChainPort {
         notes: string[];
     }>;
     private refreshJupiter;
+    /** Registered stock mints (xstocks.ts) whose issuer pause is on, read at most every 15 s. A failed read pauses nothing here: the build re-reads and refuses a paused mint. */
+    private pauseRead?;
+    private pausedStocks;
     private loadKeys;
     confirmedNonce(): Promise<number>;
     balanceOf(wallet: string, token: string): Promise<any>;
@@ -155,7 +174,19 @@ export declare class SolanaChain implements ChainPort {
     private status;
     lookup(hash: string): Promise<"included" | "none" | "pending">;
     confirmations(hash: string): Promise<number>;
+    /** An RFQ fill for this trade if it is eligible and beats /build by the margin: gated, simulated and signed by the user's wallet (never sent here). Undefined: use /build. */
+    private tryRfq;
+    /** Send an RFQ trade through Jupiter's /execute. Identical bytes every time, so it lands at most once. A failure is final only once the quote can no longer land
+     *  (chain time past expireAt) and the transaction is not on chain; before that it is treated like a lost ack (RpcError), so the engine looks again instead of failing it. */
+    private submitRfq;
+    /** The landed signature for a hash: the hash itself for ordinary transactions; for RFQ trades /execute's signature, or the wallet's recent transaction that carries our signature. */
+    private resolve;
+    /** The token program that owns each mint (classic Token unless the chain says Token-2022). Cached: a mint never changes program. */
+    private tokenPrograms;
+    private mintProgram;
     private rentExempt;
+    private rentBySize;
+    private rentFor;
     /** Receipt -> the wallet's balance deltas. NATIVE = lamports, so it includes the fee and any rent paid; `network` = fee + rent of token accounts the tx created and left open. */
     receipt(hash: string): Promise<Receipt | undefined>;
 }

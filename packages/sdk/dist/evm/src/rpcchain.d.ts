@@ -8,6 +8,7 @@
  *   - Signing is injected (RawSigner). In this repo it is a dev-only signer for throwaway local keys; custody/HSM is out of scope. */
 import type { ChainPort, SimTx, Receipt, Venue } from '../../core/src/index.ts';
 import type { FeeSpec } from './v2.ts';
+import type { RelayClient, RelayContracts } from './relay.ts';
 /** Thrown by an RpcLike when the node answered with a JSON-RPC error object. Anything else thrown is treated as a transport failure (ack may be lost). */
 export declare class JsonRpcError extends Error {
 }
@@ -48,6 +49,20 @@ export interface EvmRpcConfig {
         address: string;
         bps: number;
     };
+    /** Relay same-chain routes (relay.ts): tokens without a V2 pool (Base: Coinbase stocks on Aerodrome Slipstream / Uniswap V3-V4). Every transaction is gated against
+     *  the pinned Relay contracts (`contracts`, default RELAY_BASE) and simulated with eth_simulateV1 before it is signed. `refreshMs` (default 15 s): reference quote age.
+     *  `refWallet`: the address quotes are asked for when no trade is being built (Relay wants a user; quotes are read-only). */
+    relay?: {
+        client: RelayClient;
+        contracts?: RelayContracts;
+        refreshMs?: number;
+        refWallet?: string;
+        pairs?: {
+            tokenIn: string;
+            tokenOut: string;
+            refAmount: bigint;
+        }[];
+    };
 }
 export declare function decodeRevert(data: string | undefined): string | undefined;
 export declare class EvmRpcChain implements ChainPort {
@@ -76,6 +91,20 @@ export declare class EvmRpcChain implements ChainPort {
     /** a pair's tokens never change, so after the first load a pool reload is one eth_call (reserves), not three */
     private pairTokens;
     refresh(what: 'head' | 'venues'): Promise<void>;
+    aggError?: string;
+    private aggAt;
+    private settler?;
+    private relayK;
+    /** The contract that must be approved for a token-in Relay swap (its approval proxy). */
+    private aggRouter;
+    private aggId;
+    /** Reference quotes for the configured pairs, at most every `refreshMs`. A pair that cannot be quoted has no venue until it can (orders on it wait). */
+    private refreshAgg;
+    /** Make a token tradable through Relay: ETH -> token for `refWei`, and back for what that returned. Read-only (quotes). Returns false when there is no route. */
+    addAggToken(token: string, refWei?: bigint): Promise<boolean>;
+    /** Quote the Relay swap for `tx`, gate it, check any 0x Settler against 0x's registry, and simulate it (with an exact approve first if the allowance is short). */
+    private aggBuild;
+    private aggVenue;
     balanceOf(wallet: string, token: string): Promise<bigint>;
     confirmedNonce(wallet: string): Promise<number>;
     /** Calldata for a SimTx (swap or noop). */
@@ -89,7 +118,18 @@ export declare class EvmRpcChain implements ChainPort {
     } | undefined>;
     simulate(tx: SimTx): Promise<{
         block: number;
-        receipt: Receipt;
+        receipt: {
+            hash: string;
+            status: 'success' | 'reverted';
+            reason?: string;
+            block: number;
+            network: bigint;
+            platformFee: bigint;
+            venueFee: bigint;
+            deltas: {
+                [tx.tokenOut]: bigint;
+            };
+        };
     }>;
     prepare(tx: SimTx): Promise<{
         raw: string;
