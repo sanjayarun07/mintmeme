@@ -39,3 +39,23 @@ test('Jupiter API key: sent as x-api-key to the keyed host (quotes and the Price
   assert.match(seen[2].url, /^https:\/\/api\.jup\.ag\/price\/v3\?ids=/); assert.equal(seen[2].key, 'k-123'); assert.equal(keyed.get(T)?.stockPrice, 383.9);
   assert.match(seen[3].url, /^https:\/\/lite-api\.jup\.ag\/price\/v3\?ids=/); assert.equal(seen[3].key, undefined); assert.equal(open.get(T)?.stockPrice, 383.9);
 });
+
+test('a rate-limited Jupiter key (HTTP 429) falls back to the keyless host for quotes and share prices, without the key', async () => {
+  const T = 'XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W', price = { [T]: { usdPrice: 733.9, stockData: { price: 730.66 } } }, seen: { url: string; key?: string }[] = [];
+  const limited = (body: unknown) => (async (url: any, init: any = {}) => { const u = String(url); seen.push({ url: u, key: init.headers?.['x-api-key'] });
+    return u.startsWith('https://api.jup.ag/') ? new Response('{"code":429,"message":"Too many requests"}', { status: 429 }) : new Response(JSON.stringify(body), { status: 200 }); }) as typeof fetch;
+  const q = await fetchJupiterQuote({ inputMint: SOLM, outputMint: USDCM, amount: 1_000_000_000n, fetchFn: limited(good), apiKey: 'k-123' });
+  assert.equal(q.outAmount, 73640575n); assert.match(seen[0].url, /api\.jup\.ag/); assert.match(seen[1].url, /^https:\/\/lite-api\.jup\.ag\/swap\/v1\/quote\?/); assert.equal(seen[1].key, undefined);
+  const p = await new JupiterStockPrices({ apiKey: 'k-123', fetchFn: limited(price) }).get([T]);
+  assert.equal(p.get(T)?.stockPrice, 730.66, 'the share price still arrives, so a stock trade is not refused with no_reference_price');
+  assert.match(seen[3].url, /^https:\/\/lite-api\.jup\.ag\/price\/v3/); assert.equal(seen[3].key, undefined);
+});
+
+test('route-program lookups and builds: a rate-limited key (HTTP 429) is dropped for the next try, which goes keyless', async () => {
+  const { fetchRoutableProgramIds } = await import('../src/jupiterswap.ts');
+  const seen: (string | undefined)[] = [];
+  const fetchFn = (async (_url: any, init: any = {}) => { const key = init.headers?.['x-api-key']; seen.push(key);
+    return key ? new Response('{"code":429}', { status: 429 }) : new Response(JSON.stringify(Object.fromEntries(['JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', 'pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ', '11111111111111111111111111111111', 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb', 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', 'ComputeBudget111111111111111111111111111111', 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc', 'CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK'].map(k => [k, 'label']))), { status: 200 }); }) as typeof fetch;
+  const ids = await fetchRoutableProgramIds({ apiKey: 'k-123', fetchFn });
+  assert.ok(ids.has('JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4')); assert.deepEqual(seen, ['k-123', undefined], 'one keyed try, then keyless');
+});

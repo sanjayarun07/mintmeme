@@ -180,3 +180,30 @@ test('chain: buying a Token-2022 xStock through Jupiter: its account comes from 
   // a Token-2022 account the chain does not vouch for (mint missing: treated as classic) is refused by the gate
   const noMint = mk({ [XS]: null }); assert.match((await noMint.c.simulate(tx({ venue: 'jupx', tokenOut: XS }))).receipt.reason!, /classic Token programs/);
 });
+
+test('safety gate: a Token-2022 CloseAccount is allowed only for a token account this transaction created, its rent back to our wallet', () => {
+  const MID22 = signer.add(), mid22 = ataAddress(W, MID22, PROGRAMS.token2022), T22 = PROGRAMS.token2022;
+  const mk22: JIx = { programId: PROGRAMS.ata, data: Uint8Array.of(1), accounts: [acc(W, true, true), acc(mid22, true), acc(W), acc(MID22), acc(PROGRAMS.system), acc(T22)] };
+  const close22 = (a: string, dest = W): JIx => ({ programId: T22, data: Uint8Array.of(9), accounts: [acc(a, true), acc(dest, true), acc(W, false, true)] });
+  const base = [...goodIxs().slice(0, 6), mk22, ...goodIxs().slice(6)], c = ctx({ token2022: new Set([MID22]) });
+  assert.doesNotThrow(() => gateInstructions([...base, close22(mid22)], c));
+  refused([...base, close22(ataAddress(W, signer.add(), T22))], /only CloseAccount of a token account this transaction created/, c);   // an account we did not just create
+  refused([...base, close22(mid22, EVIL)], /only CloseAccount/, c);                                                                      // rent to someone else
+  refused([...base, { ...close22(mid22), data: Uint8Array.of(3) }], /Token-2022 instruction type 3 is not allowed/, c);                 // anything but a close
+});
+
+test('chain: token accounts the route opens for in-between tokens are closed after the swap (rent back), never one the wallet already had; on a failed simulation the trade is rebuilt without them', async () => {
+  const MID = signer.add(), midAta = ataAddress(W, MID), wire = (ix: JIx) => ({ programId: ix.programId, data: Buffer.from(ix.data).toString('base64'), accounts: ix.accounts });
+  const withMid = (w0: ReturnType<typeof world>) => ({ ...w0.build(), setupInstructions: [wire(mkAta(WSOL)), wire(sysTransfer(W, wsolAta, 1_000_000_000n)), wire(sync(wsolAta)), wire(mkAta(USDC)), wire(mkAta(MID))] });
+  const closesIn = (raw: string) => { const msg = Buffer.from(raw, 'base64').subarray(65); return resolveMessage(parseMessage(new Uint8Array(msg)), [{ key: TBL, addresses: [POOL, POOL2] }]).filter(i => i.programId === PROGRAMS.token && i.data[0] === 9).map(i => i.accounts[0].pubkey); };
+  // 1. the in-between account does not exist before: closed after the swap, and only it (plus Jupiter's own wSOL close)
+  const w1: any = world({ jup: () => withMid(w1) }); const p1 = await w1.c.prepare(tx());
+  assert.deepEqual(closesIn(p1.raw).sort(), [wsolAta, midAta].sort(), 'Jupiter closes wSOL; we close the in-between account');
+  // 2. the wallet already had that account (maybe holding its own tokens): left alone
+  const w2: any = world({ accounts: { [midAta]: { lamports: 2_039_280, owner: PROGRAMS.token, data: tokAcct(W, 5n) } }, jup: () => withMid(w2) }); const p2 = await w2.c.prepare(tx());
+  assert.deepEqual(closesIn(p2.raw), [wsolAta], 'an existing account is never closed');
+  // 3. the simulation fails with the closes (dust left behind): built again without them, and the trade still goes through
+  let sims = 0; const ok = { value: { err: null, accounts: [{ lamports: 5_000_000_000 - 1_000_000_000 - 5_200 - 2_039_280, owner: PROGRAMS.system, data: b64(Buffer.alloc(0)) }, { lamports: 1, owner: PROGRAMS.token, data: b64(tokAcct(W, 149_900_000n)) }] } };
+  const w3: any = world({ jup: () => withMid(w3), sim: () => (++sims === 1 ? { value: { err: { InstructionError: [9, { Custom: 11 }] }, logs: ['Non-native account can only be closed if its balance is zero'] } } : ok) });
+  const p3 = await w3.c.prepare(tx()); assert.deepEqual(closesIn(p3.raw), [wsolAta], 'rebuilt without our closes'); assert.ok(sims >= 2);
+});
