@@ -137,7 +137,22 @@ A standalone app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:
     - **Impact · slippage:** expected price impact, and the slippage tolerance the transaction would carry. "auto" means the router sets it at fill time. RFQ is a firm price with no slippage.
   - **Liquidity panel:** every public pool holding the stock (DexScreener, keyless, at most 30 pools), grouped by DEX and listed largest first. It counts each pool's whole value (both sides). Market makers and prop AMMs are not in it.
   - **Firm quotes on HTTP 429** (Jupiter's per-second limit) are asked again after a pause, twice at most.
-- **EVM chains (2026-11-19, was "Base").** Price-only comparison of Relay, KyberSwap, LI.FI and OpenOcean for stock tokens, buy or sell against the native coin, with the same liquidity panel:
+- **EVM chains (2026-11-19, was "Base").** Laid out like the Solana quote:
+  - **Form:** chain, stock, buy or sell, and size buttons in dollars ($1k to $100k, converted at the coin's or the token's price from `GET /api/evm/price`).
+  - **Firm quote card:** the best market-maker quote, counting down to its expiry.
+  - **Routes table:** each venue with fee, impact and slippage, against the share price and against the server's own route (tagged "server"). Market-maker rows are tagged "maker".
+  - **Engine decision panel:** what the execution server would do with this `.env`:
+    - its route on the chain (Relay or KyberSwap on Base, KyberSwap on Robinhood, none on BNB);
+    - that route's quote and the 3% share-price check;
+    - for buys, the per-trade cap and the `STOCKS_ENABLED` switch;
+    - the market makers, which the server does not take on EVM chains yet.
+  - **Liquidity panel.**
+
+  **Market-maker RFQ:**
+  - **Bebop** answers keyless. Its `/pmm/chains` lists base, bsc and robinhood. On 2026-11-19 it gave firm NVDAB quotes on BNB (about 10 s, settled through `0xBeb0009ACa35087ce7cCF11637E24dd1Aad3bf2A`) up to roughly $1–10k. It had no price for NVDAc on Base, and does not support Robinhood's TSLA ("TokenNotSupported", shown in plain words).
+  - **0x RFQ and UniswapX** need `ZEROX_API_KEY` / `UNISWAP_API_KEY`. Without a key the row says so. The UniswapX answer parsing has not been checked against a keyed answer.
+
+  Price-only comparison of Relay, KyberSwap, LI.FI and OpenOcean for stock tokens, buy or sell against the native coin, with the same liquidity panel:
   - **Base:** Coinbase stocks.
   - **BNB Chain:** the five bStocks on an official list (`packages/evm/src/bnbstocks.ts`).
   - **Robinhood Chain:** Robinhood's 203 tokens.
@@ -159,6 +174,8 @@ A standalone app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:
   - **The engine does not split orders.** The row shows what a split would pay; the engine itself never splits an order.
   - **Results move from minute to minute.** Two runs a minute apart at $100k: split +83 bps and −1.7 bps against our route. Our full-size route had moved in between.
 - **Transaction.** The maker's transaction decoded: the signature slots, each instruction with its accounts named, the gate's verdict and its checks. A read-only mainnet simulation shows what the quote wallet would spend and receive. If the quote wallet lacks the SOL, the desk says so.
+  - **Gate messages in plain words (2026-11-19):** the desk translates each refusal into a sentence with real token amounts, for the person whose wallet would sign. The gate's own (technical) reason stays underneath. For example, "the fill pays 35295094694, below the minimum 67634288397" now reads: "The market maker would give you 352.95 SPCXx, but our route gets you at least 676.34 SPCXx for the same 1,344.1 SOL. That is 47.8% less, so your wallet will not sign it."
+  - **Decision lines** are plain as well: "The market maker gives 48% less than our route… It is used only when it gives at least 20 bps more", and "Unfair price: you would pay $283.36 per share while the share trades at $146.81, 93.0% more. The engine allows at most 3%".
 - **Size ladder.** Buy or sell at $1k, $10k, $50k, $100k and $250k: JupiterZ against the best other route, quoted price-only (no wallet needed).
 - **Gate lab.** The recorded mainnet transaction, as recorded or tampered with (amount +1, output redirected, extra SOL transfer, third signer), or any pasted `/order` transaction, run through the gate.
 

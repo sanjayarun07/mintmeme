@@ -17,6 +17,8 @@ import { RelayClient } from '../../packages/evm/src/relay.ts';
 import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
 import { BNB_STOCKS } from '../../packages/evm/src/bnbstocks.ts';
 import { ROBINHOOD_STOCKS } from '../../packages/evm/src/robinhoodstocks.ts';
+import { keccak256 } from '../../packages/evm/src/keccak.ts';
+import { CHAIN_SPECS, stocksEnabled } from '../server/chains.ts';
 import { EvmJsonRpc, baseEthUsd, EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
 import { NATIVE } from '../../packages/core/src/index.ts';
 
@@ -96,6 +98,34 @@ const decOf = (m: string) => (m === WSOL ? 9 : m === USDC ? 6 : stockByMint(m)?.
 const amt = (raw: bigint, m: string) => { const d = decOf(m), v = Number(raw) / 10 ** d; return `${v.toLocaleString('en-US', { maximumFractionDigits: d ? 4 : 0 })} ${sym(m)}`; };
 const FILL_ROLES = ['Taker (you)', 'Maker', 'Your input account', 'Maker input account', 'Your output account', 'Maker output account', 'Input mint', 'Input token program', 'Output mint', 'Output token program', 'System program', 'Maker temporary wSOL'];
 
+/** The gate's refusal in plain words for the person whose wallet would sign: what is wrong, with real token amounts, and why it matters. The gate's own (technical)
+ *  reason is kept next to it. `c`: the trade (mints, the amount in, the minimum out). */
+function plainGate(reason: string, c: { inMint: string; outMint: string; amountIn?: bigint; minOut?: bigint }) {
+  const m = (re: RegExp) => re.exec(reason), big = (x: string) => BigInt(x);
+  let x: RegExpExecArray | null;
+  if ((x = m(/the fill pays (\d+), below the minimum (\d+)/))) {
+    const got = big(x[1]), need = big(x[2]), less = need > 0n ? Number((need - got) * 10_000n / need) / 100 : 0;
+    return `The market maker would give you ${amt(got, c.outMint)}, but our route gets you at least ${amt(need, c.outMint)}${c.amountIn ? ` for the same ${amt(c.amountIn, c.inMint)}` : ''}. That is ${less.toLocaleString('en-US', { maximumFractionDigits: 1 })}% less, so your wallet will not sign it.`;
+  }
+  if ((x = m(/the fill spends (\d+), the trade is for (\d+)/))) return `The maker's transaction would take ${amt(big(x[1]), c.inMint)} from your wallet, but you asked to trade ${amt(big(x[2]), c.inMint)}.`;
+  if ((x = m(/needs exactly two signers .*this one needs (\d+)/))) return `This transaction asks for ${x[1]} signatures. Only the market maker and your wallet may sign it: an extra signer could move funds you did not agree to.`;
+  if (/quote has expired/.test(reason)) return 'The market maker\'s price has expired. Request a new quote.';
+  if ((x = m(/expires (\d+)s from now, more than allowed/))) return `The quote stays open for ${x[1]} seconds, longer than the desk allows: a long-lived quote lets the maker choose the moment to fill.`;
+  if (/pays the output to an account that is not ours/.test(reason)) return `The ${sym(c.outMint)} would go to an account that is not yours.`;
+  if (/takes the input from an account that is not ours/.test(reason)) return `The payment would come from an account that is not yours for this trade.`;
+  if (/different pair than requested/.test(reason)) return 'The transaction trades a different token than the one you asked for.';
+  if ((x = m(/program (\w+) is not allowed/))) return `The transaction runs a program the desk does not allow (${short(x[1])}), so what it would do cannot be checked.`;
+  if (/address lookup tables/.test(reason)) return 'The transaction hides some of its accounts in lookup tables, so the desk cannot check every account it touches.';
+  if (/already signed/.test(reason)) return 'The transaction arrived already signed, which a fresh quote never is.';
+  if (/fee payer .* is not the quote's maker/.test(reason)) return 'Someone other than the market maker would pay the network fee for this transaction.';
+  if (/uses our wallet as a signer|our wallet is not the second signer|taker is not our wallet/.test(reason)) return 'The transaction would use your wallet\'s signature in a way this trade does not need.';
+  if (/compute unit limit/.test(reason)) return 'The transaction asks for an unusually large amount of computation.';
+  if (/more than one (fill|token account)/.test(reason)) return 'The transaction does more than one swap or opens more than one account, which a single quote never needs.';
+  if (/one of our accounts as the maker/.test(reason)) return 'The transaction treats one of your accounts as the market maker\'s.';
+  if (/^could not check/.test(reason)) return 'The desk could not read the transaction to check it, so it would not sign it.';
+  return `The transaction did not pass the desk's safety checks (${reason}).`;
+}
+
 /** Decodes an RFQ wire transaction for display, and runs the engine's gate on it. `c` is what the trade is supposed to be. */
 async function xray(wire: Uint8Array, c: { wallet?: string; maker?: string; inMint?: string; outMint?: string; amountIn?: bigint; minOut?: bigint; nowSec?: number }) {
   const { message } = splitWire(wire), pm = parseMessage(message), ixs = resolveMessage(pm, []);
@@ -112,7 +142,7 @@ async function xray(wire: Uint8Array, c: { wallet?: string; maker?: string; inMi
     if (ix === fillIx && fill) what = `Fill: ${amt(fill.inputAmount, inMint)} in, ${amt(fill.outputAmount, outMint)} out, valid until ${new Date(fill.expireAt * 1000).toISOString().slice(11, 19)} UTC${fill.feeBps !== undefined ? `, Jupiter fee ${fill.feeBps} bps` : ''}`;
     return { program: ix.programId, name, what, accounts: ix.accounts.map((a, i) => ({ key: a.pubkey, signer: a.isSigner, writable: a.isWritable, role: ix === fillIx ? (a.pubkey === JUPITERZ.orderEngine && i >= 2 && i <= 5 ? `${FILL_ROLES[i]}: none` : FILL_ROLES[i]) : label(a.pubkey) })) };
   });
-  let verdict: { ok: boolean; reason?: string } = { ok: true };
+  let verdict: { ok: boolean; reason?: string; plain?: string } = { ok: true };
   const nowSec = c.nowSec ?? Math.floor(Date.now() / 1000);
   try { gateRfq(wire, { wallet, maker, wsol: WSOL, inMint, outMint, amountIn: c.amountIn ?? fill?.inputAmount ?? 0n, minOut: c.minOut ?? fill?.outputAmount ?? 0n, tokenProgram: tp, nowSec }); }
   catch (e) { verdict = { ok: false, reason: (e as Error).message }; if (!(e instanceof JupiterRefused)) verdict.reason = `could not check: ${verdict.reason}`; }
@@ -131,6 +161,7 @@ async function xray(wire: Uint8Array, c: { wallet?: string; maker?: string; inMi
     { name: 'Quote not expired, and expires within 2 minutes', ok: !!fill && fill.expireAt > nowSec && fill.expireAt <= nowSec + 120 },
     { name: 'No lookup tables', ok: pm.lookups.length === 0 },
   ];
+  if (!verdict.ok && verdict.reason) verdict.plain = plainGate(verdict.reason, { inMint, outMint, amountIn: c.amountIn ?? fill?.inputAmount, minOut: c.minOut ?? fill?.outputAmount });
   return { signers: pm.staticKeys.slice(0, pm.signers).map((k, i) => ({ key: k, slot: i, who: k === maker ? 'Maker (pays the network fee)' : k === wallet ? 'Your wallet' : 'Unknown' })), instructions, fill: fill && { inputAmount: String(fill.inputAmount), outputAmount: String(fill.outputAmount), expireAt: fill.expireAt, feeBps: fill.feeBps }, verdict, checks, wallet, maker, inMint, outMint, bytes: wire.length };
 }
 
@@ -215,17 +246,24 @@ async function quote(body: any, emit: (o: unknown) => void) {
     // refuses any signer but the maker and the wallet; this only says why, in terms of what the wallet holds (mainnet 2026-11-18: 30 SOL asked of a wallet with 0.03 SOL)
     const gasPayer = x.verdict.ok ? undefined : x.signers.find(s => s.who === 'Unknown' && x.instructions.some(i => i.program === PROGRAMS.ata && i.accounts[0]?.key === s.key))?.key;
     const gasNote = gasPayer ? `Jupiter added its own payer (${short(gasPayer)}) to fund your new ${sym(outMint)} account, which it does when the wallet cannot pay for it. The wallet holds ${heldTxt}${inMint === WSOL ? '' : ` and ${(Number(lamports) / 1e9).toLocaleString('en-US', { maximumFractionDigits: 4 })} SOL`}; this trade needs ${amt(amount, inMint)}. Only the maker and your wallet may sign, so this quote is refused: try a size the wallet can pay.` : undefined;
-    if (gasNote) x.verdict.reason = `${x.verdict.reason}. ${gasNote}`;
+    if (gasNote) { x.verdict.reason = `${x.verdict.reason}. ${gasNote}`; x.verdict.plain = gasNote; }
     emit({ stage: 'xray', ...x });
     const sim = await simulate(rfq.tx, taker, inMint, outMint).catch(e => ({ ok: false, error: (e as Error).message, log: [] as string[] }));
     emit({ stage: 'sim', ...sim });
     // the engine's decision, exactly as SolanaChain.tryRfq takes it (the threshold is in USD here; the engine takes it per quote asset)
     const reasons: { ok: boolean; text: string }[] = [], fmt$ = (v: number) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: 0 });
     reasons.push({ ok: usd >= minUsd, text: side === 'buy' ? `Size ${fmt$(usd)} in ${paySym} ${usd >= minUsd ? 'meets' : 'is below'} the ${fmt$(minUsd)} threshold` : `Size ${fmt$(usd)} of ${inSym} for ${paySym} ${usd >= minUsd ? 'meets' : 'is below'} the ${fmt$(minUsd)} threshold` });
-    if (!('error' in build)) { const need = build.outAmount * BigInt(10_000 + marginBps) / 10_000n; const bps = Number((rfq.outAmount - build.outAmount) * 10_000n / build.outAmount); reasons.push({ ok: rfq.outAmount >= need, text: `RFQ pays ${bps >= 0 ? '+' : ''}${bps} bps against the /build route; the margin is ${marginBps} bps` }); reasons.push({ ok: rfq.outAmount >= build.minOut, text: `RFQ output ${rfq.outAmount >= build.minOut ? 'reaches' : 'is below'} the engine minimum` }); }
+    if (!('error' in build)) { const need = build.outAmount * BigInt(10_000 + marginBps) / 10_000n; const bps = Number((rfq.outAmount - build.outAmount) * 10_000n / build.outAmount); // in plain words: how the maker's amount compares with our route's, and the rule (the maker is used only when it pays more by the margin)
+      const pctTxt = (b: number) => (Math.abs(b) >= 100 ? `${(Math.abs(b) / 100).toLocaleString('en-US', { maximumFractionDigits: 1 })}%` : `${Math.abs(b)} bps (${(Math.abs(b) / 100).toLocaleString('en-US', { maximumFractionDigits: 2 })}%)`);
+      reasons.push({ ok: rfq.outAmount >= need, text: `The market maker gives ${pctTxt(bps)} ${bps >= 0 ? 'more' : 'less'} than our route (${amt(rfq.outAmount, outMint)} against ${amt(build.outAmount, outMint)}). It is used only when it gives at least ${marginBps} bps more` });
+      reasons.push({ ok: rfq.outAmount >= build.minOut, text: rfq.outAmount >= build.minOut ? `It gives at least the least our route could deliver after slippage (${amt(build.minOut, outMint)})` : `It gives less than even the worst case of our route after slippage (${amt(build.minOut, outMint)})` }); }
     else reasons.push({ ok: false, text: `No /build route to compare with: ${build.error}` });
-    reasons.push({ ok: x.verdict.ok, text: x.verdict.ok ? 'The gate accepts the transaction' : `The gate refuses: ${x.verdict.reason}` });
-    const sh = share(rfq.outAmount); if (sh) reasons.push({ ok: sh.ok, text: sh.referenceUsd ? `Share price check: $${sh.perShareUsd.toFixed(2)} per share against $${sh.referenceUsd.toFixed(2)}${sh.ok ? '' : ` (${sh.why})`}` : 'No reference share price right now, so the check is skipped' });
+    reasons.push({ ok: x.verdict.ok, text: x.verdict.ok ? 'The gate accepts the transaction' : `The gate refuses it: ${x.verdict.plain ?? x.verdict.reason}` });
+    // in plain words: the price per share against the real share price, and the 3% rule
+    const sh = share(rfq.outAmount), dev = sh?.deviationPct ?? null, worseBy = dev === null ? null : side === 'buy' ? dev : -dev;
+    if (sh) reasons.push({ ok: sh.ok, text: !sh.referenceUsd ? 'No share price right now, so the price check is skipped'
+      : sh.ok ? `Fair price: $${sh.perShareUsd.toFixed(2)} per share, against a share price of $${sh.referenceUsd.toFixed(2)} (within the 3% the engine allows)`
+      : `Unfair price: you would ${side === 'buy' ? 'pay' : 'get'} $${sh.perShareUsd.toFixed(2)} per share while the share trades at $${sh.referenceUsd.toFixed(2)}, ${Math.abs(worseBy ?? 0).toFixed(1)}% ${side === 'buy' ? 'more' : 'less'}. The engine allows at most 3%` });
     if (sim.ok === false) {
       // System error 0x1 (not enough lamports) or Token error 0x1 (insufficient funds): the quote wallet cannot pay this size
       const log = (sim.log ?? []).join(' '), short_ = /(11111111111111111111111111111111|TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA|TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb) failed: custom program error: 0x1(?![0-9a-f])/.test(log);
@@ -308,15 +346,25 @@ async function venueQuotes(inputMint: string, outputMint: string, amount: bigint
 // wallet on that chain is used (nothing is signed or sent). The execution server trades through Relay (Base) or KyberSwap (BASE_AGGREGATOR, Robinhood's default);
 // BNB stocks are not wired there (docs/XSTOCKS.md). The share multiplier is read on chain (uiMultiplier(); 1 where the token has none, as Coinbase's B20 tokens).
 const alchemy = (net: string) => (process.env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : undefined);
-const EVM_DESK: Record<string, { label: string; chainId: number; native: string; rpc: string; kyber: string; taker: string; stocks: Record<string, string>; ticker: (s: string) => string; net: string; serverRoute: string }> = {
+const EVM_DESK: Record<string, { label: string; chainId: number; native: string; rpc: string; kyber: string; taker: string; stocks: Record<string, string>; ticker: (s: string) => string; net: string; serverRoute: string; bebop: string }> = {
   base: { label: 'Base', chainId: 8453, native: 'ETH', rpc: process.env.BASE_RPC_URL?.trim() || alchemy('base-mainnet') || 'https://mainnet.base.org', kyber: 'base', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
-    stocks: BASE_STOCKS, ticker: s => s.replace(/c$/, ''), net: 'base', serverRoute: 'Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap' },
+    stocks: BASE_STOCKS, ticker: s => s.replace(/c$/, ''), net: 'base', bebop: 'base', serverRoute: 'Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap' },
   bnb: { label: 'BNB Chain', chainId: 56, native: 'BNB', rpc: process.env.BNB_RPC_URL?.trim() || alchemy('bnb-mainnet') || 'https://bsc-dataseed.bnbchain.org', kyber: 'bsc', taker: '0xF977814e90dA44bFA03b6295A0616a897441aceC',
-    stocks: BNB_STOCKS, ticker: s => s.replace(/B$/, ''), net: 'bnb', serverRoute: 'not wired: the server trades BNB tokens only through their PancakeSwap V2 pool, which is thin for these' },
+    stocks: BNB_STOCKS, ticker: s => s.replace(/B$/, ''), net: 'bnb', bebop: 'bsc', serverRoute: 'not wired: the server trades BNB tokens only through their PancakeSwap V2 pool, which is thin for these' },
   robinhood: { label: 'Robinhood Chain', chainId: 4663, native: 'ETH', rpc: process.env.ROBINHOOD_RPC_URL?.trim() || alchemy('robinhood-mainnet') || 'https://rpc.mainnet.chain.robinhood.com', kyber: 'robinhood', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
-    stocks: ROBINHOOD_STOCKS, ticker: s => s, net: 'robinhood', serverRoute: 'KyberSwap (ROBINHOOD_AGGREGATOR default)' },
+    stocks: ROBINHOOD_STOCKS, ticker: s => s, net: 'robinhood', bebop: 'robinhood', serverRoute: 'KyberSwap (ROBINHOOD_AGGREGATOR default)' },
 };
 const EEE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', ZERO = '0x0000000000000000000000000000000000000000', UI_MULT = '0xa60bf13d';
+/** EIP-55 checksum (Bebop refuses lower-case taker addresses). */
+const checksum = (a: string) => { const x = a.toLowerCase().slice(2), h = Buffer.from(keccak256(new TextEncoder().encode(x))).toString('hex'); return '0x' + [...x].map((ch, i) => (parseInt(h[i], 16) >= 8 ? ch.toUpperCase() : ch)).join(''); };
+/** What the execution server would do on this chain with this .env: the venue it routes stock tokens through (null: none), its per-trade cap for buys (native coin),
+ *  and whether stock buys are on. Read the way apps/server/chains.ts and main.ts read them. */
+function serverPlan(id: string) {
+  const sp = CHAIN_SPECS[id]?.evm, e = process.env, cap = Number(e[`${sp?.capsPrefix}_MAX_TRADE_ETH`] ?? sp?.maxTradeDefault ?? 0), agg = sp?.aggregatorEnv ? (e[sp.aggregatorEnv]?.trim() || sp.defaultAggregator || 'relay') : undefined;
+  const venue = id === 'base' ? (agg === 'kyberswap' ? 'KyberSwap' : agg === 'off' || e.BASE_RELAY?.trim() === 'off' ? null : 'Relay') : id === 'robinhood' ? (agg === 'off' ? null : 'KyberSwap') : null;
+  const why = venue ? `the server routes ${id === 'base' ? 'Coinbase stocks' : 'stock tokens'} on ${CHAIN_SPECS[id]?.label} through ${venue}` : id === 'bnb' ? 'the server trades BNB tokens only through their PancakeSwap V2 pool, which is thin for bStocks, so it would not route this' : 'aggregator routing is off on the server';
+  return { venue, why, capNative: cap, stocksOn: stocksEnabled(id), dailyCapNative: Number(e[`${sp?.capsPrefix}_DAILY_CAP_ETH`] ?? sp?.dailyCapDefault ?? 0) };
+}
 const evmRt = new Map<string, { rpc: EvmJsonRpc; usd: () => Promise<{ price: number } | null>; relay: RelayClient }>(), tokenInfo = new Map<string, { decimals: number; mult: { v: string; at: number } }>();
 const rt = (id: string) => { let r = evmRt.get(id); if (!r) { const c = EVM_DESK[id], rpc = new EvmJsonRpc(c.rpc); r = { rpc, usd: baseEthUsd(rpc, 30_000, EVM_NETWORKS[c.net]), relay: new RelayClient({ chainId: c.chainId, apiKey: process.env.RELAY_API_KEY?.trim(), retries429: 1 }) }; evmRt.set(id, r); } return r; };
 async function evmToken(id: string, token: string) {
@@ -369,6 +417,38 @@ async function evmQuote(body: any) {
       const d = j?.data; if (!d?.outAmount || !stockOk(d.inToken?.address, d.outToken?.address) || String(d.inAmount) !== String(amount)) throw new Error(j?.message ?? j?.error ?? `no route (HTTP ${status})`);
       return { out: String(d.outAmount), path: (d.dexes ?? []).filter((x: any) => x?.swapAmount && x.swapAmount !== '0').map((x: any) => String(x.dexCode)).slice(0, 4).join(', '), feeBps: 0,
         impactPct: num(String(d.price_impact ?? '').replace('%', '')), impactFrom: 'OpenOcean price_impact', slippageNote: 'set when the swap is built' }; }],
+    // Market-maker RFQ, the EVM counterparts of JupiterZ. Bebop answers keyless (GET api.bebop.xyz/pmm/<chain>/v3/quote; its /pmm/chains listed base, bsc and
+    // robinhood on 2026-11-19): a firm price signed by the maker, valid for about 10 s, settled through Bebop's contract. 0x RFQ and UniswapX need an API key.
+    ['Bebop RFQ', async (amount: bigint) => {
+      const q = new URLSearchParams({ buy_tokens: side === 'buy' ? checksum(token) : EEE, sell_tokens: side === 'buy' ? EEE : checksum(token), sell_amounts: String(amount), taker_address: checksum(c.taker), approval_type: 'Standard', gasless: 'false' });
+      const { status, j } = await json(`https://api.bebop.xyz/pmm/${c.bebop}/v3/quote?${q}`);
+      const bt: any = j?.buyTokens ? Object.entries(j.buyTokens)[0] : undefined, st: any = j?.sellTokens ? Object.entries(j.sellTokens)[0] : undefined;
+      if (!bt || !st || String(st[1]?.amount) !== String(amount) || String(side === 'buy' ? bt[0] : st[0]).toLowerCase() !== t) {
+        // Bebop's errors in plain words (seen 2026-11-19: TokenNotSupported for Robinhood tokens, InsufficientLiquidity when no maker covers the size)
+        const msg = String(j?.error?.message ?? ''), what = side === 'buy' ? symbol : `${symbol} for ${c.native}`;
+        throw new Error(/TokenNotSupported/i.test(msg) ? `Bebop's market makers do not quote ${symbol} on ${c.label}`
+          : /InsufficientLiquidity/i.test(msg) ? `no Bebop market maker has a price for this size of ${what} right now; a smaller size may get one`
+          : msg ? `no maker quote: ${msg.replace(/\s*\[0x[0-9a-fA-F]+\]/g, '').slice(0, 90)}` : `no quote (HTTP ${status})`);
+      }
+      return { out: String(bt[1].amount), path: `Bebop market makers, firm for ${Math.max(0, Number(j.expiry ?? 0) - Math.floor(Date.now() / 1000))} s`, feeBps: 0, gasUsd: num(j.gasFee?.usd),
+        slippageBps: 0, kind: 'rfq', rfq: { expiry: Number(j.expiry ?? 0), quoteId: String(j.quoteId ?? ''), settlement: String(j.tx?.to ?? j.settlementAddress ?? ''), minOut: String(bt[1].minimumAmount ?? bt[1].amount) } } as any;
+    }],
+    ['0x RFQ', async (amount: bigint) => {
+      const key = process.env.ZEROX_API_KEY?.trim(); if (!key) throw new Error('needs an API key: set ZEROX_API_KEY (dashboard.0x.org). 0x RFQ quotes Robinhood stock tokens against USDG (Tokka Labs)');
+      const q = new URLSearchParams({ chainId: String(c.chainId), sellToken: side === 'buy' ? EEE : token, buyToken: side === 'buy' ? token : EEE, sellAmount: String(amount), taker: c.taker });
+      const { status, j } = await json(`https://api.0x.org/swap/allowance-holder/price?${q}`, { headers: { '0x-api-key': key, '0x-version': 'v2' } });
+      if (!j?.buyAmount || String(j.sellAmount) !== String(amount)) throw new Error(j?.message ? `0x: ${String(j.message).slice(0, 90)}` : `no quote (HTTP ${status})`);
+      const fills = (j.route?.fills ?? []) as any[], src = [...new Set(fills.map(f => String(f.source ?? '?')))];
+      return { out: String(j.buyAmount), path: src.join(', ') || '0x', feeBps: num(j.fees?.zeroExFee?.amount) ? undefined : 0, gasUsd: undefined, slippageNote: 'set when the swap is built', kind: src.some(x => /rfq/i.test(x)) ? 'rfq' : 'router' } as any;
+    }],
+    ['UniswapX', async (amount: bigint) => {
+      const key = process.env.UNISWAP_API_KEY?.trim(); if (!key) throw new Error('needs an API key: set UNISWAP_API_KEY (Uniswap Trading API). UniswapX runs RFQ auctions on Base, BNB and Robinhood Chain');
+      const { status, j } = await json('https://trade-api.gateway.uniswap.org/v1/quote', { method: 'POST', headers: { 'content-type': 'application/json', 'x-api-key': key },
+        body: JSON.stringify({ type: 'EXACT_INPUT', amount: String(amount), tokenInChainId: c.chainId, tokenOutChainId: c.chainId, tokenIn: side === 'buy' ? ZERO : token, tokenOut: side === 'buy' ? token : ZERO, swapper: c.taker, routingPreference: 'BEST_PRICE' }) });
+      // not checked against a live keyed answer: the output is read from the classic quote, or the first output of a Dutch (UniswapX) order
+      const out = j?.quote?.output?.amount ?? j?.quote?.orderInfo?.outputs?.[0]?.startAmount; if (!out) throw new Error(j?.detail ? `Uniswap: ${String(j.detail).slice(0, 90)}` : `no quote (HTTP ${status})`);
+      return { out: String(out), path: `Uniswap ${String(j.routing ?? '?')}`, slippageNote: 'set by the order', kind: /DUTCH|UNISWAPX/i.test(String(j.routing)) ? 'rfq' : 'router' } as any;
+    }],
   ];
   // Impact is computed the same way for every venue: its price at this size against its own price at 1% of it. A venue's own figure is not comparable across venues
   // (KyberSwap's dollar values on Robinhood Chain priced TSLA below its share price, so 10 ETH showed 5.86% "impact" against OpenOcean's 0.47% for the same output,
@@ -382,8 +462,15 @@ async function evmQuote(body: any) {
   }));
   // reference share price: Jupiter's stockData.price for a Solana stock of the same ticker (NVDAc, NVDAB and Robinhood NVDA -> NVDA -> NVDAx)
   const ticker = c.ticker(symbol), sol = STOCKS.find(s => s.underlying === ticker), refUsd = sol ? (await prices.get([sol.mint]).catch(() => new Map())).get(sol.mint)?.stockPrice ?? null : null;
-  return { chain: id, label: c.label, native: c.native, side, symbol, ticker, token, decimals: info.decimals, multiplier: info.mult.v, units, amount: String(amount), nativeUsd, refUsd, serverRoute: c.serverRoute,
+  return { chain: id, label: c.label, native: c.native, side, symbol, ticker, token, decimals: info.decimals, multiplier: info.mult.v, units, amount: String(amount), nativeUsd, refUsd, serverRoute: c.serverRoute, server: serverPlan(id),
     rpc: c.rpc.includes('alchemy') ? 'Alchemy' : 'public RPC', venues };
+}
+/** GET /api/evm/price?chain=&symbol=: the native coin's and the token's dollar prices, to size an order in dollars before quoting. */
+async function evmPrice(id: string, symbol: string) {
+  const c = EVM_DESK[id]; if (!c) throw new Error(`unknown chain ${id}`); const token = c.stocks[symbol]; if (!token) throw new Error(`unknown ${c.label} stock ${symbol}`);
+  const info = await evmToken(id, token), nativeUsd = await rt(id).usd().then(x => x?.price ?? null).catch(() => null);
+  const sol = STOCKS.find(s => s.underlying === c.ticker(symbol)), ref = sol ? (await prices.get([sol.mint]).catch(() => new Map())).get(sol.mint)?.stockPrice ?? null : null;
+  return { chain: id, native: c.native, nativeUsd, tokenUsd: ref ? ref * Number(info.mult.v) : null, sharePrice: ref, multiplier: info.mult.v, server: serverPlan(id) };
 }
 
 /* ---------------- Liquidity: every public pool that holds the token, on any of the four chains ---------------- */
@@ -524,6 +611,7 @@ http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && (u.pathname === '/api/evm/quote' || u.pathname === '/api/base/quote')) return json(res, 200, await evmQuote(await readBody(req)));
     if (req.method === 'GET' && u.pathname === '/api/liquidity') return json(res, 200, await liquidity(String(u.searchParams.get('chain') ?? ''), String(u.searchParams.get('token') ?? '')));
+    if (req.method === 'GET' && u.pathname === '/api/evm/price') return json(res, 200, await evmPrice(String(u.searchParams.get('chain') ?? ''), String(u.searchParams.get('symbol') ?? '')));
     if (req.method === 'GET' && u.pathname === '/api/token-price') return json(res, 200, { usd: await tokenUsd(String(u.searchParams.get('mint') ?? ''), await solPrice()).catch(() => null) });
     if (req.method === 'POST' && u.pathname === '/api/ladder') return json(res, 200, await ladder(await readBody(req)));
     if (req.method === 'POST' && u.pathname === '/api/gate') return json(res, 200, await gate(await readBody(req)));

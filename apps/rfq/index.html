@@ -127,7 +127,7 @@ td.wrap{white-space:normal}
 tbody tr:last-child td{border-bottom:0}
 td.sub{color:var(--muted);font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 tr.is-rfq td:first-child{box-shadow:inset 2px 0 0 var(--rfq)}
-#rows td.sub{max-width:170px} #rows td.name{white-space:normal;min-width:110px;max-width:150px;line-height:16px}
+#rows td.sub,#base-rows td.sub{max-width:170px} #rows td.name,#base-rows td.name{white-space:normal;min-width:110px;max-width:150px;line-height:16px}
 tr.venue-head td{font-size:12px;color:var(--muted,#6b7280);padding-top:14px;border-top:1px solid currentColor}
 tr.is-venue td{opacity:.85}
 .pos{color:var(--pos)} .neg{color:var(--neg)}
@@ -356,22 +356,51 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
 
 <!-- BASE -->
 <section class="view" id="v-base" aria-label="EVM stocks" hidden>
-  <div class="panel">
-    <div class="ph"><h2>Stock tokens on EVM chains <span class="muted" id="base-meta" style="font-weight:400"></span></h2></div>
-    <form class="pb" id="base-f" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
-      <div class="field" style="min-width:150px"><label for="base-chain">Chain</label><select class="ctl" id="base-chain"></select></div>
-      <div class="field"><span class="lbl" id="base-side-l">Side</span><div class="seg" role="group" aria-labelledby="base-side-l" style="width:132px"><button type="button" data-eside="buy" aria-pressed="true">Buy</button><button type="button" data-eside="sell" aria-pressed="false">Sell</button></div></div>
-      <div class="field" style="min-width:150px"><label for="base-sym">Stock</label><select class="ctl" id="base-sym"></select></div>
-      <div class="field" style="width:150px"><label for="base-eth" id="base-amt-l">Pay (ETH)</label><input class="ctl" id="base-eth" inputmode="decimal" value="0.5"></div>
-      <button class="btn" id="base-go" type="submit">Compare</button>
-    </form>
-    <div class="tw"><table>
-      <thead><tr><th>Venue</th><th>Path</th><th class="num" title="The aggregator's own fee, and the network fee it estimates. The pools' trading fees are already inside each output.">Fee</th><th class="num" title="Price impact, computed the same way for every venue: its price for this size against its own price for 1% of it. Then the slippage tolerance its transaction would carry.">Impact · slippage</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
-      <tbody id="base-rows"><tr><td colspan="8" class="muted">Pick a chain, a stock and an amount, then Compare.</td></tr></tbody>
-    </table></div>
+  <div class="split">
+    <div class="stack">
+      <form class="panel" id="base-f" autocomplete="off">
+        <div class="ph"><h2>New request</h2><div class="seg" role="group" aria-label="Side" style="width:132px;height:28px"><button type="button" data-eside="buy" aria-pressed="true">Buy</button><button type="button" data-eside="sell" aria-pressed="false">Sell</button></div></div>
+        <div class="pb">
+          <div class="field"><label for="base-chain">Chain</label><select class="ctl" id="base-chain"></select></div>
+          <div class="field"><label for="base-sym">Stock</label><select class="ctl" id="base-sym"></select></div>
+          <div class="field"><label for="base-eth" id="base-amt-l">Pay</label>
+            <div class="affix"><input class="ctl" id="base-eth" inputmode="decimal" value="0.5"><span id="base-unit">ETH</span></div>
+            <div class="help" id="base-usd"></div></div>
+          <div class="field"><span class="lbl" id="base-size-l">Size</span>
+            <div class="seg" role="group" aria-labelledby="base-size-l">
+              <button type="button" data-eusd="1000" aria-pressed="false">$1k</button><button type="button" data-eusd="10000" aria-pressed="false">$10k</button><button type="button" data-eusd="50000" aria-pressed="false">$50k</button><button type="button" data-eusd="100000" aria-pressed="false">$100k</button>
+            </div></div>
+          <button class="btn" id="base-go" type="submit">Request quotes</button>
+        </div>
+      </form>
+      <div class="panel">
+        <div class="ph"><h2>Engine decision</h2><span class="badge" id="e-dec-badge">Idle</span></div>
+        <ul class="checks" id="e-dec-list"><li class="wait"><svg class="i" aria-hidden="true"><use href="#i-wait"/></svg><span class="muted">Request quotes to see what the execution server would do.</span></li></ul>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="panel" id="e-firm">
+        <div class="ph"><h2>Firm quote</h2><div class="r"><span class="muted" id="e-firm-meta"></span><span class="badge" id="e-firm-badge">None</span></div></div>
+        <div class="expiry" id="e-expiry" aria-hidden="true"><i style="width:0"></i></div>
+        <div class="stats">
+          <div class="stat"><div class="lbl" id="e-q-recv-l">Receive</div><div class="v" id="e-q-recv">–</div><div class="s" id="e-q-recv-s">&nbsp;</div></div>
+          <div class="stat"><div class="lbl">Per share</div><div class="v" id="e-q-per">–</div><div class="s" id="e-q-ref">&nbsp;</div></div>
+          <div class="stat"><div class="lbl" id="e-q-delta-l">Against the server route</div><div class="v" id="e-q-delta">–</div><div class="s" id="e-q-best">&nbsp;</div></div>
+          <div class="stat"><div class="lbl">Market maker</div><div class="v" id="e-q-maker">–</div><div class="s" id="e-q-fee">&nbsp;</div></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="ph"><h2>Routes</h2><span class="muted" id="base-meta">Same size, same moment</span></div>
+        <div class="tw"><table>
+          <thead><tr><th>Route</th><th>Path</th><th class="num" title="The aggregator's own fee, and the network fee it estimates. The pools' trading fees are already inside each output.">Fee</th><th class="num" title="Price impact, computed the same way for every venue: its price for this size against its own price for 1% of it. Then the slippage tolerance its transaction would carry.">Impact · slippage</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num" id="base-vs-h">vs server route</th></tr></thead>
+          <tbody id="base-rows"><tr><td colspan="8" class="muted">Pick a chain, a stock and a size, then Request quotes.</td></tr></tbody>
+        </table></div>
+      </div>
+      <div class="panel" id="liq-e"><div class="ph"><h2>Liquidity</h2><span class="muted">Public pools holding this stock</span></div><div class="empty">Request quotes to see where this stock's liquidity is.</div></div>
+    </div>
   </div>
-  <div class="panel" id="liq-e" style="margin-top:16px"><div class="ph"><h2>Liquidity</h2><span class="muted">Public pools holding this stock</span></div><div class="empty">Compare to see where this stock's liquidity is.</div></div>
-  <p class="foot" id="base-foot">Quote-only: nothing is signed or sent, and nothing is tradable on this page. Base: Coinbase stocks; the execution server trades them through Relay, or KyberSwap with BASE_AGGREGATOR=kyberswap. BNB Chain: bStocks (the five on an official list); the execution server does not trade them. Robinhood Chain: Robinhood's 203 stock tokens; the execution server trades them through KyberSwap. The share price is Jupiter's for the same ticker (NVDAc, NVDAB and Robinhood NVDA are all compared with NVDA); one token counts as uiMultiplier() shares, read on chain.</p>
+  <p class="foot" id="base-foot">Quote-only: nothing is signed or sent from this tab. Base: Coinbase stocks, which the execution server trades through Relay (or KyberSwap with BASE_AGGREGATOR=kyberswap). BNB Chain: bStocks (the five on an official list), which the execution server does not trade. Robinhood Chain: Robinhood's 203 stock tokens, which the execution server trades through KyberSwap. Market-maker RFQ: Bebop answers keyless (a firm price signed by the maker, about 10 s); 0x RFQ and UniswapX need an API key. The share price is Jupiter's for the same ticker; one token counts as uiMultiplier() shares, read on chain.</p>
 </section>
 
 <!-- GATE LAB -->
@@ -439,7 +468,7 @@ async function boot() {
   const EV = CFG.evmStocks ?? { base: { label: 'Base', native: 'ETH', symbols: CFG.baseStocks ?? [] } };
   $('#base-chain').innerHTML = Object.entries(EV).map(([k, v]) => `<option value="${esc(k)}">${esc(v.label)}</option>`).join('');
   const evmFill = () => { const v = EV[$('#base-chain').value]; $('#base-sym').innerHTML = v.symbols.map(s => `<option>${esc(s)}</option>`).join(''); evmLabels(); };
-  $('#base-chain').onchange = evmFill; evmFill();
+  $('#base-chain').onchange = () => { evmFill(); eloadPrice(); }; evmFill(); eloadPrice();
   SOLUSD = CFG.solUsd ?? null; solMeta(); setUsd();
   $('#cases').innerHTML = CFG.tamper.map(c => `<li><button type="button" data-t="${c.id}" aria-pressed="false"><span>${esc(c.label)}</span>${icon('chev')}</button></li>`).join('');
   ladderRows(); route();
@@ -515,50 +544,112 @@ function row(k, m, path) {
     <td class="num">${o && ps ? usd(ps) : '–'}</td><td class="num" id="d-${k}">${o ? '<span class="skel"></span>' : '–'}</td>`;
   fillLiq();
 }
-/* ---------- EVM chains: stock tokens across EVM aggregators (quote-only), buy or sell ---------- */
-let ESIDE = 'buy';
+/* ---------- EVM chains: stock tokens across EVM aggregators and market makers (quote-only), buy or sell, laid out like the Solana quote ---------- */
+let ESIDE = 'buy', EPRICE = null, etimer;
+const evmNative = () => ((CFG.evmStocks ?? {})[$('#base-chain').value] ?? { native: 'ETH' }).native;
+/** The amount field's unit in dollars: the native coin for a buy, one stock token for a sell (from /api/evm/price, fetched when the chain or stock changes). */
+const eunitUsd = () => (EPRICE ? (ESIDE === 'buy' ? EPRICE.nativeUsd : EPRICE.tokenUsd) : null);
 function evmLabels() {
-  const v = (CFG.evmStocks ?? {})[$('#base-chain').value] ?? { native: 'ETH' };
-  $('#base-amt-l').textContent = ESIDE === 'buy' ? `Pay (${v.native})` : `Sell (${$('#base-sym').value || 'tokens'})`;
-  $('#base-recv-h').textContent = ESIDE === 'buy' ? 'Receive (tokens)' : `Receive (${v.native})`;
+  const nat = evmNative(), sym = $('#base-sym').value || 'tokens';
+  $('#base-amt-l').textContent = ESIDE === 'buy' ? 'Pay' : 'Sell'; $('#base-unit').textContent = ESIDE === 'buy' ? nat : sym;
+  $('#base-recv-h').textContent = ESIDE === 'buy' ? 'Receive (tokens)' : `Receive (${nat})`; esetUsd();
+}
+function esetUsd() { const v = Number($('#base-eth').value.replace(/,/g, '')), u = eunitUsd(); $('#base-usd').textContent = v > 0 && u ? `≈ ${usd(v * u)}${ESIDE === 'sell' ? `, paid out in ${evmNative()}` : ''}` : ''; }
+async function eloadPrice() {
+  EPRICE = null; const chain = $('#base-chain').value, symbol = $('#base-sym').value; if (!symbol) return;
+  try { const r = await (await fetch(`/api/evm/price?chain=${encodeURIComponent(chain)}&symbol=${encodeURIComponent(symbol)}`)).json(); if (!r.error && chain === $('#base-chain').value && symbol === $('#base-sym').value) EPRICE = r; } catch { EPRICE = null; }
+  esetUsd(); const on = [...document.querySelectorAll('[data-eusd]')].find(x => x.getAttribute('aria-pressed') === 'true'); if (on) on.click();
 }
 document.querySelectorAll('[data-eside]').forEach(b => b.onclick = () => {
   if (b.dataset.eside === ESIDE) return; ESIDE = b.dataset.eside; document.querySelectorAll('[data-eside]').forEach(x => x.setAttribute('aria-pressed', x.dataset.eside === ESIDE));
-  $('#base-eth').value = ESIDE === 'buy' ? '0.5' : '1'; evmLabels();
+  evmLabels(); const on = [...document.querySelectorAll('[data-eusd]')].find(x => x.getAttribute('aria-pressed') === 'true'); if (on) on.click(); else $('#base-eth').value = ESIDE === 'buy' ? '0.5' : '1';
 });
-$('#base-sym').onchange = evmLabels;
-/** Fee and Impact · slippage for an EVM venue, from what it reports: its own fee in bps (and dollars), the network fee in dollars, the impact and its source, the slippage. */
-function evmCostCells(v) {
-  const fee = v.feeBps === undefined ? '–' : v.feeBps === 0 ? 'none' : `${n(v.feeBps, v.feeBps < 10 ? 1 : 0)} bps`;
-  const feeTip = [v.feeBps ? `${n(v.feeBps, 1)} bps${v.feeUsd !== undefined ? ` ($${n(v.feeUsd, 4)})` : ''} to the aggregator` : 'no aggregator fee', v.gasUsd !== undefined ? `network about $${n(v.gasUsd, 4)}` : 'network fee not reported'].join('; ');
-  // a venue that pays a better rate at this size than at 1% of it (fixed costs such as a relayer fee or gas spread over more) has no impact to show
-  const better = v.impactPct !== undefined && v.impactPct >= -0.005, imp = v.impactPct === undefined ? '–' : better ? 'none' : `${n(-v.impactPct, 2)}%`;
-  const slip = v.slippageBps !== undefined ? ` · ≤${n(v.slippageBps / 100, 2)}%` : v.slippageNote ? ' · at build' : '';
-  const impTip = `${v.impactPct === undefined ? 'No impact figure' : better ? `No impact: this size gets ${n(v.impactPct, 3)}% more per unit than 1% of it (fixed costs spread over more)` : `Impact ${imp}: ${v.impactFrom}`}${v.venueImpactPct !== undefined ? `. ${v.name}'s own figure: ${n(Math.abs(v.venueImpactPct), 2)}% (${v.venueImpactFrom}), not comparable across venues` : ''}; ${v.slippageBps !== undefined ? `may fill up to ${n(v.slippageBps / 100, 2)}% below the quote` : `slippage ${v.slippageNote ?? 'not reported'}`}`;
-  return `<td class="num" title="${esc(feeTip)}">${esc(fee)}${v.gasUsd !== undefined ? `<span class="muted"> + $${n(v.gasUsd, v.gasUsd < 0.01 ? 4 : 2)} gas</span>` : ''}</td><td class="num" title="${esc(impTip)}">${esc(imp)}<span class="muted">${esc(slip)}</span></td>`;
+document.querySelectorAll('[data-eusd]').forEach(b => b.onclick = () => { document.querySelectorAll('[data-eusd]').forEach(x => x.setAttribute('aria-pressed', x === b)); const u = eunitUsd(); if (u) { $('#base-eth').value = String(+(Number(b.dataset.eusd) / u).toPrecision(5)); esetUsd(); } });
+$('#base-eth').oninput = () => { document.querySelectorAll('[data-eusd]').forEach(x => x.setAttribute('aria-pressed', 'false')); esetUsd(); };
+$('#base-sym').onchange = () => { evmLabels(); eloadPrice(); };
+function efirmReset(state, why) {
+  clearInterval(etimer); $('#e-firm').classList.remove('expired'); $('#e-firm-badge').className = 'badge'; $('#e-firm-badge').textContent = state; $('#e-firm-meta').textContent = why ?? ''; $('#e-firm-meta').title = why ?? '';
+  ['e-q-recv', 'e-q-per', 'e-q-delta', 'e-q-maker'].forEach(id => { $('#' + id).textContent = '–'; }); ['e-q-recv-s', 'e-q-ref', 'e-q-best', 'e-q-fee'].forEach(id => { $('#' + id).innerHTML = '&nbsp;'; });
+  $('#e-expiry').className = 'expiry'; $('#e-expiry i').style.width = '0';
+}
+/** The engine decision, as the execution server would take it with this .env: its route on this chain, that route's quote, the 3% share-price check, its per-trade cap
+ *  (buys), the stock switch (buys), and the market makers, which the server does not take on EVM chains yet. */
+function edecision(r, rows, P) {
+  const b = $('#e-dec-badge'), l = $('#e-dec-list'), sv = r.server ?? {}, buy = r.side === 'buy', reasons = [], nat = r.native;
+  const mine = sv.venue ? rows.find(v => v.name === sv.venue) : undefined;
+  reasons.push({ ok: !!sv.venue, text: sv.venue ? `The server would trade this through ${sv.venue}: ${sv.why}` : `The server would not trade this: ${sv.why}` });
+  if (sv.venue) reasons.push({ ok: !!mine?.out, text: mine?.out ? `${sv.venue} quotes it: ${P(mine).recv}` : `${sv.venue} has no quote right now: ${mine?.none ?? 'no answer'}` });
+  if (mine?.out) { const x = P(mine); reasons.push({ ok: x.ok !== false, text: x.per && r.refUsd ? `Share price check: ${usd(x.per)} per share against ${usd(r.refUsd)} (${bpsTxt(x.vsRef)}; the server refuses beyond 3%)` : 'No share price right now: the server would refuse unless allowRiskyToken is sent' }); }
+  if (buy) {
+    reasons.push({ ok: !!sv.stocksOn, text: sv.stocksOn ? 'Stock buys are on (STOCKS_ENABLED)' : 'Stock buys are off on this server: it refuses buys until the operator turns them on' });
+    reasons.push({ ok: Number(r.units) <= sv.capNative, text: Number(r.units) <= sv.capNative ? `${n(r.units, 4)} ${nat} is within the server's per-trade cap of ${n(sv.capNative, 4)} ${nat}` : `${n(r.units, 4)} ${nat} is above the server's per-trade cap of ${n(sv.capNative, 4)} ${nat}: it refuses this size (daily cap ${n(sv.dailyCapNative, 4)} ${nat})` });
+  } else reasons.push({ ok: true, text: 'Sells are not capped by size' });
+  const mm = rows.filter(v => v.kind === 'rfq' && v.out).sort((x, y) => (BigInt(y.out) > BigInt(x.out) ? 1 : -1))[0];
+  if (mm) { const ref = mine?.out ? (Number(mm.out) / Number(mine.out) - 1) * 1e4 : null; reasons.push({ ok: true, info: true, text: `${mm.name} would pay ${ref === null ? P(mm).recv : `${bpsTxt(ref)} against ${sv.venue}`}. The server does not take EVM market-maker quotes yet: shown for comparison` }); }
+  const go = reasons.filter(x => !x.info).every(x => x.ok);
+  b.className = 'badge ' + (go ? 'rfq' : ''); b.textContent = go ? `Use ${sv.venue}` : sv.venue ? 'Server refuses' : 'Not routed';
+  l.innerHTML = reasons.map(x => `<li class="${x.info ? 'wait' : x.ok ? 'ok' : 'bad'}">${icon(x.info ? 'wait' : x.ok ? 'ok' : 'bad')}<span>${esc(x.text)}</span></li>`).join('');
 }
 $('#base-f').onsubmit = async e => {
   e.preventDefault(); const amount = Number($('#base-eth').value.replace(/,/g, '')), body = $('#base-rows');
   if (!(amount > 0)) { body.innerHTML = '<tr><td colspan="8" class="err">Enter an amount above zero</td></tr>'; return; }
-  $('#base-go').disabled = true; $('#base-go').textContent = 'Asking…'; body.innerHTML = '<tr><td colspan="8"><span class="skel"></span></td></tr>';
+  $('#base-go').disabled = true; $('#base-go').textContent = 'Requesting…'; body.innerHTML = '<tr><td colspan="8"><span class="skel"></span></td></tr>';
+  efirmReset('Waiting'); $('#e-dec-badge').className = 'badge'; $('#e-dec-badge').textContent = 'Working'; $('#e-dec-list').innerHTML = `<li class="wait">${icon('wait')}<span class="muted">Asking the aggregators and market makers at this size and at 1% of it.</span></li>`;
   try {
     const r = await (await fetch('/api/evm/quote', { method: 'POST', body: JSON.stringify({ chain: $('#base-chain').value, symbol: $('#base-sym').value, side: ESIDE, amount }) })).json();
     if (r.error) throw new Error(r.error);
     liqPanel($('#liq-e'), r.chain, r.token, r.symbol);
-    const buy = r.side === 'buy', mult = Number(r.multiplier), outDec = buy ? r.decimals : 18;
-    const got = r.venues.filter(v => v.out), best = got.reduce((m, v) => (BigInt(v.out) > m ? BigInt(v.out) : m), 0n), sorted = [...got.sort((a, b) => (BigInt(b.out) > BigInt(a.out) ? 1 : -1)), ...r.venues.filter(v => !v.out)];
-    const inUsd = buy && r.nativeUsd ? amount * r.nativeUsd : null;
-    $('#base-meta').textContent = `${r.label}: ${buy ? `pay ${n(amount, 4)} ${r.native}${inUsd ? ` ≈ ${usd(inUsd)}` : ''}` : `sell ${n(amount, 4)} ${r.symbol}`} · share price ${r.refUsd ? usd(r.refUsd) : 'unknown'}${mult !== 1 ? ` · ${n(mult, 6)} shares per token` : ''} · server route: ${r.serverRoute}`;
+    const buy = r.side === 'buy', mult = Number(r.multiplier), outDec = buy ? r.decimals : 18, sv = r.server ?? {};
+    // one row's figures: what it delivers, per share, against the share price (worse is a higher price on a buy, a lower one on a sell)
+    const P = v => { const out = Number(v.out) / 10 ** outDec, shares = (buy ? out : amount) * mult, dollars = r.nativeUsd ? (buy ? amount : out) * r.nativeUsd : null, per = dollars && shares ? dollars / shares : null;
+      const vsRef = per && r.refUsd ? (per / r.refUsd - 1) * 1e4 : null, worse = vsRef === null ? null : buy ? vsRef > 0 : vsRef < 0;
+      return { out, per, vsRef, worse, ok: vsRef === null ? null : Math.abs(vsRef) <= 300 || !worse, recv: `${n(out, buy ? 4 : 6)} ${buy ? r.symbol : r.native}${per ? ` (${usd(per)} per share)` : ''}` }; };
+    const got = r.venues.filter(v => v.out), mine = sv.venue ? got.find(v => v.name === sv.venue) : undefined, best = got.reduce((m, v) => (BigInt(v.out) > m ? BigInt(v.out) : m), 0n), base = mine ? BigInt(mine.out) : best;
+    $('#base-vs-h').textContent = mine ? `vs ${sv.venue} (server)` : 'vs best';
+    const sorted = [...got.sort((a, b) => (BigInt(b.out) > BigInt(a.out) ? 1 : -1)), ...r.venues.filter(v => !v.out)];
+    const inUsd = buy && r.nativeUsd ? amount * r.nativeUsd : !buy && EPRICE?.tokenUsd ? amount * EPRICE.tokenUsd : null;
+    $('#base-meta').textContent = `${r.label}: ${buy ? `pay ${n(amount, 4)} ${r.native}` : `sell ${n(amount, 4)} ${r.symbol}`}${inUsd ? ` ≈ ${usd(inUsd)}` : ''} · share ${r.refUsd ? usd(r.refUsd) : 'unknown'}${mult !== 1 ? ` · ${n(mult, 6)} shares per token` : ''}`;
     body.innerHTML = sorted.map(v => {
-      if (!v.out) return `<tr><td class="name">${esc(v.name)}</td><td class="sub" colspan="7">${esc(v.none ?? 'no quote')}</td></tr>`;
-      const out = Number(v.out) / 10 ** outDec, shares = (buy ? out : amount) * mult, dollars = r.nativeUsd ? (buy ? amount : out) * r.nativeUsd : null;
-      const per = dollars && shares ? dollars / shares : null, vsRef = per && r.refUsd ? (per / r.refUsd - 1) * 1e4 : null, worse = vsRef === null ? null : buy ? vsRef > 0 : vsRef < 0, vsBest = (Number(v.out) / Number(best) - 1) * 1e4;
-      return `<tr><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td>${evmCostCells(v)}<td class="num">${n(out, buy ? 4 : 6)}</td><td class="num">${per ? usd(per) : '–'}</td>
-        <td class="num">${vsRef === null ? '–' : `<span class="${worse ? 'neg' : 'pos'}">${bpsTxt(vsRef)}</span>`}</td><td class="num">${vsBest === 0 ? '<span class="muted">Best</span>' : `<span class="neg">${bpsTxt(vsBest)}</span>`}</td></tr>`;
+      const tag = v.name === sv.venue ? ' <span class="badge" style="height:18px">server</span>' : v.kind === 'rfq' ? ' <span class="badge rfq" style="height:18px">maker</span>' : '';
+      if (!v.out) return `<tr class="${v.name.includes('RFQ') || v.name === 'UniswapX' ? 'is-rfq' : ''}"><td class="name">${esc(v.name)}${tag}</td><td class="sub" colspan="7" title="${esc(v.none ?? '')}">${esc(v.none ?? 'no quote')}</td></tr>`;
+      const x = P(v), vs = base ? (Number(v.out) / Number(base) - 1) * 1e4 : null, ref = mine ? v === mine : BigInt(v.out) === best;
+      return `<tr class="${v.kind === 'rfq' ? 'is-rfq' : ''}"><td class="name">${esc(v.name)}${tag}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td>${evmCostCells(v)}<td class="num">${n(x.out, buy ? 4 : 6)}</td><td class="num">${x.per ? usd(x.per) : '–'}</td>
+        <td class="num">${x.vsRef === null ? '–' : `<span class="${x.worse ? 'neg' : 'pos'}">${bpsTxt(x.vsRef)}</span>`}</td><td class="num">${ref ? `<span class="muted">${mine ? 'Reference' : 'Best'}</span>` : vs === null ? '–' : `<span class="${vs >= 0 ? 'pos' : 'neg'}">${bpsTxt(vs)}</span>`}</td></tr>`;
     }).join('');
-  } catch (err) { body.innerHTML = `<tr><td colspan="8" class="err">${esc(err.message)}</td></tr>`; }
-  $('#base-go').disabled = false; $('#base-go').textContent = 'Compare';
+    // the firm quote card: the best market-maker quote, counting down to its expiry
+    const mm = got.filter(v => v.kind === 'rfq').sort((x, y) => (BigInt(y.out) > BigInt(x.out) ? 1 : -1))[0];
+    if (!mm) { const why = r.venues.filter(v => v.name.includes('RFQ') || v.name === 'UniswapX').map(v => `${v.name}: ${v.none ?? 'no quote'}`).join(' · '); efirmReset('No quote', why); }
+    else {
+      const x = P(mm), d = mine ? (Number(mm.out) / Number(mine.out) - 1) * 1e4 : (Number(mm.out) / Number(best) - 1) * 1e4;
+      $('#e-q-recv-l').textContent = buy ? 'Shares' : 'Receive'; $('#e-q-recv').textContent = buy ? n(x.out * mult, 2) : `${n(x.out, 6)} ${r.native}`;
+      $('#e-q-recv-s').textContent = buy ? `${n(x.out, 4)} ${r.symbol}` : `for ${n(amount * mult, 2)} shares`;
+      $('#e-q-per').textContent = x.per ? usd(x.per) : '–'; $('#e-q-ref').textContent = r.refUsd && x.vsRef !== null ? `Share ${usd(r.refUsd)}, ${bpsTxt(x.vsRef)}` : 'No share price';
+      $('#e-q-delta-l').textContent = mine ? `Against ${sv.venue} (server)` : 'Against the best route'; $('#e-q-delta').innerHTML = `<span class="${d >= 0 ? 'pos' : 'neg'}">${bpsTxt(d)}</span>`;
+      $('#e-q-best').textContent = mine ? `${sv.venue} is the server's route here` : sv.why ?? '';
+      $('#e-q-maker').textContent = mm.name.replace(/ RFQ$/, ''); $('#e-q-maker').title = mm.rfq?.settlement ?? ''; $('#e-q-fee').textContent = `Settles via ${short(mm.rfq?.settlement ?? '')}${mm.gasUsd !== undefined ? `, gas $${n(mm.gasUsd, 2)}` : ''}`;
+      $('#e-firm-meta').textContent = ''; clearInterval(etimer);
+      const exp = Number(mm.rfq?.expiry ?? 0), total = Math.max(5, exp - Math.floor(Date.now() / 1000));
+      const tick = () => { const left = exp - Date.now() / 1000;
+        if (!exp || left <= 0) { clearInterval(etimer); $('#e-firm').classList.add('expired'); $('#e-firm-badge').className = 'badge'; $('#e-firm-badge').textContent = 'Expired'; $('#e-expiry i').style.width = '0'; $('#e-firm-meta').textContent = 'Request again for a new quote'; return; }
+        $('#e-firm-badge').className = 'badge rfq'; $('#e-firm-badge').textContent = `Live, ${Math.ceil(left)} s`; $('#e-expiry').classList.toggle('low', left < 4); $('#e-expiry i').style.width = Math.min(100, left / total * 100) + '%'; };
+      tick(); etimer = setInterval(tick, 500);
+    }
+    edecision(r, r.venues, P);
+  } catch (err) { body.innerHTML = `<tr><td colspan="8" class="err">${esc(err.message)}</td></tr>`; efirmReset('Error', err.message); $('#e-dec-badge').className = 'badge neg'; $('#e-dec-badge').textContent = 'Error'; $('#e-dec-list').innerHTML = `<li class="bad">${icon('bad')}<span>${esc(err.message)}</span></li>`; }
+  $('#base-go').disabled = false; $('#base-go').textContent = 'Request quotes';
 };
+/** Fee and Impact · slippage for an EVM venue, from what it reports: its own fee in bps (and dollars), the network fee in dollars, the impact and its source, the slippage. */
+function evmCostCells(v) {
+  const fee = v.feeBps === undefined ? '–' : v.feeBps === 0 ? 'none' : `${n(v.feeBps, v.feeBps < 10 ? 1 : 0)} bps`;
+  const feeTip = [v.feeBps ? `${n(v.feeBps, 1)} bps${v.feeUsd !== undefined ? ` ($${n(v.feeUsd, 4)})` : ''} to the aggregator` : 'no aggregator fee', v.gasUsd !== undefined ? `network about $${n(v.gasUsd, 4)}` : 'network fee not reported'].join('; ');
+  // a market maker's firm quote fills at exactly its price, as JupiterZ on the Solana tab
+  if (v.kind === 'rfq') return `<td class="num" title="${esc(feeTip)}">${esc(fee)}${v.gasUsd ? `<span class="muted"> + $${n(v.gasUsd, 2)} gas</span>` : ''}</td><td class="num" title="A firm quote signed by the maker: it fills at exactly this price, no impact beyond it, no slippage">firm<span class="muted"> · 0</span></td>`;
+  // a venue that pays a better rate at this size than at 1% of it (fixed costs such as a relayer fee or gas spread over more) has no impact to show
+  const better =v.impactPct !== undefined && v.impactPct >= -0.005, imp = v.impactPct === undefined ? '–' : better ? 'none' : `${n(-v.impactPct, 2)}%`;
+  const slip = v.slippageBps !== undefined ? ` · ≤${n(v.slippageBps / 100, 2)}%` : v.slippageNote ? ' · at build' : '';
+  const impTip = `${v.impactPct === undefined ? 'No impact figure' : better ? `No impact: this size gets ${n(v.impactPct, 3)}% more per unit than 1% of it (fixed costs spread over more)` : `Impact ${imp}: ${v.impactFrom}`}${v.venueImpactPct !== undefined ? `. ${v.name}'s own figure: ${n(Math.abs(v.venueImpactPct), 2)}% (${v.venueImpactFrom}), not comparable across venues` : ''}; ${v.slippageBps !== undefined ? `may fill up to ${n(v.slippageBps / 100, 2)}% below the quote` : `slippage ${v.slippageNote ?? 'not reported'}`}`;
+  return `<td class="num" title="${esc(feeTip)}">${esc(fee)}${v.gasUsd !== undefined ? `<span class="muted"> + $${n(v.gasUsd, v.gasUsd < 0.01 ? 4 : 2)} gas</span>` : ''}</td><td class="num" title="${esc(impTip)}">${esc(imp)}<span class="muted">${esc(slip)}</span></td>`;
+}
 /** Where a token's liquidity is: every public pool DexScreener lists for it, grouped by DEX, and the largest pools. */
 /** The Fee and Impact · slippage cells of a route row. Impact is shown as a size (Jupiter reports it negative, Raydium positive); slippage is the tolerance the transaction
  *  would carry, or "firm" for an RFQ quote. Network fees (signature, priority, rent) are added when the venue reports them. */
@@ -680,7 +771,7 @@ function xray(x, txEl, gateEl) {
     </tbody></table></div>`;
   txEl.querySelectorAll('tr.ix').forEach(r => { const t = () => { const o = r.getAttribute('aria-expanded') !== 'true'; r.setAttribute('aria-expanded', o); txEl.querySelector(`tr.acc[data-for="${r.dataset.i}"]`).hidden = !o; }; r.onclick = t; r.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); t(); } }; });
   gateEl.innerHTML = `<div class="ph"><h2>Gate</h2><span class="badge ${x.verdict.ok ? 'pos' : 'neg'}">${x.verdict.ok ? 'Accepted' : 'Refused'}</span></div>
-    <div class="verdict ${x.verdict.ok ? 'pos' : 'neg'}">${icon(x.verdict.ok ? 'ok' : 'bad')}<div>${x.verdict.ok ? 'Safe for your wallet to sign' : 'Your wallet would not sign this'}${x.verdict.reason ? `<small>${esc(x.verdict.reason)}</small>` : ''}</div></div>
+    <div class="verdict ${x.verdict.ok ? 'pos' : 'neg'}">${icon(x.verdict.ok ? 'ok' : 'bad')}<div>${x.verdict.ok ? 'Safe for your wallet to sign' : 'Your wallet would not sign this'}${x.verdict.plain || x.verdict.reason ? `<small>${esc(x.verdict.plain ?? x.verdict.reason)}</small>` : ''}${x.verdict.plain && x.verdict.reason ? `<small class="muted" style="opacity:.7">Technical: ${esc(x.verdict.reason)}</small>` : ''}</div></div>
     <ul class="checks">${x.checks.map(c => `<li class="${c.ok ? 'ok' : 'bad'}">${icon(c.ok ? 'ok' : 'bad')}<span>${esc(c.name)}</span></li>`).join('')}</ul>
     <div class="simline" data-sim><span class="muted">Simulation pending…</span></div>`;
 }
