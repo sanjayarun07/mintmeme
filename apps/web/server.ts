@@ -47,6 +47,8 @@ const READ_ONLY_GET = new Set(['/api/sol/config', '/api/sol/wallet/status']);
 const STATIC: Record<string, string> = { '/styles.css': 'text/css', '/solana.css': 'text/css', '/solcore.js': 'text/javascript', '/views3.js': 'text/javascript', '/views4.js': 'text/javascript',
   '/solpro.js': 'text/javascript', '/solboot.js': 'text/javascript', '/privy.bundle.js': 'text/javascript', '/app.css': 'text/css', '/app.js': 'text/javascript' };
 /** Read-only JSON-RPC methods the Privy approval screen needs (fees, balances, simulation). Sending is not allowed. */
+const SHORT_LIVED = new Set(['getSlot', 'getBlockHeight', 'getLatestBlockhash', 'getEpochInfo', 'getRecentPrioritizationFees']);
+const rpcCache = new Map<string, { at: number; result: unknown }>();
 const RPC_OK = new Set(['getLatestBlockhash', 'getBalance', 'getFeeForMessage', 'simulateTransaction', 'getAccountInfo', 'getMultipleAccounts', 'getTokenAccountsByOwner', 'getTokenAccountBalance', 'getSlot',
   'getBlockHeight', 'isBlockhashValid', 'getMinimumBalanceForRentExemption', 'getRecentPrioritizationFees', 'getVersion', 'getEpochInfo']);
 
@@ -94,7 +96,15 @@ export function createSolServer(o: { stateDir?: string } = {}) {
       if (!sol) return send(503, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'no RPC configured' } }));
       const one = (b: any) => b && typeof b.method === 'string' && RPC_OK.has(b.method);
       if (Array.isArray(body) ? !body.every(one) : !one(body)) return send(403, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32601, message: 'method not allowed by this relay' } }));
-      try { const r = await fetch(sol.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }); return send(r.status, await r.text()); }
+      // answers that change every slot anyway (slot, height, latest blockhash, epoch, fees) are shared for 1 s across every page: fewer calls against the node's rate limit
+      const ck = !Array.isArray(body) && SHORT_LIVED.has(body.method) ? body.method + JSON.stringify(body.params ?? []) : undefined, hit = ck ? rpcCache.get(ck) : undefined;
+      if (hit && Date.now() - hit.at < 1000) return send(200, ser({ jsonrpc: '2.0', id: body.id ?? null, result: hit.result }));
+      try {
+        const { postRpc } = await import('../../packages/sol/src/solchain.ts');   // retries the node's rate limit (429) with backoff before answering
+        const r = await postRpc(fetch, sol.url, JSON.stringify(body), { timeoutMs: 15_000 });
+        if (ck && r.status === 200) { try { const j = JSON.parse(r.text); if (j && j.result !== undefined && !j.error) { rpcCache.set(ck, { at: Date.now(), result: j.result }); if (rpcCache.size > 200) rpcCache.delete(rpcCache.keys().next().value!); } } catch { /* not cached */ } }
+        return send(r.status, r.text.split(sol.secret).join('***'));
+      }
       catch { return send(502, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } })); }
     }
     body = { ...body, __session: session };

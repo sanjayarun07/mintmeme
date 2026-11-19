@@ -32,13 +32,26 @@ import { decodeFeeConfig, PumpVenue, PUMP_PROGRAM, decodeCurve, decodeGlobal, pu
 
 /** Thrown by an RPC when the node ANSWERED with a JSON-RPC error object. Anything else thrown is a transport failure (the ack may be lost). */
 export class SolJsonRpcError extends Error { constructor(message: string, public data?: any) { super(message); } }
-/** Plain fetch JSON-RPC client (no read-only allowlist: use only against a node you control, e.g. a local test validator). */
+/** POST to a Solana RPC, retrying a rate limit ("429 Too Many Requests", or a JSON-RPC error -32429) up to `tries` more times: waits Retry-After when the node sends
+ *  one (at most 3 s), else 300 ms, 700 ms, 1.5 s with jitter. A 429 means the node did not run the call, so a retry never sends anything twice. Seen live on Helius's
+ *  plan limit: 2 of 5 quick getSlot calls answered 429 while users linked wallets. Returns the last response (the caller reads it). */
+export async function postRpc(fetchFn: typeof fetch, url: string, body: string, o: { tries?: number; sleep?: (ms: number) => Promise<void>; timeoutMs?: number } = {}): Promise<{ status: number; text: string; headers: Headers }> {
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms))), waits = [300, 700, 1500];
+  for (let i = 0; ; i++) {
+    const r = await fetchFn(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body, ...(o.timeoutMs ? { signal: AbortSignal.timeout(o.timeoutMs) } : {}) });
+    const text = await r.text(), limited = r.status === 429 || /"code"\s*:\s*-32429/.test(text);
+    if (!limited || i >= (o.tries ?? 3)) return { status: r.status, text, headers: r.headers };
+    const after = Number(r.headers.get('retry-after')); await sleep(Number.isFinite(after) && after > 0 ? Math.min(after * 1000, 3000) : waits[Math.min(i, waits.length - 1)] + Math.floor(Math.random() * 150));
+  }
+}
+
+/** Plain fetch JSON-RPC client (no read-only allowlist: use only against a node you control, e.g. a local test validator). Rate limits are retried (postRpc). */
 export class SolJsonRpc implements SolRpc {
   n = 0; constructor(private url: string, private fetchFn: typeof fetch = fetch) {}
   async call<T = any>(method: string, params: unknown[] = []): Promise<T> {
-    const res = await this.fetchFn(this.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++this.n, method, params }) });
-    if (!res.ok) throw new Error(`HTTP ${res.status} on ${method}`);
-    const j: any = await res.json(); if (j.error) throw new SolJsonRpcError(j.error.message ?? JSON.stringify(j.error), j.error.data);
+    const res = await postRpc(this.fetchFn, this.url, JSON.stringify({ jsonrpc: '2.0', id: ++this.n, method, params }));
+    if (res.status < 200 || res.status >= 300) throw new Error(`HTTP ${res.status} on ${method}`);
+    const j: any = JSON.parse(res.text); if (j.error) throw new SolJsonRpcError(j.error.message ?? JSON.stringify(j.error), j.error.data);
     return j.result as T;
   }
 }

@@ -216,3 +216,15 @@ test('chain: token accounts the route opens for in-between tokens are closed aft
   const w3: any = world({ jup: () => withMid(w3), sim: () => (++sims === 1 ? { value: { err: { InstructionError: [9, { Custom: 11 }] }, logs: ['Non-native account can only be closed if its balance is zero'] } } : ok) });
   const p3 = await w3.c.prepare(tx()); assert.deepEqual(closesIn(p3.raw), [wsolAta], 'rebuilt without our closes'); assert.ok(sims >= 2);
 });
+
+test('Solana RPC rate limits are retried with backoff (HTTP 429 and JSON-RPC -32429), and give up after a few tries', async () => {
+  const { postRpc, SolJsonRpc } = await import('../src/solchain.ts');
+  let n = 0; const waits: number[] = [];
+  const f = (async () => { n++; return n <= 2 ? new Response('Too Many Requests', { status: 429 }) : n === 3 ? new Response('{"jsonrpc":"2.0","id":1,"error":{"code":-32429,"message":"rate limited"}}') : new Response('{"jsonrpc":"2.0","id":1,"result":42}'); }) as any;
+  const r = await postRpc(f, 'http://rpc', '{}', { sleep: async ms => { waits.push(ms); } });
+  assert.equal(r.text, '{"jsonrpc":"2.0","id":1,"result":42}'); assert.equal(n, 4); assert.equal(waits.length, 3); assert.ok(waits[0] >= 300 && waits[2] >= 1500);
+  n = 0; const always = (async () => { n++; return new Response('Too Many Requests', { status: 429, headers: { 'retry-after': '1' } }); }) as any; const w2: number[] = [];
+  const g = await postRpc(always, 'http://rpc', '{}', { sleep: async ms => { w2.push(ms); } }); assert.equal(g.status, 429); assert.equal(n, 4, 'three retries, then the 429 is returned'); assert.deepEqual(w2, [1000, 1000, 1000], 'Retry-After is honoured');
+  n = 0; const rpc = new SolJsonRpc('http://rpc', (async () => { n++; return n === 1 ? new Response('', { status: 429 }) : new Response('{"jsonrpc":"2.0","id":1,"result":7}'); }) as any);
+  assert.equal(await rpc.call('getSlot'), 7);
+});
