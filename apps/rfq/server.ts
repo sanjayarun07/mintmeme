@@ -20,6 +20,7 @@ import { ROBINHOOD_STOCKS } from '../../packages/evm/src/robinhoodstocks.ts';
 import { keccak256 } from '../../packages/evm/src/keccak.ts';
 import { CHAIN_SPECS, stocksEnabled } from '../server/chains.ts';
 import { EvmJsonRpc, baseEthUsd, EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
+import { JsonRpcError } from '../../packages/evm/src/rpcchain.ts';
 import { NATIVE } from '../../packages/core/src/index.ts';
 
 const WSOL = 'So11111111111111111111111111111111111111112', USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -370,7 +371,9 @@ const rt = (id: string) => { let r = evmRt.get(id); if (!r) { const c = EVM_DESK
 async function evmToken(id: string, token: string) {
   const k = `${id}:${token}`, hit = tokenInfo.get(k); if (hit && Date.now() - hit.mult.at < 60_000) return hit;
   const { rpc } = rt(id), decimals = hit?.decimals ?? Number(BigInt(await rpc.call<string>('eth_call', [{ to: token, data: '0x313ce567' }, 'latest'])));
-  const m = await rpc.call<string>('eth_call', [{ to: token, data: UI_MULT }, 'latest']).then(x => BigInt(x)).catch(() => 0n);
+  // only a token that reverts the call (the node answered: it has no multiplier) counts 1. A transport failure, such as the node's HTTP 429 when the Alchemy key was
+  // over its monthly limit (2026-11-19), is an error: it once made NVDAc read as exactly 1 share (it is 1.000537) and that was cached for a minute
+  const m = await rpc.call<string>('eth_call', [{ to: token, data: UI_MULT }, 'latest']).then(x => BigInt(x), e => { if (e instanceof JsonRpcError || /revert/i.test(String((e as Error).message))) return 0n; throw new Error(`the ${EVM_DESK[id].label} node did not answer (${String((e as Error).message).slice(0, 80)}), so the share multiplier cannot be read`); });
   const v = m > 0n ? `${m / 10n ** 18n}.${(m % 10n ** 18n).toString().padStart(18, '0')}` : '1', info = { decimals, mult: { v, at: Date.now() } }; tokenInfo.set(k, info); return info;
 }
 /** POST /api/evm/quote {chain, symbol, side: 'buy'|'sell', amount}: amount is in the native coin for a buy, in stock tokens for a sell (whole units). */

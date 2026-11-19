@@ -95,6 +95,8 @@ test('the real-funds gate: confirm is required everywhere; real chains also need
     assert.equal(calls.at(-1)!.url, 'http://exec.test/v1/bnb/orders/limit-buy'); assert.deepEqual(calls.at(-1)!.body, { token: '0xabc', priceUsd: '1.5', bnb: '0.02' });
     await callTool('meme_sell', { chain: 'solana', token: 'TSLAx', pct: 25, confirm: true }, ctx); assert.deepEqual(calls.at(-1)!.body, { token: 'TSLAx', pct: 25 });
     assert.equal(body(await callTool('meme_sell', { chain: 'solana', token: 'TSLAx', confirm: true }, ctx)).error.code, 'bad_request', 'a sell must say how much');
+    // practice takes pctBps only: pct becomes pctBps there (found in a live run against the practice server)
+    await callTool('meme_sell', { chain: 'practice', token: '0xMEME', pct: 50, confirm: true }, ctx); assert.deepEqual(calls.at(-1)!.body, { token: '0xMEME', pctBps: 5000, walletId: 'w1' });
     await callTool('meme_bulk', { chain: 'base', side: 'sell', token: '0xabc', wallets: ['a', 'b'], pctBps: 5000, confirm: true }, ctx); assert.equal(calls.at(-1)!.url, 'http://exec.test/v1/base/bulk/sell');
     assert.ok(calls.every(c => !('confirm' in (c.body ?? {}))), 'confirm is never sent to the server');
   }

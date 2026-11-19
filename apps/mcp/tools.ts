@@ -229,7 +229,9 @@ spend('meme_sell', 'Market sell', 'Market sell (POST /v1/<chain>/trades/sell): `
     slippagePct: num('Slippage percent, up to 50.', { minimum: 0.01, maximum: 50 }), slippageBps: int('Slippage in basis points (practice).', { minimum: 1, maximum: 5000 }), walletId: str('Practice only: w1 or w2.', { pattern: ID }), key: str('Idempotency key.', { pattern: ID }), mevProtection: bool('Solana: send privately through Jito.'), ...stockProps }, ['chain', 'token'],
   (a, c) => {
     if ([a.pct, a.tokens, a.amount, a.pctBps, a.shares].every(x => x === undefined)) throw new ToolError('bad_request', 'say how much to sell: pct, tokens, shares (stocks) or, on practice, amount or pctBps');
-    const b: Json = pick(a, ['token', 'pct', 'tokens', 'amount', 'pctBps', 'shares', 'slippagePct', 'slippageBps', 'mevProtection', 'perShare', 'allowRiskyToken']); if (a.chain === 'practice') b.walletId = a.walletId ?? 'w1';
+    const b: Json = pick(a, ['token', 'pct', 'tokens', 'amount', 'pctBps', 'shares', 'slippagePct', 'slippageBps', 'mevProtection', 'perShare', 'allowRiskyToken']);
+    // the practice server takes a share of the balance as pctBps only: `pct` (what an assistant naturally sends) is turned into it (50 -> 5000), found in a live run
+    if (a.chain === 'practice') { b.walletId = a.walletId ?? 'w1'; if (b.pct !== undefined && b.pctBps === undefined) { b.pctBps = Math.round(Number(b.pct) * 100); delete b.pct; } }
     return api(c, 'POST', a.chain, '/v1/trades/sell', b, { 'idempotency-key': idemKey(a, c, 'sell') });
   });
 spend('meme_place_order', 'Place standing order', 'A standing order that trades by itself when its trigger is hit (POST /v1/<chain>/orders/<type>): limit-buy (with `amount` of the native coin), limit-sell, take-profit, stop-loss (with `tokens` or `pct`), trigger `priceUsd` or `price` (native per token); trailing-stop with `trailPct`; bracket with `tpUsd` and/or `slUsd`. Practice uses raw `amount`, `priceE18`/`trailBps` and `walletId`.',
