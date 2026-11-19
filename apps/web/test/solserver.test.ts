@@ -14,7 +14,8 @@ test('page and assets are served, removed pages are gone, GET is allowed only fo
   try {
     assert.equal((await fetch(base + '/solana')).status, 200); assert.equal((await fetch(base + '/views4.js')).status, 200);
     const root = await fetch(base + '/', { redirect: 'manual' }); assert.equal(root.status, 302); assert.equal(root.headers.get('location'), '/solana');
-    for (const gone of ['/index.html', '/app.js', '/api/markets']) assert.equal((await fetch(base + gone)).status, 404, gone);
+    for (const gone of ['/index.html', '/api/markets']) assert.equal((await fetch(base + gone)).status, 404, gone);
+    for (const p of ['/app', '/app.css', '/app.js']) assert.equal((await fetch(base + p)).status, 200, p + ' (the trading app)');
     const cfg = await fetch(base + '/api/sol/config'); assert.equal(cfg.status, 200, 'the page reads its config with a plain GET'); assert.ok('privyAppId' in (await cfg.json() as any));
     assert.equal((await fetch(base + '/api/sol/kill')).status, 405, 'a GET can never act (a cross-site image could otherwise flip the kill switch)');
     assert.equal((await post('/api/sol/kill', { on: true }, { origin: 'https://evil.example' })).status, 403, 'a post from another site is refused');

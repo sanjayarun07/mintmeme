@@ -13,7 +13,7 @@ const UI = { showWalletUIs: true };
 const plog = (m) => { console.log('[privy]', m); (window.__privyLog = window.__privyLog || []).push(new Date().toLocaleTimeString() + ' ' + m); window.__privyLog = window.__privyLog.slice(-6); window.dispatchEvent(new Event('privylog')); };
 const dialogProbe = () => { const els = [...document.querySelectorAll('[id*="privy" i], [class*="privy" i], dialog, [role="dialog"], iframe')]; return els.slice(0, 8).map(e => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return `${e.tagName}#${e.id || ''} ${Math.round(r.width)}x${Math.round(r.height)} display=${cs.display} vis=${cs.visibility} z=${cs.zIndex}`; }).join(' | ') || 'no dialog/iframe elements found'; };
 
-function Panel({ onWallets }) {
+function Panel({ onWallets, headless }) {
   const { ready, authenticated, logout, user } = usePrivy();
   const { login } = useLogin();
   const { createWallet } = useCreateWallet();
@@ -108,6 +108,17 @@ function Panel({ onWallets }) {
 
   useEffect(() => { onWallets(authenticated && wReady ? wrapped : []); }, [authenticated, wReady, wrapped]);
 
+  // headless (the /app trading app): no UI here; the app reads window.MintPrivy.session and listens for the "mintprivy" event, and draws its own screens
+  useEffect(() => {
+    window.MintPrivy.session = {
+      ready, authenticated, email: (user && user.email && user.email.address) || null,
+      solAddress: wallets[0] ? String(wallets[0].address) : null, evmAddress: evmWallet ? evmWallet.address.toLowerCase() : null,
+      login: () => login(), logout: () => logout(),
+      createSol: () => createWallet(), createEvm: () => ev.current.createEvm(),
+    };
+    window.dispatchEvent(new Event('mintprivy'));
+  }, [ready, authenticated, user, wallets.map(w => w.address).join('|'), evmWallet && evmWallet.address]);
+  if (headless) return null;
   if (!ready) return <span className="faint">Loading Privy…</span>;
   if (!authenticated) return <button className="btn primary" onClick={() => login()}>Log in with Privy</button>;
   const who = (user && user.email && user.email.address) || 'your Privy account';
@@ -147,7 +158,7 @@ window.MintPrivy = {
           solana: { rpcs: { 'solana:mainnet': { rpc: createSolanaRpc(location.origin + '/api/sol/rpc'), rpcSubscriptions: createSolanaRpcSubscriptions('wss://api.mainnet-beta.solana.com') } } },
         }}
       >
-        <Panel onWallets={opts.onWallets} />
+        <Panel onWallets={opts.onWallets} headless={!!opts.headless} />
       </PrivyProvider>
     );
   },

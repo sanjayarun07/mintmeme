@@ -15,7 +15,7 @@ let solMainInst: SolMainnet | undefined; const solMain = async () => solMainInst
 const routes = () => import('./solroutes.ts');
 
 export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
-  '/api/sol/config': async () => ({ privyAppId: process.env.PRIVY_APP_ID || null, /* public ids, for adding the server signer on Base (MODE=base-mainnet); never the secret or the key */ privySignerId: process.env.PRIVY_AUTH_KEY_ID || null, privyBasePolicyId: process.env.PRIVY_BASE_POLICY_ID || null, privyEvmPolicyIds: Object.fromEntries([['base', 'PRIVY_BASE_POLICY_ID'], ['robinhood', 'PRIVY_ROBINHOOD_POLICY_ID'], ['bnb', 'PRIVY_BNB_POLICY_ID']].map(([c, k]) => [c, process.env.PRIVY_EVM_POLICY_ID?.trim() || process.env[k]?.trim() || null]).filter(([, v]) => v)), privyBundle: existsSync(new URL('./privy.bundle.js', import.meta.url)) }),
+  '/api/sol/config': async () => ({ privyAppId: process.env.PRIVY_APP_ID || null, /* public ids, for adding the server signer on Base (MODE=base-mainnet); never the secret or the key */ privySignerId: process.env.PRIVY_AUTH_KEY_ID || null, privyBasePolicyId: process.env.PRIVY_BASE_POLICY_ID || null, privySolanaPolicyId: process.env.PRIVY_SOLANA_POLICY_ID?.trim() || null, privyEvmPolicyIds: Object.fromEntries([['base', 'PRIVY_BASE_POLICY_ID'], ['robinhood', 'PRIVY_ROBINHOOD_POLICY_ID'], ['bnb', 'PRIVY_BNB_POLICY_ID']].map(([c, k]) => [c, process.env.PRIVY_EVM_POLICY_ID?.trim() || process.env[k]?.trim() || null]).filter(([, v]) => v)), privyBundle: existsSync(new URL('./privy.bundle.js', import.meta.url)) }),
   '/api/sol/search': async b => (await routes()).solSearch(b), '/api/sol/token': async b => (await routes()).solToken(b), '/api/sol/simulate': async b => (await routes()).solSimulate(b),
   '/api/sol/auth/nonce': async b => (await solMain()).authNonce(b), '/api/sol/auth/verify': async b => (await solMain()).authVerify(b),
   '/api/sol/sign/pending': async b => (await solMain()).pendingSigns(b), '/api/sol/sign/submit': async b => (await solMain()).submitSign(b), '/api/sol/sign/reject': async b => (await solMain()).rejectSign(b),
@@ -30,6 +30,10 @@ export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
   // bridge-then-buy on the EVM chains (bridge.ts): read-only quotes, balances and status; the user signs the one deposit in Privy, the server never does
   '/api/sol/evm/balances': async b => (await import('./bridge.ts')).evmBalances(b), '/api/sol/bridge/quote': async b => (await import('./bridge.ts')).bridgeQuote(b),
   '/api/sol/bridge/status': async b => (await import('./bridge.ts')).bridgeStatus(b),
+  // market data for the trading app (market.ts): read-only, public sources, cached
+  '/api/sol/market/list': async b => (await import('./market.ts')).marketList(b), '/api/sol/market/token': async b => (await import('./market.ts')).marketToken(b),
+  '/api/sol/market/candles': async b => (await import('./market.ts')).marketCandles(b), '/api/sol/market/search': async b => (await import('./market.ts')).marketSearch(b),
+  '/api/sol/market/meta': async b => (await import('./market.ts')).marketMeta(b), '/api/sol/market/rows': async b => (await import('./market.ts')).marketRows(b), '/api/sol/market/natives': async b => (await import('./market.ts')).marketNatives(b),
   '/api/sol/tradingkey/create': async b => (await solMain()).tradingKeyCreate(b),
   '/api/sol/tradingkey/use': async () => (await solMain()).tradingKeyUse(), '/api/sol/tradingkey/fund': async b => (await solMain()).fundTradingKey(b),
   '/api/sol/tradingkey/return': async b => (await solMain()).tradingKeyReturn(b), '/api/sol/tradingkey/funders': async () => ({ funders: await (await solMain()).keyFunders() }),
@@ -38,7 +42,7 @@ export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
 const READ_ONLY_GET = new Set(['/api/sol/config', '/api/sol/wallet/status']);
 /** The page and the files it loads (see solana.html). */
 const STATIC: Record<string, string> = { '/styles.css': 'text/css', '/solana.css': 'text/css', '/solcore.js': 'text/javascript', '/views3.js': 'text/javascript', '/views4.js': 'text/javascript',
-  '/solpro.js': 'text/javascript', '/solboot.js': 'text/javascript', '/privy.bundle.js': 'text/javascript' };
+  '/solpro.js': 'text/javascript', '/solboot.js': 'text/javascript', '/privy.bundle.js': 'text/javascript', '/app.css': 'text/css', '/app.js': 'text/javascript' };
 /** Read-only JSON-RPC methods the Privy approval screen needs (fees, balances, simulation). Sending is not allowed. */
 const RPC_OK = new Set(['getLatestBlockhash', 'getBalance', 'getFeeForMessage', 'simulateTransaction', 'getAccountInfo', 'getMultipleAccounts', 'getTokenAccountsByOwner', 'getTokenAccountBalance', 'getSlot',
   'getBlockHeight', 'isBlockhashValid', 'getMinimumBalanceForRentExemption', 'getRecentPrioritizationFees', 'getVersion', 'getEpochInfo']);
@@ -53,6 +57,7 @@ export function createSolServer(o: { stateDir?: string } = {}) {
     const send = (code: number, body: string, type = 'application/json') => { res.writeHead(code, { 'content-type': type + '; charset=utf-8', 'cache-control': 'no-cache', ...(setCookie ? { 'set-cookie': setCookie } : {}) }); res.end(body); };
     if (u.pathname === '/' ) { res.writeHead(302, { location: '/solana' }); return res.end(); }
     if (u.pathname === '/solana' || u.pathname === '/solana.html') return send(200, readFileSync(new URL('./solana.html', import.meta.url), 'utf8'), 'text/html');
+    if (u.pathname === '/app' || u.pathname === '/app.html') return send(200, readFileSync(new URL('./app.html', import.meta.url), 'utf8'), 'text/html');
     if (STATIC[u.pathname]) { const f = new URL('.' + u.pathname, import.meta.url); if (!existsSync(f)) return send(404, '{}'); return send(200, readFileSync(f, 'utf8'), STATIC[u.pathname]); }
     if (!u.pathname.startsWith('/api/sol/')) return send(404, ser({ ok: false, title: 'Not found', why: `No page ${u.pathname}.`, fix: 'Open /solana.' }));
     // Host first, for every /api/sol route: a DNS-rebinding page arrives with its own host name and must not even read the wallet status

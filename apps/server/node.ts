@@ -72,7 +72,7 @@ export interface NodeOptions {
   maxAppFeeBps?: number;
 }
 /** The files and calls of the /solana page (apps/web/solana.html and the scripts it loads). */
-const SOLANA_SAMPLE = new Set(['/solana', '/solana.html', '/solana.css', '/styles.css', '/solcore.js', '/views3.js', '/views4.js', '/solpro.js', '/solboot.js', '/privy.bundle.js']);
+const SOLANA_SAMPLE = new Set(['/solana', '/solana.html', '/solana.css', '/styles.css', '/solcore.js', '/views3.js', '/views4.js', '/solpro.js', '/solboot.js', '/privy.bundle.js', '/app', '/app.html', '/app.css', '/app.js']);
 export const isSolanaSamplePath = (p: string) => SOLANA_SAMPLE.has(p) || p.startsWith('/api/sol/');
 export const isLoopback = (a: string | undefined) => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 export const isLoopbackHost = (h: string | undefined) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(h ?? '');

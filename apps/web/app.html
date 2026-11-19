@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MINT Trade</title>
+<meta name="color-scheme" content="dark light">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/app.css?v=5">
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="#/" aria-label="MINT home"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 18V6l8 7 8-7v12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg><span>MINT</span></a>
+  <nav class="nav" aria-label="Main">
+    <a href="#/" data-nav="discover">Discover</a>
+    <a href="#/portfolio" data-nav="portfolio">Portfolio</a>
+    <a href="#/copy" data-nav="copy">Copy</a>
+    <a href="#/alerts" data-nav="alerts">Alerts</a>
+  </nav>
+  <div class="search" role="search">
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/><path d="m20 20-3.5-3.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input id="q" type="search" placeholder="Search token or paste address" autocomplete="off" spellcheck="false" aria-label="Search tokens">
+    <kbd>/</kbd>
+    <div id="qres" class="qres" role="listbox" hidden></div>
+  </div>
+  <div class="chains" role="radiogroup" aria-label="Chain" id="chains"></div>
+  <button class="wallet" id="walletbtn" type="button" aria-haspopup="dialog">Set up</button>
+</header>
+<main id="main" tabindex="-1"></main>
+<footer class="bar" aria-label="Status">
+  <span class="live" id="live"><i></i><span>Connecting</span></span>
+  <span class="px" id="px"></span>
+  <span class="grow"></span>
+  <button class="pause" id="pausebtn" type="button" aria-pressed="false">Pause new buys</button>
+  <button class="theme" id="themebtn" type="button" aria-label="Switch theme">Theme</button>
+</footer>
+<nav class="tabbar" aria-label="Main">
+  <a href="#/" data-nav="discover">Discover</a><a href="#/portfolio" data-nav="portfolio">Portfolio</a><a href="#/copy" data-nav="copy">Copy</a><a href="#/alerts" data-nav="alerts">Alerts</a><a href="#/setup" data-nav="setup">Account</a>
+</nav>
+<dialog id="dlg" class="dlg"></dialog>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="privybox" class="privybox" hidden></div>
+<script src="/app.js?v=5"></script>
+</body>
+</html>
