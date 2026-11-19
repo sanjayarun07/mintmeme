@@ -20,6 +20,8 @@ export type Deps = { fetch?: typeof fetch; now?: () => number };
 class MarketError extends Error { constructor(msg: string, public status = 400) { super(msg); } }
 
 const num = (x: unknown) => { const n = typeof x === 'string' ? Number(x) : typeof x === 'number' ? x : NaN; return Number.isFinite(n) ? n : null; };
+/** A size that must be above zero: sources send "0" when they do not know it. */
+const pos = (x: unknown) => { const n = num(x); return n != null && n > 0 ? n : null; };
 const isEvm = (a: string) => /^0x[0-9a-fA-F]{40}$/.test(a), isSol = (a: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(a);
 const chainOf = (c: unknown, all = false): Chain | 'all' => { if (all && (c === undefined || c === 'all')) return 'all'; if (typeof c === 'string' && (CHAINS as string[]).includes(c)) return c as Chain; throw new MarketError(`Unknown chain "${String(c)}". Use solana, base, robinhood or bnb.`); };
 
@@ -56,7 +58,7 @@ export function fromGecko(chain: Chain, j: any): MarketRow[] {
     if (!address || skip.test(String(t.symbol ?? ''))) continue;
     const tx = a?.transactions?.h24 ?? {};
     const row: MarketRow = { chain, address, pool: a.address ?? null, symbol: String(t.symbol ?? '?'), name: String(t.name ?? ''), icon: t.image_url && t.image_url !== 'missing.png' ? t.image_url : null,
-      price: num(a.base_token_price_usd), change1h: num(a?.price_change_percentage?.h1), change24h: num(a?.price_change_percentage?.h24), mcap: num(a.market_cap_usd) ?? num(a.fdv_usd),
+      price: num(a.base_token_price_usd), change1h: num(a?.price_change_percentage?.h1), change24h: num(a?.price_change_percentage?.h24), mcap: saneCap(pos(a.market_cap_usd), pos(a.fdv_usd), num(a.reserve_in_usd)),
       liquidity: num(a.reserve_in_usd), volume24h: num(a?.volume_usd?.h24), buys24h: num(tx.buys), sells24h: num(tx.sells), createdAt: a.pool_created_at ?? null, holders: null, organic: null, verified: false };
     const key = address.toLowerCase(), have = best.get(key);
     if (!have) best.set(key, row);
@@ -69,7 +71,7 @@ export function fromGecko(chain: Chain, j: any): MarketRow[] {
 const saneCap = (mcap: number | null, fdv: number | null, liq: number | null) => liq == null ? mcap ?? fdv : mcap != null && mcap >= liq ? mcap : fdv != null && fdv >= liq ? fdv : null;
 export function fromDexscreener(p: any): MarketRow | null {
   const chain = FROM_DEXS[p?.chainId]; if (!chain) return null;
-  const row = fromDexscreenerRaw(p, chain); row.mcap = saneCap(num(p.marketCap), num(p.fdv), row.liquidity); return row;
+  const row = fromDexscreenerRaw(p, chain); row.mcap = saneCap(pos(p.marketCap), pos(p.fdv), row.liquidity); return row;
 }
 function fromDexscreenerRaw(p: any, chain: Chain): MarketRow {
   return { chain, address: String(p.baseToken?.address ?? ''), pool: p.pairAddress ?? null, symbol: String(p.baseToken?.symbol ?? '?'), name: String(p.baseToken?.name ?? ''), icon: p.info?.imageUrl ?? null,
@@ -198,6 +200,32 @@ export async function marketRows(body: any, d: Deps = {}) {
     }
   }
   return { chain, rows };
+}
+
+/** When each transaction landed, from the chain itself (the server's trade records carry no time): Solana getTransaction blockTime; EVM the receipt's block, then that block's
+ *  timestamp. Unix seconds per hash, or null when the chain does not know it (yet). Up to 40 hashes; a found time is cached for a day (it never changes). */
+export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } = {}) {
+  const chain = chainOf(body?.chain) as Chain, env = d.env ?? process.env, f = d.fetch ?? fetch;
+  const ok = (h: string) => chain === 'solana' ? /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(h) : /^0x[0-9a-fA-F]{64}$/.test(h);
+  const hashes = [...new Set((Array.isArray(body?.hashes) ? body.hashes : []).map((x: unknown) => String(x).trim()).filter(ok))].slice(0, 40) as string[];
+  const net = { solana: 'solana-mainnet', base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' }[chain], rpcEnv = { solana: 'SOLANA_RPC_URL', base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' }[chain];
+  const rpc = env[rpcEnv] || (env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : '');
+  const out: Record<string, number | null> = {};
+  if (!rpc) { hashes.forEach(h => out[h] = null); return { chain, times: out }; }
+  const call = async (method: string, params: unknown[]) => { const r = await f(rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(10_000) }); return (await r.json() as any)?.result; };
+  await Promise.all(hashes.map(async h => {
+    try {
+      const { value } = await cached(`txtime:${chain}:${h}`, 86_400_000, d, async () => {
+        let t: number | null = null;
+        if (chain === 'solana') { const tx = await call('getTransaction', [h, { encoding: 'json', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]); t = typeof tx?.blockTime === 'number' ? tx.blockTime : null; }
+        else { const rc = await call('eth_getTransactionReceipt', [h]); if (rc?.blockNumber) { const b = await call('eth_getBlockByNumber', [rc.blockNumber, false]); t = b?.timestamp ? parseInt(b.timestamp, 16) : null; } }
+        if (t == null) throw new Error('not known yet');   // not cached: asked again next time
+        return t;
+      });
+      out[h] = value;
+    } catch { out[h] = null; }
+  }));
+  return { chain, times: out };
 }
 
 /** Search by name, symbol or address across the four chains (DexScreener), one row per token, most liquid first. */

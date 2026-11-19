@@ -33,7 +33,10 @@ export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
   // market data for the trading app (market.ts): read-only, public sources, cached
   '/api/sol/market/list': async b => (await import('./market.ts')).marketList(b), '/api/sol/market/token': async b => (await import('./market.ts')).marketToken(b),
   '/api/sol/market/candles': async b => (await import('./market.ts')).marketCandles(b), '/api/sol/market/search': async b => (await import('./market.ts')).marketSearch(b),
-  '/api/sol/market/meta': async b => (await import('./market.ts')).marketMeta(b), '/api/sol/market/rows': async b => (await import('./market.ts')).marketRows(b), '/api/sol/market/natives': async b => (await import('./market.ts')).marketNatives(b),
+  // the RFQ desk, read-only (rfqdesk.ts): quotes and stock lists only; never the desk's execute route
+  '/api/sol/rfq/config': async b => (await import('./rfqdesk.ts')).deskConfig(b), '/api/sol/rfq/quote': async b => (await import('./rfqdesk.ts')).deskQuote(b),
+  '/api/sol/rfq/evm': async b => (await import('./rfqdesk.ts')).deskEvmQuote(b), '/api/sol/rfq/ladder': async b => (await import('./rfqdesk.ts')).deskLadder(b),
+  '/api/sol/market/meta': async b => (await import('./market.ts')).marketMeta(b), '/api/sol/market/rows': async b => (await import('./market.ts')).marketRows(b), '/api/sol/market/txtimes': async b => (await import('./market.ts')).txTimes(b), '/api/sol/market/natives': async b => (await import('./market.ts')).marketNatives(b),
   '/api/sol/tradingkey/create': async b => (await solMain()).tradingKeyCreate(b),
   '/api/sol/tradingkey/use': async () => (await solMain()).tradingKeyUse(), '/api/sol/tradingkey/fund': async b => (await solMain()).fundTradingKey(b),
   '/api/sol/tradingkey/return': async b => (await solMain()).tradingKeyReturn(b), '/api/sol/tradingkey/funders': async () => ({ funders: await (await solMain()).keyFunders() }),

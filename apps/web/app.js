@@ -239,12 +239,12 @@ function every(ms, fn) { S.timers.push(setInterval(fn, ms)); }
 function route() {
   clearTimers();
   const h = location.hash.replace(/^#\/?/, ''), [a, b, c] = h.split('/');
-  const view = a === 't' && CH[b] && c ? 'token' : ({ '': 'discover', portfolio: 'portfolio', copy: 'copy', alerts: 'alerts', setup: 'setup' })[a] ?? 'discover';
+  const view = a === 't' && CH[b] && c ? 'token' : ({ '': 'discover', portfolio: 'portfolio', rfq: 'rfq', copy: 'copy', alerts: 'alerts', setup: 'setup' })[a] ?? 'discover';
   S.view = view;
   $$('[data-nav]').forEach(n => { if (n.dataset.nav === (view === 'token' ? 'discover' : view)) n.setAttribute('aria-current', 'page'); else n.removeAttribute('aria-current'); });
   const main = $('#main'); main.innerHTML = '';
   V[view](main, b, c);
-  document.title = ({ discover: 'Discover', token: 'Token', portfolio: 'Portfolio', copy: 'Copy trading', alerts: 'Alerts', setup: 'Account' })[view] + ' · MINT Trade';
+  document.title = ({ discover: 'Discover', token: 'Token', portfolio: 'Portfolio', rfq: 'RFQ quotes', copy: 'Copy trading', alerts: 'Alerts', setup: 'Account' })[view] + ' · MINT Trade';
 }
 window.addEventListener('hashchange', route);
 
@@ -255,11 +255,31 @@ V.discover = (main) => {
     <div class="ph"><div><h1>${S.chain === 'all' ? 'Every chain' : esc(CH[S.chain].label)}</h1><p>Trending and new tokens on Solana, Base, Robinhood Chain and BNB Chain. Click a row for the chart and full trading.</p></div></div>
     <div class="disc-tools"><div class="seg" role="tablist" id="dtabs">${[['trending', 'Trending'], ['new', 'New'], ['stocks', 'Stocks'], ['watch', 'Watchlist']].map(([k, l]) => `<button role="tab" aria-selected="${tab === k}" data-t="${k}">${l}</button>`).join('')}</div><span class="grow"></span>
       ${quick ? `<label class="quick">Quick buy <span class="input"><input id="qsize" inputmode="decimal" value="${esc(S.quick[quick])}" aria-label="Quick buy size"><span class="unit">${CH[quick].native}</span></span></label>` : '<span class="quick faint">Pick one chain above to set its quick-buy size.</span>'}</div>
-    <div class="card"><div id="dnote"></div><div class="tbl-wrap"><table class="tbl"><thead><tr><th style="width:28px"></th><th>Token</th><th class="num">Price</th><th class="num hide-s">1h</th><th class="num">24h</th><th class="num hide-s">Market cap</th><th class="num hide-s">Liquidity</th><th class="num hide-s">Volume 24h</th><th class="num hide-s">Buys / sells</th><th class="num"></th></tr></thead><tbody id="drows">${skeletonRows(10)}</tbody></table></div></div></div>`;
+    <div class="card"><div class="filters" id="dfilt"></div><div id="dnote"></div><div class="tbl-wrap"><table class="tbl"><thead><tr><th style="width:28px"></th><th>Token</th>${SORTS.map(([k, l, hide]) => `<th class="num${hide ? ' hide-s' : ''}"><button class="sort" data-sort="${k}">${l}<i aria-hidden="true"></i></button></th>`).join('')}<th class="num"></th></tr></thead><tbody id="drows">${skeletonRows(10)}</tbody></table></div></div></div>`;
   $$('#dtabs button').forEach(b => b.onclick = () => { store.set('dtab', b.dataset.t); route(); });
+  // sorting (click a header: high to low, again: low to high, again: back to the source order) and filters, kept in this browser
+  let rows = [], sort = store.get('dsort', null), filt = store.get('dfilt', {});
+  const sortHeads = () => $$('[data-sort]').forEach(b => { const on = sort?.k === b.dataset.sort; b.setAttribute('aria-sort', on ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none'); $('i', b).textContent = on ? (sort.dir > 0 ? ' ↑' : ' ↓') : ''; });
+  $$('[data-sort]').forEach(b => b.onclick = () => { const k = b.dataset.sort; sort = sort?.k !== k ? { k, dir: -1 } : sort.dir < 0 ? { k, dir: 1 } : null; store.set('dsort', sort); sortHeads(); paint(); });
+  const drawFilters = () => {
+    const n = FILTERS.filter(([k]) => filt[k] != null && filt[k] !== '').length;
+    $('#dfilt').innerHTML = `<div class="frow"><button class="chip" id="fopen" aria-expanded="${!!filt.open}">Filters${n ? ` · ${n}` : ''}</button>${n ? '<button class="chip" id="fclear">Clear</button>' : ''}<span class="faint" id="fcount"></span></div>
+      ${filt.open ? `<div class="fgrid">${FILTERS.map(([k, l, ph]) => `<label class="field"><span>${l}</span><span class="input"><input data-f="${k}" inputmode="decimal" placeholder="${ph}" value="${esc(filt[k] ?? '')}"></span></label>`).join('')}</div>` : ''}`;
+    $('#fopen').onclick = () => { filt.open = !filt.open; store.set('dfilt', filt); drawFilters(); };
+    if ($('#fclear')) $('#fclear').onclick = () => { filt = { open: filt.open }; store.set('dfilt', filt); drawFilters(); paint(); };
+    $$('[data-f]').forEach(i => i.oninput = () => { filt[i.dataset.f] = i.value.trim(); store.set('dfilt', filt); clearTimeout(S.ft); S.ft = setTimeout(() => { paint(); const c = FILTERS.filter(([k]) => filt[k]).length; $('#fopen').textContent = 'Filters' + (c ? ` · ${c}` : ''); }, 200); });
+  };
+  const paint = () => {
+    const tb = $('#drows'); if (!tb) return;
+    const shown = applyFilters(rows, filt); if (sort) shown.sort((a, b) => cmp(sortVal(a, sort.k), sortVal(b, sort.k), sort.dir));
+    $('#fcount').textContent = rows.length ? (shown.length === rows.length ? `${rows.length} tokens` : `${shown.length} of ${rows.length} tokens`) : '';
+    tb.innerHTML = shown.length ? shown.map(rowHtml).join('') : rows.length ? `<tr><td colspan="10"><div class="empty"><b>No token matches these filters</b>Loosen a filter or press Clear.</div></td></tr>` : `<tr><td colspan="10"><div class="empty"><b>Nothing here right now</b>Try another chain or tab.</div></td></tr>`;
+    wireRows(tb, shown);
+  };
+  drawFilters(); sortHeads();
   if ($('#qsize')) $('#qsize').onchange = e => { S.quick[quick] = e.target.value.trim(); store.set('quick', S.quick); };
   const load = async () => {
-    const tb = $('#drows'); if (!tb) return; let rows = [], extra = '';
+    const tb = $('#drows'); if (!tb) return; let extra = '';
     try {
       if (tab === 'watch') {
         rows = S.watch.filter(w => S.chain === 'all' || w.chain === S.chain);
@@ -283,12 +303,26 @@ V.discover = (main) => {
         else if (r.stale) extra = note('', 'Showing data from a minute ago', 'The data source is busy.');
       }
       $('#dnote').innerHTML = extra ? `<div class="pad" style="padding-bottom:0">${extra}</div>` : '';
-      tb.innerHTML = rows.length ? rows.map(rowHtml).join('') : `<tr><td colspan="10"><div class="empty"><b>Nothing here right now</b>Try another chain or tab.</div></td></tr>`;
-      wireRows(tb, rows);
+      paint();
     } catch (e) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>Could not load tokens</b>${esc(e.message)}</div></td></tr>`; }
   };
   load(); if (tab === 'trending' || tab === 'new') every(30000, load);
 };
+/* sort and filter for the Discover table */
+const SORTS = [['price', 'Price', false], ['change1h', '1h', true], ['change24h', '24h', false], ['mcap', 'Market cap', true], ['liquidity', 'Liquidity', true], ['volume24h', 'Volume 24h', true], ['flow', 'Buys / sells', true]];
+const FILTERS = [['minMcap', 'Min market cap ($)', '100k'], ['maxMcap', 'Max market cap ($)', '50m'], ['minLiq', 'Min liquidity ($)', '25k'], ['minVol', 'Min volume 24h ($)', '50k'],
+  ['min1h', 'Min 1h change (%)', '-5'], ['min24h', 'Min 24h change (%)', '0'], ['max24h', 'Max 24h change (%)', '500'], ['minBuys', 'Min buys share (%)', '55']];
+/** "25k", "1.5m", "2b", "-5" to a number; anything else is no filter. */
+const parseN = s => { const m = /^(-?\d+(?:\.\d+)?)\s*([kmb])?$/i.exec(String(s ?? '').trim()); return m ? Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9 }[(m[2] || '').toLowerCase()] || 1) : null; };
+const buyShare = r => r.buys24h != null && r.sells24h != null && r.buys24h + r.sells24h > 0 ? r.buys24h / (r.buys24h + r.sells24h) * 100 : null;
+const sortVal = (r, k) => k === 'flow' ? buyShare(r) : r[k];
+/** Missing values always sort last, whichever the direction. */
+const cmp = (a, b, dir) => a == null && b == null ? 0 : a == null ? 1 : b == null ? -1 : (a - b) * dir;
+function applyFilters(rows, f) {
+  const lim = Object.fromEntries(FILTERS.map(([k]) => [k, parseN(f[k])]));
+  const min = (v, x) => x == null || (v != null && v >= x), max = (v, x) => x == null || (v != null && v <= x);
+  return rows.filter(r => min(r.mcap, lim.minMcap) && max(r.mcap, lim.maxMcap) && min(r.liquidity, lim.minLiq) && min(r.volume24h, lim.minVol) && min(r.change1h, lim.min1h) && min(r.change24h, lim.min24h) && max(r.change24h, lim.max24h) && min(buyShare(r), lim.minBuys));
+}
 const skeletonRows = n => Array.from({ length: n }, () => `<tr><td></td><td><span class="skel" style="width:140px"></span></td>${'<td><span class="skel" style="width:60px;margin-left:auto"></span></td>'.repeat(8)}</tr>`).join('');
 const watched = r => S.watch.some(w => w.chain === r.chain && w.address.toLowerCase() === r.address.toLowerCase());
 function rowHtml(r, i) {
@@ -520,10 +554,17 @@ V.portfolio = async (main) => {
     wireCancel(el, () => route());
   }
   if (tab === 'history') {
-    const rows = []; await Promise.all(chains.map(async c => { try { const ts = await v1(c, 'GET', '/v1/trades?limit=30'); const list = Array.isArray(ts) ? ts : ts.trades || []; await loadMeta(c, list.map(t => t.token).filter(Boolean)); list.forEach(t => rows.push([c, t])); } catch { /* skip */ } }));
-    rows.sort((a, b) => (b[1].updatedAt ?? b[1].createdAt ?? 0) > (a[1].updatedAt ?? a[1].createdAt ?? 0) ? 1 : -1);
-    el.innerHTML = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Trade</th><th>Token</th><th>State</th><th class="num"></th></tr></thead><tbody>${rows.map(([c, t]) => { const m = meta[c + ':' + String(t.token).toLowerCase()] || {}, when = t.updatedAt || t.createdAt;
-      return `<tr><td class="muted">${when ? new Date(typeof when === 'number' && when < 1e12 ? when * 1000 : when).toLocaleString() : ''}</td><td>${badge(c)} ${esc(t.side || '')}${t.origin && t.origin !== 'manual' ? ` <span class="faint">${esc(t.origin)}</span>` : ''}</td><td>${esc(m.symbol || short(t.token))}</td><td class="${t.state === 'failed' ? 'down' : t.state === 'finalized' ? 'up' : 'muted'}">${esc(t.state)}${t.failure ? ` <span class="faint">${esc(t.failure).slice(0, 80)}</span>` : ''}</td><td class="num">${t.txHash ? `<a class="btn sm ghost" href="${esc(explorer(c, t.txHash))}" target="_blank" rel="noopener noreferrer">View</a>` : ''}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty"><b>No trades yet</b></div>';
+    // the server's trade records carry no time: it comes from the chain (the transaction's block), else from a key this app or the old page made (ui-/app-<ms>)
+    const rows = []; await Promise.all(chains.map(async c => { try {
+      const ts = await v1(c, 'GET', '/v1/trades?limit=40'), list = (Array.isArray(ts) ? ts : ts.trades || []).map(t => { const buy = t.tokenIn === 'NATIVE' || t.side === 'buy'; return { ...t, side: t.side || (buy ? 'buy' : 'sell'), token: t.token || (buy ? t.tokenOut : t.tokenIn) }; });
+      const [, times] = await Promise.all([loadMeta(c, list.map(t => t.token).filter(t => t && t !== 'NATIVE')), market('txtimes', { chain: c, hashes: list.map(t => t.txHash).filter(Boolean) }).then(r => r.times).catch(() => ({}))]);
+      list.forEach(t => { const k = /(?:^|[.-])(?:ui|app)-(\d{13})/.exec(String(t.key || ''))?.[1]; t.when = times[t.txHash] ? times[t.txHash] * 1000 : k ? +k : null; rows.push([c, t]); });
+    } catch { /* that chain is skipped */ } }));
+    rows.sort((a, b) => (b[1].when ?? 0) - (a[1].when ?? 0));
+    const ago = ms => { const s = (Date.now() - ms) / 1000; return s < 60 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 86400 ? Math.round(s / 3600) + ' h ago' : null; };
+    const amount = (c, t) => { if (t.amountIn == null) return ''; const buy = t.side === 'buy', m = meta[c + ':' + String(t.token).toLowerCase()] || {}, v = fromRaw(t.amountIn, buy ? CH[c].dec : m.decimals); return v == null ? '' : `${amt(v, 6)} ${buy ? CH[c].native : esc(m.symbol || '')}`; };
+    el.innerHTML = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Trade</th><th>Token</th><th class="num hide-s">Spent</th><th>State</th><th class="num"></th></tr></thead><tbody>${rows.map(([c, t]) => { const m = meta[c + ':' + String(t.token).toLowerCase()] || {};
+      return `<tr><td class="muted" style="white-space:nowrap">${t.when ? `${new Date(t.when).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${ago(t.when) ? `<br><small class="faint">${ago(t.when)}</small>` : ''}` : '<span class="faint">unknown</span>'}</td><td>${badge(c)} <span class="${t.side === 'buy' ? 'up' : 'down'}" style="font-weight:600">${t.side === 'buy' ? 'Buy' : 'Sell'}</span>${t.origin && t.origin !== 'manual' ? ` <span class="faint">${esc(t.origin)}</span>` : ''}</td><td>${esc(m.symbol || short(t.token))}</td><td class="num hide-s">${amount(c, t)}</td><td class="${t.state === 'failed' ? 'down' : t.state === 'finalized' ? 'up' : 'muted'}">${esc(t.state === 'finalized' ? 'Done' : t.state)}${t.failure ? ` <span class="faint">${esc(t.failure).slice(0, 80)}</span>` : ''}</td><td class="num">${t.txHash ? `<a class="btn sm ghost" href="${esc(explorer(c, t.txHash))}" target="_blank" rel="noopener noreferrer">View</a>` : ''}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty"><b>No trades yet</b></div>';
   }
 };
 function sellPct(r, p) {
@@ -569,6 +610,92 @@ V.copy = async (main) => {
   };
   list();
 };
+
+/* RFQ: the desk's quote comparison (market maker vs routes), read-only. Trading happens on the token page: on Solana the server itself takes the maker's fill when it wins. */
+V.rfq = async (main) => {
+  const st = store.get('rfq', { chain: 'solana', side: 'buy', pay: 'USDC', amount: '1000', symbol: '' });
+  if (S.chain !== 'all' && st.chain !== S.chain && !st.pinned) st.chain = S.chain;
+  main.innerHTML = `<div class="page"><div class="ph"><div><h1>RFQ quotes</h1><p>Compare a market maker's firm price with the routers for a stock, at any size. Solana uses JupiterZ makers; Base, Robinhood and BNB compare every venue. Nothing is signed here.</p></div></div>
+    <div class="grid2"><div style="display:grid;gap:16px;min-width:0" id="rres"><div class="card"><div class="empty"><b>Pick a stock and a size</b>The comparison shows here.</div></div></div>
+    <form class="card form" id="rform" autocomplete="off"><h2 style="padding:0;font-size:15px">Request a quote</h2>
+      <div class="seg" id="rchain">${IDS.map(c => `<button type="button" data-c="${c}" aria-selected="${st.chain === c}">${badge(c)} ${esc(CH[c].short)}</button>`).join('')}</div>
+      <label class="field"><span>Stock</span><span class="input"><select id="rsym"><option>Loading…</option></select></span></label>
+      <div class="bs" style="margin:0" id="rside"><button type="button" data-side="buy" aria-selected="${st.side === 'buy'}">Buy</button><button type="button" data-side="sell" aria-selected="${st.side === 'sell'}">Sell</button></div>
+      <div id="rpayw"></div>
+      <label class="field"><span id="ramtl">Amount</span><span class="input"><input class="big" id="ramt" inputmode="decimal" value="${esc(st.amount)}"><span class="unit" id="ramtu"></span></span></label>
+      <div class="chips" id="rpre"></div>
+      <div id="rout"></div><button class="btn primary block">Compare quotes</button></form></div></div>`;
+  let cfg; try { cfg = await page('/api/sol/rfq/config', {}); } catch (e) { $('#rres').innerHTML = `<div class="card pad">${note('err', 'The RFQ desk is unavailable', esc(e.message))}</div>`; return; }
+  const save = () => store.set('rfq', st);
+  const unit = () => st.chain === 'solana' ? (st.side === 'buy' ? st.pay : 'shares') : (st.side === 'buy' ? CH[st.chain].native : 'tokens');
+  const presets = () => st.chain === 'solana' ? (st.side === 'buy' ? (st.pay === 'USDC' ? ['1000', '10000', '50000', '100000'] : ['10', '100', '500', '1000']) : ['1', '10', '50', '100']) : (st.side === 'buy' ? CH[st.chain].presets.concat(['0.05', '0.1']).slice(1) : ['0.01', '0.1', '1', '10']);
+  const draw = () => {
+    $$('#rchain button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.c === st.chain)));
+    $$('#rside button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.side === st.side)));
+    const syms = st.chain === 'solana' ? cfg.stocks.map(s => [s.mint, `${s.symbol} · ${s.issuer}`, s.symbol]) : (cfg.evm[st.chain]?.symbols || []).map(s => [s, s, s]);
+    $('#rsym').innerHTML = syms.length ? syms.map(([v, l, s]) => `<option value="${esc(v)}" ${v === st.symbol || s === st.symbol ? 'selected' : ''}>${esc(l)}</option>`).join('') : '<option value="">No stocks on this chain</option>';
+    if (!syms.some(([v, , s]) => v === st.symbol || s === st.symbol)) st.symbol = syms[0]?.[0] ?? '';
+    $('#rpayw').innerHTML = st.chain === 'solana' && st.side === 'buy' ? `<div class="seg" id="rpay">${['USDC', 'SOL'].map(p => `<button type="button" data-p="${p}" aria-selected="${st.pay === p}">Pay with ${p}</button>`).join('')}</div>` : '';
+    $$('#rpay button').forEach(b => b.onclick = () => { st.pay = b.dataset.p; st.amount = st.pay === 'USDC' ? '1000' : '10'; $('#ramt').value = st.amount; save(); draw(); });
+    $('#ramtu').textContent = unit(); $('#ramtl').textContent = st.side === 'buy' ? 'You pay' : 'You sell';
+    $('#rpre').innerHTML = presets().map(p => `<button type="button" class="chip" data-a="${p}">${st.chain === 'solana' && st.side === 'buy' && st.pay === 'USDC' ? '$' + Number(p).toLocaleString('en-US') : p}</button>`).join('');
+    $$('#rpre [data-a]').forEach(b => b.onclick = () => { st.amount = b.dataset.a; $('#ramt').value = st.amount; save(); });
+  };
+  $$('#rchain button').forEach(b => b.onclick = () => { st.chain = b.dataset.c; st.pinned = true; st.symbol = ''; st.amount = presets()[0]; $('#ramt').value = st.amount; save(); draw(); $('#ramt').value = st.amount = presets()[0]; });
+  $$('#rside button').forEach(b => b.onclick = () => { st.side = b.dataset.side; save(); draw(); st.amount = presets()[0]; $('#ramt').value = st.amount; save(); });
+  $('#rsym').onchange = e => { st.symbol = e.target.value; save(); };
+  $('#ramt').oninput = e => { st.amount = e.target.value.trim(); save(); };
+  draw();
+  $('#rform').onsubmit = async e => {
+    e.preventDefault(); const out = $('#rout'), res = $('#rres'), btn = $('button.primary', $('#rform')); out.innerHTML = '';
+    if (!(Number(st.amount) > 0)) { out.innerHTML = note('warn', 'Set an amount'); return; }
+    btn.disabled = true; res.innerHTML = `<div class="card pad"><div class="note"><div><b>Asking the market makers and routers…</b> This takes 5 to 40 seconds.</div></div><div style="display:grid;gap:8px;margin-top:12px"><span class="skel" style="width:70%"></span><span class="skel" style="width:55%"></span><span class="skel" style="width:62%"></span></div></div>`;
+    try { res.innerHTML = st.chain === 'solana' ? await rfqSolana(cfg, st) : await rfqEvm(st); }
+    catch (err) { res.innerHTML = `<div class="card pad">${note('err', 'No comparison', esc(err.message))}</div>`; }
+    btn.disabled = false;
+  };
+};
+async function rfqSolana(cfg, st) {
+  const stock = cfg.stocks.find(s => s.mint === st.symbol); if (!stock) throw new Error('Pick a stock.');
+  const payDec = st.pay === 'USDC' ? 6 : 9, inDec = st.side === 'buy' ? payDec : stock.decimals, outDec = st.side === 'buy' ? stock.decimals : (st.pay === 'USDC' ? 6 : 9);
+  const raw = toRaw(st.amount, inDec); if (!raw) throw new Error('Set an amount like 1000.');
+  const { stages } = await page('/api/sol/rfq/quote', { mint: stock.mint, side: st.side, pay: st.side === 'buy' ? st.pay : 'USDC', amount: raw });
+  const g = k => stages.filter(s => s.stage === k).pop() || null, err = g('error');
+  if (err) throw new Error(err.error || 'The desk could not quote this.');
+  const ctx = g('context') || {}, sk = g('stock') || {}, rfq = g('rfq'), other = g('other'), build = g('build'), dec = g('decision'), cap = g('capacity'), ven = g('venues')?.venues || [];
+  const outSym = st.side === 'buy' ? stock.symbol : (st.pay === 'USDC' ? 'USDC' : 'SOL'), q = r => r == null ? null : fromRaw(String(r), outDec);
+  const fmtOut = r => r == null ? '—' : amt(q(r), 6) + ' ' + esc(outSym);
+  const perShare = r => { const v = q(r); if (!v || !ctx.usd) return ''; const sh = st.side === 'buy' ? v * Number(sk.multiplier || 1) : Number(st.amount) * Number(sk.multiplier || 1); return sh ? ` <span class="faint">${usd(st.side === 'buy' ? ctx.usd / sh : (v * (outSym === 'SOL' ? ctx.solUsd : 1)) / sh, { compact: false })}/share</span>` : ''; };
+  const best = ven.filter(v => v.out).reduce((a, v) => !a || BigInt(v.out) > BigInt(a.out) ? v : a, null);
+  const win = dec?.useRfq, head = !rfq || rfq.none ? ['', 'No market-maker quote', esc(rfq?.none || 'JupiterZ did not answer.') + ' Our route is used.'] : win ? ['ok', 'The market maker wins', 'Its firm price beats our route and passes every check.'] : ['warn', 'Our route wins', 'The maker\'s price does not pass every check below, so the server would use the route.'];
+  const capHtml = cap && !cap.pending ? (cap.capacity ? `<div class="card"><h2>How much the maker fills</h2><div class="pad sum">
+      <div><span>At or better than the route, up to</span><b>${amt(fromRaw(cap.capacity.in, inDec), 2)} ${esc(st.side === 'buy' ? st.pay : stock.symbol)}</b></div>
+      <div><span>Edge on that part</span><b class="${cls(cap.capacity.edgeBps)}">${(cap.capacity.edgeBps / 100).toFixed(2)}%</b></div>
+      ${cap.split ? `<div><span>Suggested split</span><b>maker ${amt(fromRaw(cap.split.makerIn, inDec), 2)} + ${esc(cap.split.restVia)} ${amt(fromRaw(cap.split.restIn, inDec), 2)}</b></div><div><span>Split gives</span><b>${fmtOut(cap.split.total)} <span class="${cls(cap.split.gainBps)}">${cap.split.gainBps >= 0 ? '+' : ''}${(cap.split.gainBps / 100).toFixed(2)}% vs route only</span></b></div>` : ''}</div></div>`
+      : `<div class="card pad">${note('', 'Maker capacity', esc(cap.none || cap.error || ''))}</div>`) : '';
+  return `<div class="card pad" style="display:grid;gap:12px">${note(head[0], head[1], head[2])}
+      <div class="kpis" style="margin:0"><div class="card kpi"><small>Market maker (JupiterZ)</small><b>${rfq && !rfq.none ? fmtOut(rfq.out) : '—'}</b><span class="faint" style="font-size:12px">${rfq && !rfq.none ? `fee ${(rfq.feeBps ?? 0) / 100}% · firm until ${new Date(rfq.expireAt * 1000).toLocaleTimeString()}` : 'no quote'}</span></div>
+        <div class="card kpi"><small>Our route</small><b>${build?.out ? fmtOut(build.out) : '—'}</b><span class="faint" style="font-size:12px">${build?.minOut ? 'at least ' + fmtOut(build.minOut) + ' after slippage' : esc(build?.error || '')}</span></div>
+        <div class="card kpi"><small>Share price now</small><b>${sk.sharePrice ? usd(sk.sharePrice, { compact: false }) : '—'}</b><span class="faint" style="font-size:12px">${esc(sk.symbol || stock.symbol)} · ${esc(sk.issuer || stock.issuer)}${sk.paused ? ' · issuer paused' : ''}</span></div></div>
+      ${dec?.reasons?.length ? `<div class="sum">${dec.reasons.map(r => `<div><span>${esc(r.text)}</span><b class="${r.ok ? 'up' : 'down'}">${r.ok ? 'Yes' : 'No'}</b></div>`).join('')}</div>` : ''}
+      <a class="btn" href="#/t/solana/${esc(stock.mint)}">Trade ${esc(stock.symbol)}: the server takes the maker's price when it wins</a></div>
+    ${capHtml}
+    <div class="card"><h2>Every venue for ${esc(st.amount)} ${esc(st.side === 'buy' ? st.pay : stock.symbol)}</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Venue</th><th class="num">You get</th><th class="num hide-s">Fee</th><th class="num hide-s">Impact</th><th class="hide-s">Path</th></tr></thead><tbody>
+      ${ven.map(v => `<tr style="cursor:default"><td><b>${esc(v.name)}</b>${best && v.id === best.id ? ' <span class="up" style="font-size:12px">best</span>' : ''}<br><small class="faint">${esc(v.kind || '')}</small></td><td class="num">${v.out ? fmtOut(v.out) + perShare(v.out) : `<span class="faint">${esc(v.none || 'no quote')}</span>`}</td><td class="num hide-s">${v.feeBps != null ? (v.feeBps / 100).toFixed(2) + '%' : '—'}</td><td class="num hide-s ${(v.impactPct ?? 0) > 1 ? 'down' : ''}">${v.impactPct != null ? Number(v.impactPct).toFixed(2) + '%' : '—'}</td><td class="hide-s faint" style="font-size:12px">${esc((v.labels || []).join(', '))}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
+}
+async function rfqEvm(st) {
+  const r = await page('/api/sol/rfq/evm', { chain: st.chain, symbol: st.symbol, side: st.side, amount: Number(st.amount) });
+  const outDec = st.side === 'buy' ? r.decimals : 18, outSym = st.side === 'buy' ? r.symbol : r.native, vs = r.venues || [];
+  const best = vs.filter(v => v.out).reduce((a, v) => !a || BigInt(v.out) > BigInt(a.out) ? v : a, null);
+  const val = o => { const v = fromRaw(o, outDec); return v == null ? null : st.side === 'buy' ? v * Number(r.multiplier || 1) * (r.refUsd || 0) : v * (r.nativeUsd || 0); };
+  return `<div class="card pad" style="display:grid;gap:12px">${note('', `${esc(r.symbol)} on ${esc(r.label)}`, `The server trades it through ${esc(r.server?.venue || r.serverRoute || 'its default route')}${r.server?.capNative ? `, up to ${r.server.capNative} ${esc(r.native)} per trade` : ''}. Share price now ${r.refUsd ? usd(r.refUsd, { compact: false }) : 'unknown'}.`)}
+      ${best ? `<div class="kpis" style="margin:0"><div class="card kpi"><small>Best venue</small><b>${esc(best.name)}</b><span class="faint" style="font-size:12px">${amt(fromRaw(best.out, outDec), 6)} ${esc(outSym)}${val(best.out) ? ' · ' + usd(val(best.out)) : ''}</span></div><div class="card kpi"><small>You ${st.side === 'buy' ? 'pay' : 'sell'}</small><b>${esc(st.amount)} ${esc(st.side === 'buy' ? r.native : r.symbol)}</b><span class="faint" style="font-size:12px">${st.side === 'buy' && r.nativeUsd ? usd(Number(st.amount) * r.nativeUsd) : ''}</span></div></div>` : note('warn', 'No venue quoted this size', '')}
+      <a class="btn" href="#/t/${esc(st.chain)}/${esc(r.token)}">Trade ${esc(r.symbol)} on ${esc(r.label)}</a></div>
+    <div class="card"><h2>Every venue</h2><div class="tbl-wrap"><table class="tbl"><thead><tr><th>Venue</th><th class="num">You get</th><th class="num hide-s">Fee</th><th class="num hide-s">Gas</th><th class="num hide-s">Impact</th><th class="hide-s">Path</th></tr></thead><tbody>
+      ${vs.map(v => `<tr style="cursor:default"><td><b>${esc(v.name)}</b>${best && v === best ? ' <span class="up" style="font-size:12px">best</span>' : ''}${v.kind === 'rfq' || /rfq|bebop|0x|uniswapx/i.test(v.name) ? '<br><small class="faint">firm quote</small>' : ''}</td><td class="num">${v.out ? `${amt(fromRaw(v.out, outDec), 6)} ${esc(outSym)}${val(v.out) ? `<br><small class="faint">${usd(val(v.out))}</small>` : ''}` : `<span class="faint">${esc(v.none || v.error || 'no quote')}</span>`}</td><td class="num hide-s">${v.feeBps != null ? (v.feeBps / 100).toFixed(2) + '%' : '—'}</td><td class="num hide-s">${v.gasUsd != null ? usd(v.gasUsd, { compact: false }) : '—'}</td><td class="num hide-s ${(v.impactPct ?? 0) > 1 ? 'down' : ''}">${v.impactPct != null ? Number(v.impactPct).toFixed(2) + '%' : '—'}</td><td class="hide-s faint" style="font-size:12px">${esc(v.path || '')}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
+}
 
 /* Alerts */
 V.alerts = (main) => {

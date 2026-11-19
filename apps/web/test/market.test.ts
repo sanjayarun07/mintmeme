@@ -14,7 +14,9 @@ const A = '0x' + '1'.repeat(40), B = '0x' + '2'.repeat(40), MINT = 'DezXAZ8z7Pnr
 test('GeckoTerminal pools become one row per token (most liquid pool, volumes added); wrapped native and stablecoins are skipped', () => {
   const rows = fromGecko('base', gecko('base', [{ sym: 'DOG', addr: A, liq: 100, vol: 5 }, { sym: 'DOG', addr: A, liq: 900, vol: 7 }, { sym: 'WETH', addr: B, liq: 5000, vol: 1 }, { sym: 'USDC', addr: B, liq: 5000, vol: 1 }]));
   assert.equal(rows.length, 1); assert.equal(rows[0].liquidity, 900); assert.equal(rows[0].volume24h, 12); assert.equal(rows[0].pool, '0xpool1');
-  assert.equal(rows[0].icon, null, '"missing.png" is no icon'); assert.equal(rows[0].change24h, -2.5); assert.equal(rows[0].buys24h, 10);
+  assert.equal(rows[0].icon, null, '"missing.png" is no icon');
+  const zero = gecko('base', [{ sym: 'ARK', addr: A, liq: 5e7, vol: 1 }]); zero.data[0].attributes.market_cap_usd = '0.0'; (zero.data[0].attributes as any).fdv_usd = '0';
+  assert.equal(fromGecko('base', zero)[0].mcap, null, 'a "0" market cap is unknown, not $0'); assert.equal(rows[0].change24h, -2.5); assert.equal(rows[0].buys24h, 10);
 });
 
 test('Jupiter tokens keep holders, organic score and volume as buy + sell', () => {
