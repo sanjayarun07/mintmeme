@@ -328,6 +328,8 @@ export async function createNode(o: NodeOptions) {
       if (path === '/status.json' || path === '/status') { const s = await status(); if (path === '/status.json') return json(res, 200, s); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); return res.end(statusHtml(s)); }
       if (path === '/readyz') { let ok = !draining; try { ok = ok && r.cmd('PING') === 'PONG'; } catch { ok = false; } return json(res, ok ? 200 : 503, { ready: ok, draining }); }
       if (path === '/metrics') { const body = metrics(); res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' }); return res.end(body); }   // build first: a throw must not leave a half-sent response
+      // the front door: the trading app when this node serves it (SOLANA_SAMPLE_URL), else the API console; the console always stays at /console
+      if (path === '/' && o.solanaSampleUrl) { res.writeHead(302, { location: '/app', 'cache-control': 'no-cache' }); return res.end(); }
       if (path === '/console' || path === '/') { res.writeHead(200, CONSOLE_HEADERS); return res.end(CONSOLE_HTML); }
       if (isSolanaSamplePath(path)) {
         if (!o.solanaSampleUrl || !isLoopback(req.socket.remoteAddress) || !isLoopbackHost(req.headers.host)) return json(res, 404, { error: { code: 'not_found', message: `No route ${path}.` } });

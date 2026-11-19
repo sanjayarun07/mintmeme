@@ -693,7 +693,8 @@ V.setup = async (main) => {
   const P = () => window.MintPrivy, s = () => P()?.session;
   main.innerHTML = `<div class="page"><div class="ph"><div><h1>Account</h1><p>Sign in with Privy, then allow trading and link each chain once. Your wallets stay in Privy; the server never holds their keys.</p></div></div>
     <div class="grid2"><div class="card"><div class="steps" id="steps"></div></div>
-    <div style="display:grid;gap:16px"><div class="card form"><h2 style="padding:0;font-size:15px">Settings</h2><div id="sets" class="muted">Sign in to change settings.</div></div>
+    <div style="display:grid;gap:16px"><div class="card form"><h2 style="padding:0;font-size:15px">Your wallets</h2><div id="wallets" class="muted">Log in with Privy to see your wallets.</div></div>
+    <div class="card form"><h2 style="padding:0;font-size:15px">Settings</h2><div id="sets" class="muted">Sign in to change settings.</div></div>
     <div class="card form"><h2 style="padding:0;font-size:15px">Quick-buy sizes</h2>${IDS.map(c => `<label class="field"><span>${badge(c)} ${esc(CH[c].label)}</span><span class="input"><input data-q="${c}" inputmode="decimal" value="${esc(S.quick[c])}"><span class="unit">${CH[c].native}</span></span></label>`).join('')}</div></div></div></div>`;
   $$('[data-q]').forEach(i => i.onchange = () => { S.quick[i.dataset.q] = i.value.trim(); store.set('quick', S.quick); toast('ok', 'Saved'); });
   const step = (n, done, title, body, action) => `<div class="step ${done ? 'done' : ''}"><span class="n">${done ? '✓' : n}</span><div><b>${title}</b><small>${body}</small></div><div>${action || ''}</div></div>`;
@@ -754,8 +755,19 @@ V.setup = async (main) => {
       $('#ssafe').onchange = e => v1('solana', 'PATCH', '/v1/settings', { tokenSafety: e.target.value }).then(() => toast('ok', 'Saved')).catch(er => toast('err', 'Not saved', er.message));
     } catch (e) { el.innerHTML = `<span class="muted">${esc(e.message)}</span>`; }
   };
-  draw(); sets();
-  const onP = () => { if (S.view === 'setup') draw(); }; window.addEventListener('mintprivy', onP); S.cleanup = [...(S.cleanup || []), () => window.removeEventListener('mintprivy', onP)];
+  /** Your wallet addresses in full: from Privy when logged in, else from the server's links. Public addresses: safe to share for deposits. */
+  const wallets = () => {
+    const el = $('#wallets'); if (!el) return; const ss = s();
+    const sol = ss?.solAddress || S.wallets.solana?.address || null, evm = ss?.evmAddress || IDS.filter(c => c !== 'solana').map(c => S.wallets[c]?.address).find(Boolean) || null;
+    const row = (label, chains, addr, links) => `<div class="field"><span style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">${chains} ${esc(label)}</span>${addr ? `<span class="input" style="min-height:38px"><span class="mono" style="flex:1;min-width:0;overflow-wrap:anywhere;padding:8px 0;font-size:12.5px">${esc(addr)}</span><button type="button" class="btn sm ghost" data-copy="${esc(addr)}">Copy</button></span><span style="font-size:12px" class="faint">${links.map(([n, u]) => `<a href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(n)}</a>`).join(' · ')}</span>` : '<span class="faint">None yet</span>'}</div>`;
+    el.innerHTML = !sol && !evm ? 'Log in with Privy to see your wallets.' :
+      row('Solana', badge('solana'), sol, sol ? [['Solscan', `https://solscan.io/account/${sol}`]] : []) +
+      row('EVM: the same address on Base, Robinhood and BNB', badge('base') + badge('robinhood') + badge('bnb'), evm, evm ? [['Basescan', `https://basescan.org/address/${evm}`], ['BscScan', `https://bscscan.com/address/${evm}`], ['Robinhood', `https://explorer.chain.robinhood.com/address/${evm}`]] : []) +
+      '<p class="faint" style="margin:0;font-size:12.5px">Send SOL, ETH or BNB to these to fund trading. They are your Privy wallets: only you control them.</p>';
+    $$('[data-copy]', el).forEach(b => b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => toast('ok', 'Address copied')).catch(() => toast('warn', 'Copy it by hand', b.dataset.copy)));
+  };
+  draw(); sets(); wallets();
+  const onP = () => { if (S.view === 'setup') { draw(); wallets(); } }; window.addEventListener('mintprivy', onP); S.cleanup = [...(S.cleanup || []), () => window.removeEventListener('mintprivy', onP)];
 };
 
 /* ---------- boot ---------- */

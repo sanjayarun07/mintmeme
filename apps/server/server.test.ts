@@ -112,6 +112,9 @@ test('the /solana sample page is linked to a local terminal: page and /api/sol c
     const evil = await fetch(url + '/api/sol/status', { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{}' });
     assert.equal(evil.status, 403, 'a foreign origin is passed through unchanged and refused'); assert.equal(seen.at(-1)!.origin, 'https://evil.example');
     assert.equal((await fetch(bare.url + '/solana')).status, 404, 'no link configured: nothing is served');
+    const root = await fetch(url + '/', { redirect: 'manual' }); assert.equal(root.status, 302); assert.equal(root.headers.get('location'), '/app', 'with the app linked, / opens the trading app');
+    assert.match(await (await fetch(url + '/console')).text(), /MINT API console/, 'the console stays at /console');
+    assert.match(await (await fetch(bare.url + '/')).text(), /MINT API console/, 'without the app, / is still the console');
     // through a proxy or tunnel on this machine (it connects from 127.0.0.1 but adds a forwarding header): the trading app and its read-only data only
     const n0 = seen.length, via = (p: string, h: Record<string, string>, method = 'GET') => fetch(url + p, { method, headers: { 'content-type': 'application/json', ...h }, body: method === 'POST' ? '{}' : undefined });
     for (const h of [{ 'x-forwarded-for': '203.0.113.9' }, { 'cf-connecting-ip': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }]) {
