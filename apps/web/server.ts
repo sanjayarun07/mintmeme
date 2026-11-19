@@ -27,6 +27,9 @@ export const SOL_ROUTES: Record<string, (body: any) => Promise<any>> = {
   '/api/sol/orders/context': async b => (await solMain()).orderContext(b), '/api/sol/orders/list': async b => (await solMain()).listOrders(b),
   '/api/sol/orders/create': async b => (await solMain()).createOrder(b), '/api/sol/orders/cancel': async b => (await solMain()).cancelOrder(b), '/api/sol/orders/edit': async b => (await solMain()).editOrder(b),
   '/api/sol/privy/use': async b => (await solMain()).privyUse(b),
+  // bridge-then-buy on the EVM chains (bridge.ts): read-only quotes, balances and status; the user signs the one deposit in Privy, the server never does
+  '/api/sol/evm/balances': async b => (await import('./bridge.ts')).evmBalances(b), '/api/sol/bridge/quote': async b => (await import('./bridge.ts')).bridgeQuote(b),
+  '/api/sol/bridge/status': async b => (await import('./bridge.ts')).bridgeStatus(b),
   '/api/sol/tradingkey/create': async b => (await solMain()).tradingKeyCreate(b),
   '/api/sol/tradingkey/use': async () => (await solMain()).tradingKeyUse(), '/api/sol/tradingkey/fund': async b => (await solMain()).fundTradingKey(b),
   '/api/sol/tradingkey/return': async b => (await solMain()).tradingKeyReturn(b), '/api/sol/tradingkey/funders': async () => ({ funders: await (await solMain()).keyFunders() }),

@@ -4,7 +4,7 @@
 import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
-import { PrivyProvider, usePrivy, useLogin, useSigners, useWallets as useEvmWallets, useCreateWallet as useCreateEvmWallet, useSignMessage as useEvmSignMessage } from '@privy-io/react-auth';
+import { PrivyProvider, usePrivy, useLogin, useSigners, useWallets as useEvmWallets, useCreateWallet as useCreateEvmWallet, useSignMessage as useEvmSignMessage, useSendTransaction as useEvmSendTransaction } from '@privy-io/react-auth';
 import { base } from 'viem/chains';
 import { useWallets, useCreateWallet, useSignMessage, useSignTransaction, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 
@@ -30,15 +30,18 @@ function Panel({ onWallets }) {
   const { addSigners, removeSigners } = useSigners(), sg = useRef();
   sg.current = { addSigners, removeSigners, authenticated };
   // Base (MODE=base-mainnet): the user's Privy EMBEDDED Ethereum wallet (an external one cannot carry the server signer). create() makes one; sign(message) is personal_sign.
-  const { wallets: evmAll } = useEvmWallets(), { createWallet: createEvm } = useCreateEvmWallet(), { signMessage: evmSign } = useEvmSignMessage(), ev = useRef();
+  const { wallets: evmAll } = useEvmWallets(), { createWallet: createEvm } = useCreateEvmWallet(), { signMessage: evmSign } = useEvmSignMessage(), { sendTransaction: evmSend } = useEvmSendTransaction(), ev = useRef();
   const evmWallet = evmAll.find(w => w.walletClientType === 'privy');
-  ev.current = { evmWallet, createEvm, evmSign };
+  ev.current = { evmWallet, createEvm, evmSign, evmSend };
   useEffect(() => {
     window.MintPrivy.evm = {
       address: () => (ev.current.evmWallet ? ev.current.evmWallet.address.toLowerCase() : null),
       create: async () => { if (!sg.current.authenticated) throw new Error('log in with Privy first'); if (ev.current.evmWallet) return ev.current.evmWallet.address.toLowerCase(); const w = await ev.current.createEvm(); return String(w.address).toLowerCase(); },
       sign: async (message) => { const w = ev.current.evmWallet; if (!w) throw new Error('create your Base wallet first');
         const r = await ev.current.evmSign({ message }, { address: w.address, uiOptions: { ...UI, title: 'Link to the MINT server', description: 'This only proves you control this wallet. It moves no funds.' } }); return r.signature; },
+      // bridge-then-buy: the USER sends one checked Relay deposit on Base (apps/web/bridge.ts checks it first). Privy shows the amount and asks; the server signer is not used. Base only (supportedChains).
+      send: async (tx, ui = {}) => { const w = ev.current.evmWallet; if (!w) throw new Error('create your Base wallet first'); if (Number(tx?.chainId) !== base.id) throw new Error('only Base transactions can be sent from this page');
+        const r = await ev.current.evmSend({ to: tx.to, value: tx.value, data: tx.data, chainId: base.id }, { address: w.address, uiOptions: { ...UI, ...ui } }); return r.hash; },
     };
   }, []);
   useEffect(() => {
