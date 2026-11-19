@@ -25,7 +25,7 @@ The same API runs in practice mode or on real chains. Your operator tells you wh
 A server can run several chains at once (`CHAINS=solana,base,bnb,robinhood`). Then **the path names the chain**: put `/<chain>` after `/v1`.
 
 ```bash
-curl -s $BASE/v1/chains                                                     # {"default":"solana","chains":[{"id":"solana","prefix":"/v1/solana/",...},...]}
+curl -s $BASE/v1/chains                                                     # {"default":"solana","chains":[{"id":"solana","kind":"solana","native":"SOL","amountKey":"sol","prefix":"/v1/solana/",...},...]}
 curl -s -H "Authorization: Bearer $KEY" $BASE/v1/base/overview              # your Base account
 curl -s -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' -H 'Idempotency-Key: bnb-001' \
   -d '{"token":"0x55d398326f99059ff775485246999027b3197955","bnb":"0.01","slippagePct":3}' $BASE/v1/bnb/trades/buy
@@ -431,7 +431,7 @@ Scopes: **R** = `read` or higher; **T** = `trade`; **A** = app key. Modes: all m
 |---|---|---|---|
 | GET | `/v1/health` | none | `{"ok":true}` |
 | GET | `/v1/openapi.json` | none | The OpenAPI spec (`/v1/<chain>/openapi.json`: that chain's routes) |
-| GET | `/v1/chains` | none | The chains this server runs, the default chain and each one's path prefix |
+| GET | `/v1/chains` | none | The chains this server runs and the default. Each: `id`, `label`, `kind` (practice, solana, evm), `native` (SOL, ETH, BNB), `amountKey` (the plain-units field for that coin in a trade: `sol`, `eth`, `bnb`), `chainId` (EVM), `prefix`, `default` |
 | GET | `/v1/overview` | R | Account state: chain, block, active orders, running jobs |
 | POST | `/v1/quote` | R | Best price for a market trade; nothing is sent |
 | POST | `/v1/trades/buy` | T | Market buy (send `Idempotency-Key`) |

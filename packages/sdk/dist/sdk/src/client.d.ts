@@ -11,6 +11,18 @@ export interface ClientOptions {
     timeoutMs?: number;
 }
 type J = any;
+/** One chain of GET /v1/chains. `kind`: practice (simulated, fake funds), solana or evm. `amountKey`: the plain-units field a trade on it takes for its native coin
+ *  (`sol`, `eth`, `bnb`; for example `{ token, bnb: '0.01' }` on BNB Chain), null on practice. `chainId`: the EIP-155 id of an EVM chain. */
+export interface ChainInfo {
+    id: string;
+    label: string;
+    kind: 'practice' | 'solana' | 'evm';
+    native: string | null;
+    amountKey: string | null;
+    chainId: number | null;
+    prefix: string;
+    default: boolean;
+}
 /** A copy config for the execution server (MODE=solana-mainnet), in plain units. Exactly one of `fixedSol` or `percent`. Unknown fields are refused by the server. */
 export interface CopyInput {
     /** One leader wallet, or `leaders` with 1 to 10. */ leader?: string;
@@ -53,13 +65,10 @@ export declare class MemeClient {
     /** The chains this server runs and its default chain (no key needed). */
     chains(): Promise<{
         default: string;
-        chains: {
-            id: string;
-            label: string;
-            prefix: string;
-            default: boolean;
-        }[];
+        chains: ChainInfo[];
     }>;
+    /** A client for each chain the server runs, by chain id (`(await c.perChain()).base.overview()`). */
+    perChain(): Promise<Record<string, MemeClient>>;
     appWebhook(): Promise<any>;
     /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
     setAppWebhook(url: string, secret?: string): Promise<any>;
@@ -126,9 +135,10 @@ export declare class MemeClient {
         ttlS?: number;
         mevProtection?: boolean;
     } & StockTradeOptions): Promise<any>;
-    /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
+    /** The linked wallet on this client's chain (each chain links its own): address, and whether the server may trade it now (and why not). */
     wallet(): Promise<any>;
     linkStart(address: string): Promise<any>;
+    /** `signature`: base64 of the wallet's signature on Solana; the 0x personal_sign signature on an EVM chain. */
     linkFinish(address: string, signatureBase64: string): Promise<any>;
     unlink(): Promise<any>;
     /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */

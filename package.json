@@ -25,6 +25,8 @@
     "verify:stocks": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/xstocksread.ts",
     "verify:jupiterz-live": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/jupiterzlive.ts",
     "verify:base-relay": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/baserelayread.ts",
+    "server:merge": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/merge-namespaces.ts",
+    "privy:evm-policy": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/privy-evm-policy.ts",
     "setup:check": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/setup-check.ts",
     "test:pg": "PG_TEST_URL=${PG_TEST_URL:-postgres://memedesk:memedesk-local-pw@127.0.0.1:55433/memedesk_test} npm test"
   },

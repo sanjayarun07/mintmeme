@@ -15,7 +15,7 @@ import type { ChainAccounts } from './node.ts';
 import { practiceAccount } from './accounts.ts';
 import { solanaAccounts, linkRoutes } from './solaccount.ts';
 import { baseAccounts, baseLinkRoutes, walletState } from './baseaccount.ts';
-import { parseChains, checkSpecs, CHAIN_SPECS, stateName, RESERVED_SEGMENTS } from './chains.ts';
+import { parseChains, checkSpecs, CHAIN_SPECS, stateName, RESERVED_SEGMENTS, stocksEnabled } from './chains.ts';
 import { buildChains } from './main.ts';
 import { EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
 import { MemeClient } from '../../packages/sdk/src/client.ts';
@@ -32,6 +32,9 @@ test('CHAINS: the list wins, MODE is a one-chain shorthand, nonsense is refused 
   assert.throws(() => parseChains({ CHAINS: 'practice,solana' }), /practice/);
   assert.throws(() => parseChains({ MODE: 'eth-mainnet' }), /not built in/);
   assert.deepEqual(parseChains({ CHAINS: 'bnb,robinhood' }).map(s => s.evm!.chainId), [56, 4663]);
+  // stock buys: a chain's own switch wins over STOCKS_ENABLED (so a merged server keeps Solana's on and Base's off)
+  assert.equal(stocksEnabled('solana', { STOCKS_ENABLED: '1' }), true); assert.equal(stocksEnabled('base', {}), false);
+  assert.equal(stocksEnabled('base', { STOCKS_ENABLED: '1', BASE_STOCKS_ENABLED: '0' }), false); assert.equal(stocksEnabled('solana', { SOLANA_STOCKS_ENABLED: '1' }), true);
 });
 
 test('chain specs: ids are safe path segments, every EVM spec has SDK contracts, and state names keep the default chain unprefixed', () => {

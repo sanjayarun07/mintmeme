@@ -8,6 +8,7 @@
  *      carries this server's signer with the policy. Only then is {address, walletId} saved under the user in Redis (through the user's lease, fail-closed).
  *   GET /v1/wallet shows the link; DELETE /v1/wallet removes it. Removing the signer in Privy also stops signing at once (Privy refuses; nothing is sent).
  *  Every claim of the user by a node asks Privy again before anything is signed, so a revoked wallet is never traded after a failover or restart. */
+import { stocksEnabled } from './chains.ts';
 import { randomBytes } from 'node:crypto';
 import type { Backend } from '../../packages/core/src/index.ts';
 import { PrivyApi, verifySignature, looksLikeMint, SolJsonRpc, STOCKS_SOLANA, STOCK_LIST_META, stockByMint, findStock, underlying, readStockStates, rawForShares, sharesForRaw, perTokenPrice, checkFillPrice, JupiterStockPrices } from '../../packages/sol/src/index.ts';
@@ -59,7 +60,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
   jupiterz?: { minLamports: bigint; marginBps: number };
   stocks?: { enabled?: boolean; maxDeviationPct?: number; prices?: JupiterStockPrices; rpc?: { call<T = any>(m: string, p?: unknown[]): Promise<T> } } }) {
   const privy = new PrivyApi(c.privy), solUsd = c.solUsd ?? jupiterSolUsd(30_000, c.jupiterApiKey), status = new Map<string, Status>(); const live = new Map<string, Awaited<ReturnType<typeof createSolanaTrader>>>();
-  const stocksOn = c.stocks?.enabled ?? process.env.STOCKS_ENABLED === '1', stockRpc = c.stocks?.rpc ?? new SolJsonRpc(c.rpcUrl), prices = c.stocks?.prices ?? new JupiterStockPrices({ apiKey: c.jupiterApiKey }), maxDev = c.stocks?.maxDeviationPct ?? 3;
+  const stocksOn = c.stocks?.enabled ?? stocksEnabled('solana'), stockRpc = c.stocks?.rpc ?? new SolJsonRpc(c.rpcUrl), prices = c.stocks?.prices ?? new JupiterStockPrices({ apiKey: c.jupiterApiKey }), maxDev = c.stocks?.maxDeviationPct ?? 3;
   const leaderRpc = new SolJsonRpc(c.rpcUrl);   // copy trading reads leader wallets through the same node
   const stockState = async (mint: string) => { const st = (await readStockStates(stockRpc, [mint])).get(mint); if (!st) throw new SdkError('no_route', `stock mint ${mint} could not be read`, 'Retry shortly.', 503); return st; };
   /** The route's price per share against the underlying share price, at `amount` (lamports for a buy, raw tokens for a sell). */

@@ -3,6 +3,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { SyncRedis } from '../packages/core/src/index.ts';
+import { CHAIN_SPECS, parseChains, type ChainSpec } from '../apps/server/chains.ts';
 
 const env = process.env, rows: [string, string, 'ok' | 'missing' | 'warn' | 'n/a', string][] = [];
 const add = (part: string, item: string, state: 'ok' | 'missing' | 'warn' | 'n/a', hint = '') => rows.push([part, item, state, hint]);
@@ -34,8 +35,20 @@ const looksKey = (k: string) => set(k) && env[k]!.trim().length >= 40;
 add('Privy signing', 'PRIVY_APP_SECRET', looksKey('PRIVY_APP_SECRET') ? 'ok' : set('PRIVY_APP_SECRET') ? 'warn' : 'missing', 'App settings → Basics → API keys');
 add('Privy signing', 'PRIVY_AUTH_KEY_ID', set('PRIVY_AUTH_KEY_ID') ? 'ok' : 'missing', 'Wallet infrastructure → Keys and quorums → New key');
 add('Privy signing', 'PRIVY_AUTH_PRIVATE_KEY', looksKey('PRIVY_AUTH_PRIVATE_KEY') ? 'ok' : set('PRIVY_AUTH_PRIVATE_KEY') ? 'warn' : 'missing', 'shown once when the key is created');
-add('Privy signing', 'PRIVY_SOLANA_POLICY_ID', set('PRIVY_SOLANA_POLICY_ID') ? 'ok' : 'missing', 'Wallet infrastructure → Policies (chain type Solana)');
-add('Privy signing', 'PRIVY_BASE_POLICY_ID', set('PRIVY_BASE_POLICY_ID') ? 'ok' : 'n/a', 'only for MODE=base-mainnet');
+// Which chains the server runs (CHAINS, or MODE as a one-chain shorthand): each real chain needs its own Privy policy and an RPC.
+let chains: ChainSpec[] = []; let chainsErr = '';
+try { chains = parseChains(env); } catch (e) { chainsErr = (e as Error).message; }
+add('chains', chainsErr ? 'CHAINS / MODE' : `serving ${chains.map(c => c.id).join(', ')}${env.CHAINS ? '' : ` (MODE=${env.MODE ?? 'practice'})`}`, chainsErr ? 'missing' : 'ok', chainsErr);
+const on = (id: string) => chains.some(c => c.id === id);
+add('chains', 'PRIVY_SOLANA_POLICY_ID', set('PRIVY_SOLANA_POLICY_ID') ? 'ok' : on('solana') ? 'missing' : 'n/a', 'Wallet infrastructure → Policies (chain type Solana)');
+add('chains', 'SOLANA_RPC_URL (or ALCHEMY_API_KEY)', set('SOLANA_RPC_URL') || set('ALCHEMY_API_KEY') ? 'ok' : on('solana') ? 'missing' : 'n/a', 'a Solana mainnet RPC');
+for (const s of Object.values(CHAIN_SPECS)) {
+  if (!s.evm) continue;
+  const used = on(s.id), x = s.evm;
+  add('chains', `${x.policyEnv}`, set(x.policyEnv) ? 'ok' : used ? 'missing' : 'n/a', `${s.label}: Policies → chain type Ethereum, that chain's router and value caps (needed because CHAINS has ${s.id})`);
+  const rpc = set(x.rpcEnv) || (!!x.alchemyNet && set('ALCHEMY_API_KEY'));
+  add('chains', `${x.rpcEnv}${x.alchemyNet ? ' (or ALCHEMY_API_KEY)' : ''}`, rpc ? 'ok' : used ? 'missing' : 'n/a', `${s.label} RPC (Alchemy needs ${x.alchemyNet} enabled on the app)`);
+}
 
 // verification tools
 add('fork tests', 'solana-test-validator (verify:sol-guard)', has('solana-test-validator') ? 'ok' : 'warn', 'Solana CLI');

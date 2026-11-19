@@ -258,7 +258,9 @@ The execution server can run every chain at once (docs/PRODUCTION_SERVER.md → 
 ```ts
 const c = new MemeClient({ baseUrl, apiKey });                // default chain
 const base = c.forChain('base'), bnb = c.forChain('bnb');    // or new MemeClient({ baseUrl, apiKey, chain: 'bnb' })
-console.log(await c.chains());                                // { default: 'solana', chains: [{ id: 'solana', prefix: '/v1/solana/', ... }, ...] }
+console.log(await c.chains());                                // { default: 'solana', chains: [{ id: 'bnb', kind: 'evm', native: 'BNB', amountKey: 'bnb', chainId: 56, ... }, ...] }
+const all = await c.perChain();                               // { solana: MemeClient, base: MemeClient, ... }: one client per chain
+for (const ch of (await c.chains()).chains) console.log(ch.id, await all[ch.id].wallet());   // each chain links its own wallet
 await base.swap({ side: 'buy', token: '0x9a26…7973', eth: '0.001', slippagePct: 3 });
 await bnb.swap({ side: 'buy', token: '0x55d3…7955', bnb: '0.01', slippagePct: 3 });   // BNB amounts are `bnb`
 ```

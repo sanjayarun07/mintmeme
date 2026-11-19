@@ -43,7 +43,11 @@ function Panel({ onWallets }) {
   }, []);
   useEffect(() => {
     const need = () => { if (!sg.current.authenticated) throw new Error('log in with Privy first'); };
-    window.MintPrivy.allow = async (address, signerId, policyId) => { need(); await sg.current.addSigners({ address, signers: [{ signerId, policyIds: [policyId] }] }); };
+    // policyIds: one id or a list (the server signer on an Ethereum wallet carries every EVM chain's policy: Base, Robinhood, BNB). Privy keeps one entry per signer, so
+    // when the signer is already on the wallet (with fewer policies) it is removed and added again with the full list; Privy asks the user to approve each step.
+    window.MintPrivy.allow = async (address, signerId, policyIds) => { need(); const ids = Array.isArray(policyIds) ? policyIds : [policyIds];
+      try { await sg.current.addSigners({ address, signers: [{ signerId, policyIds: ids }] }); }
+      catch (e) { if (!/already|exist|duplicate/i.test(String(e?.message ?? e))) throw e; await sg.current.removeSigners({ address }); await sg.current.addSigners({ address, signers: [{ signerId, policyIds: ids }] }); } };
     window.MintPrivy.revoke = async (address) => { need(); await sg.current.removeSigners({ address }); };
   }, []);
 

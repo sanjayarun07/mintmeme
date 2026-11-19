@@ -8,6 +8,9 @@ import type { Amount, PriceOrderInput, BulkInput, TwapInput, TraderEvent } from 
  *  calls go to the server's default chain. Use `forChain` for a client per chain, `chains()` for the list. */
 export interface ClientOptions { baseUrl: string; apiKey: string; userId?: string; chain?: string; fetch?: typeof fetch; timeoutMs?: number }
 type J = any;
+/** One chain of GET /v1/chains. `kind`: practice (simulated, fake funds), solana or evm. `amountKey`: the plain-units field a trade on it takes for its native coin
+ *  (`sol`, `eth`, `bnb`; for example `{ token, bnb: '0.01' }` on BNB Chain), null on practice. `chainId`: the EIP-155 id of an EVM chain. */
+export interface ChainInfo { id: string; label: string; kind: 'practice' | 'solana' | 'evm'; native: string | null; amountKey: string | null; chainId: number | null; prefix: string; default: boolean }
 /** A copy config for the execution server (MODE=solana-mainnet), in plain units. Exactly one of `fixedSol` or `percent`. Unknown fields are refused by the server. */
 export interface CopyInput {
   /** One leader wallet, or `leaders` with 1 to 10. */ leader?: string; leaders?: string[];
@@ -43,7 +46,9 @@ export class MemeClient {
   /** The same client for another chain of a multi-chain server (`forChain('base')`). */
   forChain(chain: string) { return new MemeClient({ ...this.o, chain }); }
   /** The chains this server runs and its default chain (no key needed). */
-  chains(): Promise<{ default: string; chains: { id: string; label: string; prefix: string; default: boolean }[] }> { return this.req('GET', '/v1/chains'); }
+  chains(): Promise<{ default: string; chains: ChainInfo[] }> { return this.req('GET', '/v1/chains'); }
+  /** A client for each chain the server runs, by chain id (`(await c.perChain()).base.overview()`). */
+  async perChain(): Promise<Record<string, MemeClient>> { const l = await this.chains(); return Object.fromEntries(l.chains.map(x => [x.id, this.forChain(x.id)])); }
   // ── app keys only: the app's webhook (signed POSTs of every end user's events) and its end users ──
   appWebhook() { return this.req('GET', '/v1/app/webhook'); }
   /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
@@ -69,9 +74,10 @@ export class MemeClient {
    *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
   placeOrder(p: { type: 'limit-buy' | 'limit-sell' | 'take-profit' | 'stop-loss' | 'trailing-stop' | 'bracket'; /** the token's mint (or `stock` with a ticker) */ mint?: string; sol?: string; /** Base, Robinhood: ETH amounts */ eth?: string; /** BNB Chain: BNB amounts */ bnb?: string; tokens?: string; pct?: number; priceUsd?: string | number; price?: string;
     trailPct?: number; tpUsd?: string; slUsd?: string; slippagePct?: number; chase?: { stepBps: number; maxBps: number }; id?: string; ttlS?: number; mevProtection?: boolean } & StockTradeOptions) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
-  /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
+  /** The linked wallet on this client's chain (each chain links its own): address, and whether the server may trade it now (and why not). */
   wallet() { return this.req('GET', '/v1/wallet'); }
   linkStart(address: string) { return this.req('POST', '/v1/wallet/link/start', { address }); }
+  /** `signature`: base64 of the wallet's signature on Solana; the 0x personal_sign signature on an EVM chain. */
   linkFinish(address: string, signatureBase64: string) { return this.req('POST', '/v1/wallet/link/finish', { address, signature: signatureBase64 }); }
   unlink() { return this.req('DELETE', '/v1/wallet'); }
   /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */

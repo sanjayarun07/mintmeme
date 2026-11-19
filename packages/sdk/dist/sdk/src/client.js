@@ -36,6 +36,8 @@ export class MemeClient {
     forChain(chain) { return new MemeClient({ ...this.o, chain }); }
     /** The chains this server runs and its default chain (no key needed). */
     chains() { return this.req('GET', '/v1/chains'); }
+    /** A client for each chain the server runs, by chain id (`(await c.perChain()).base.overview()`). */
+    async perChain() { const l = await this.chains(); return Object.fromEntries(l.chains.map(x => [x.id, this.forChain(x.id)])); }
     // ── app keys only: the app's webhook (signed POSTs of every end user's events) and its end users ──
     appWebhook() { return this.req('GET', '/v1/app/webhook'); }
     /** Returns the signing secret once (generated unless you pass one). Verify each delivery: x-memedesk-signature t=..,v1=HMAC-SHA256(secret, "t.body"). */
@@ -60,9 +62,10 @@ export class MemeClient {
     /** A standing order that trades by itself: `limit-buy` (with `sol`), `limit-sell`, `take-profit`, `stop-loss` (with `tokens` or `pct`), trigger `priceUsd` or `price` (SOL per token);
      *  `trailing-stop` with `trailPct`; `bracket` with `tpUsd` and/or `slUsd`. */
     placeOrder(p) { const { type, ...b } = p; return this.req('POST', `/v1/orders/${type}`, b); }
-    /** The linked wallet (MODE=solana-mainnet): address, and whether the server may trade it now (and why not). */
+    /** The linked wallet on this client's chain (each chain links its own): address, and whether the server may trade it now (and why not). */
     wallet() { return this.req('GET', '/v1/wallet'); }
     linkStart(address) { return this.req('POST', '/v1/wallet/link/start', { address }); }
+    /** `signature`: base64 of the wallet's signature on Solana; the 0x personal_sign signature on an EVM chain. */
     linkFinish(address, signatureBase64) { return this.req('POST', '/v1/wallet/link/finish', { address, signature: signatureBase64 }); }
     unlink() { return this.req('DELETE', '/v1/wallet'); }
     /** Trading settings (MODE=solana-mainnet). `mevProtection: true` sends trades privately through Jito with a tip of at most `maxTipSol` (default 0.0001). Off by default. */

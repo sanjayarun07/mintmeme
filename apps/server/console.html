@@ -36,13 +36,27 @@ table{width:100%;border-collapse:collapse;font-size:12.5px}th{text-align:left;fo
 </head>
 <body>
 <header><b>MINT</b><span class="where">API console</span><span class="grow"></span><span id="who" class="muted small">Not connected</span></header>
-<div class="bar">Practice accounts: simulated chain, fake funds. Every button calls the real HTTP API of this server; the server runs the SDK's <span class="mono">Trader</span> for your account on whichever node owns it.</div>
+<div class="bar" id="bar">Practice accounts: simulated chain, fake funds. Every button calls the real HTTP API of this server; the server runs the SDK's <span class="mono">Trader</span> for your account on whichever node owns it.</div>
 <main>
 <div class="col">
   <section>
     <h2>Connect</h2>
     <div class="row"><div style="flex:3 1 260px"><label for="key">API key (from <span class="mono">npm run server:key</span>; kept in this tab only)</label><input id="key" type="password" autocomplete="off" spellcheck="false"></div><div style="flex:0 0 auto"><button class="primary" id="connect">Connect</button></div></div>
+    <div id="chains" class="row" style="margin-top:10px;gap:6px" hidden role="tablist" aria-label="Chain"></div>
     <div id="acct" class="small muted" style="margin-top:10px"></div>
+  </section>
+
+  <section id="s-real" hidden>
+    <h2>Market trade <span class="pill warn" style="margin-left:6px">real funds</span></h2>
+    <div class="small muted" id="r-wallet" style="margin-bottom:10px"></div>
+    <div class="row">
+      <div><label for="r-side">Side</label><select id="r-side"><option value="buy">Buy</option><option value="sell">Sell</option></select></div>
+      <div style="flex:3 1 260px"><label for="r-token">Token (address, mint or stock ticker)</label><input id="r-token" spellcheck="false" autocomplete="off"></div>
+      <div><label for="r-amt" id="r-amt-l">Amount</label><input id="r-amt" inputmode="decimal"></div>
+      <div><label for="r-slip">Slippage (%)</label><input id="r-slip" value="3" inputmode="decimal"></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button id="r-quote">Quote</button><button class="primary" id="r-go">Buy</button><span class="small muted">Each trade asks you to confirm first.</span></div>
+    <div id="r-res"></div>
   </section>
 
   <section id="s-trade" hidden>
@@ -114,6 +128,10 @@ table{width:100%;border-collapse:collapse;font-size:12.5px}th{text-align:left;fo
 </main>
 <script>
 const $=s=>document.querySelector(s), E18=10n**18n; let KEY='', ACC=null, paused=false, evAbort=null;
+/** The server's chains (GET /v1/chains) and the one this page works on. With several chains every call goes to /v1/<chain>/...; app routes have no prefix. */
+let CHAINS=[], CH=null;
+const P=p=>CHAINS.length>1&&CH&&p.startsWith('/v1/')&&!p.startsWith('/v1/app/')&&p!=='/v1/chains'?'/v1/'+CH.id+p.slice(3):p;
+const REAL=()=>!!CH&&CH.kind!=='practice';
 $('#entry').textContent=location.origin;
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 /** Human price (quote per token, up to 18 decimals) <-> priceE18 string. Practice token and quote both have 18 decimals. */
@@ -121,8 +139,9 @@ const toE18=v=>{const s=String(v).trim();if(!/^\d+(\.\d{1,18})?$/.test(s))throw 
 /** Ids are "<user>.<id>": show the part after the user; long generated ids are cut to 14 characters (the full id is in the tooltip). */
 const shortId=id=>{const s=String(id).includes('.')?String(id).split('.').slice(1).join('.'):String(id);return s.length>16?s.slice(0,14)+'…':s};
 const fromE18=v=>{if(v==null)return '';const b=BigInt(v),w=b/E18,f=(b%E18).toString().padStart(18,'0').replace(/0+$/,'');return f?`${w}.${f.slice(0,8)}`:`${w}`};
-async function api(method,path,body){
-  const r=await fetch(path,{method,headers:{authorization:'Bearer '+KEY,...(body?{'content-type':'application/json'}:{}),...(method==='POST'&&path.startsWith('/v1/trades/')?{'idempotency-key':'ui-'+Date.now()+'-'+Math.random().toString(36).slice(2)}:{})},body:body?JSON.stringify(body):undefined});
+async function api(method,plain,body){
+  const path=P(plain);
+  const r=await fetch(path,{method,headers:{authorization:'Bearer '+KEY,...(body?{'content-type':'application/json'}:{}),...(method==='POST'&&plain.startsWith('/v1/trades/')?{'idempotency-key':'ui-'+Date.now()+'-'+Math.random().toString(36).slice(2)}:{})},body:body?JSON.stringify(body):undefined});
   const node=r.headers.get('x-memedesk-node'), j=await r.json().catch(()=>({}));
   $('#out').textContent=`${method} ${path}  ->  HTTP ${r.status}${node?`  (run by ${node})`:''}\n\n`+JSON.stringify(j,null,2).slice(0,4000);
   if(node)$('#served').innerHTML=`Last request ran on <span class="mono">${esc(node)}</span>${node===location.origin?' (this node owns your account)':' (forwarded: another node owns your account)'}.`;
@@ -134,14 +153,45 @@ const fail=(el,e)=>say(el,false,e.message,e.fix||'');
 
 async function connect(){
   KEY=$('#key').value.trim(); if(!KEY)return;
-  try{ACC=await api('GET','/v1/overview')}catch(e){$('#acct').innerHTML=`<span class="pill bad">${esc(e.message)}</span>`;return}
+  try{const l=await (await fetch('/v1/chains')).json();CHAINS=l.chains||[];CH=CHAINS.find(c=>c.id===(CH&&CH.id))||CHAINS.find(c=>c.default)||null}catch{CHAINS=[];CH=null}
+  const tabs=$('#chains');tabs.hidden=CHAINS.length<2;
+  tabs.innerHTML=CHAINS.map(c=>`<button class="sm${CH&&c.id===CH.id?' primary':''}" role="tab" aria-selected="${CH&&c.id===CH.id}" data-chain="${esc(c.id)}">${esc(c.label)}${c.default?' <span class="muted">(default)</span>':''}</button>`).join('');
+  tabs.querySelectorAll('[data-chain]').forEach(b=>b.onclick=()=>{CH=CHAINS.find(c=>c.id===b.dataset.chain);connect()});
+  await load();
+}
+async function load(){
+  try{ACC=await api('GET','/v1/overview')}catch(e){$('#acct').innerHTML=`<span class="pill bad">${esc(e.message)}</span>${e.fix?` <span class="small">${esc(e.fix)}</span>`:''}`;for(const id of ['#s-trade','#s-order','#s-multi','#s-real','#s-orders','#s-pos','#s-events','#pause','#refresh'])$(id).hidden=true;return}
   paused=!!ACC.entriesPaused; $('#who').innerHTML=`<span class="pill ok">${esc(ACC.userId)}</span>`;
-  $('#acct').innerHTML=`Account <b>${esc(ACC.userId)}</b> on <span class="mono">${esc(ACC.chain)}</span> · block ${esc(ACC.block)} · ${esc(ACC.orders.active)} active orders · wallets w1, w2 · token <span class="mono">0xMEME</span>`;
-  document.querySelectorAll('.wallets').forEach(s=>s.innerHTML='<option>w1</option><option>w2</option>');
-  for(const id of ['#s-trade','#s-order','#s-orders','#s-multi','#s-pos','#s-events','#pause','#refresh'])$(id).hidden=false;
+  const real=REAL(), where=CH?esc(CH.label):`<span class="mono">${esc(ACC.chain)}</span>`;
+  $('#bar').innerHTML=real?`<b>${esc(CH.label)}: real funds.</b> Trades here are signed by your linked Privy wallet and spend real ${esc(CH.native)}, within this server's caps and your wallet's Privy policy. Every button calls the real HTTP API; the node that owns your account runs it.`
+    :'Practice accounts: simulated chain, fake funds. Every button calls the real HTTP API of this server; the server runs the SDK\'s <span class="mono">Trader</span> for your account on whichever node owns it.';
+  for(const id of ['#s-trade','#s-order','#s-multi'])$(id).hidden=real; $('#s-real').hidden=!real;
+  for(const id of ['#s-orders','#s-pos','#s-events','#pause','#refresh'])$(id).hidden=false;
   $('#pause').textContent=paused?'Resume buys':'Pause new buys';
+  if(real){
+    let w=null;try{w=await api('GET','/v1/wallet')}catch{}
+    const ws=!w?'<span class="pill bad">wallet unknown</span>':!w.linked?`<span class="pill warn">no wallet linked</span> Link one with <span class="mono">${esc(P('/v1/wallet/link/start'))}</span> (docs/PRODUCTION_SERVER.md).`
+      :`Wallet <span class="mono">${esc(w.address)}</span> ${w.active?'<span class="pill ok">active</span>':`<span class="pill bad">not active</span> ${esc(w.why||'')}`}`;
+    $('#r-wallet').innerHTML=ws; $('#r-go').disabled=!(w&&w.active);
+    $('#acct').innerHTML=`Account <b>${esc(ACC.userId)}</b> on ${where} · block ${esc(ACC.block)} · ${esc(ACC.orders.active)} active orders`;
+    realForm(); await refresh(); events(); return;
+  }
+  $('#acct').innerHTML=`Account <b>${esc(ACC.userId)}</b> on ${where} · block ${esc(ACC.block)} · ${esc(ACC.orders.active)} active orders · wallets w1, w2 · token <span class="mono">0xMEME</span>`;
+  document.querySelectorAll('.wallets').forEach(s=>s.innerHTML='<option>w1</option><option>w2</option>');
   await marketPrice(); await refresh(); events();
 }
+/** Real chains take plain units: the native coin under CH.amountKey (sol, eth, bnb) to buy, a percentage of the balance to sell. */
+function realForm(){const b=$('#r-side').value==='buy';$('#r-go').textContent=b?'Buy':'Sell';$('#r-amt-l').textContent=b?`Spend (${CH.native})`:'Sell (% of balance)';
+  if(!$('#r-amt').value||$('#r-amt').dataset.side!==$('#r-side').value){$('#r-amt').value=b?'':'100';$('#r-amt').dataset.side=$('#r-side').value}}
+function realBody(){const tok=$('#r-token').value.trim(),amt=$('#r-amt').value.trim(),b=$('#r-side').value==='buy';
+  if(!tok)throw new Error('enter the token');if(!/^\d+(\.\d+)?$/.test(amt)||Number(amt)<=0)throw new Error(b?`enter how much ${CH.native} to spend`:'enter a percentage from 1 to 100');
+  if(!b&&Number(amt)>100)throw new Error('sell at most 100%');
+  return {token:tok,...(b?{[CH.amountKey]:amt}:{pct:Number(amt)}),slippagePct:Number($('#r-slip').value)}}
+$('#r-side').onchange=realForm;
+$('#r-quote').onclick=async()=>{try{const q=await api('POST','/v1/quote',{side:$('#r-side').value,...realBody()});say('#r-res',true,`Best route ${q.venue}: ${q.amountOut} out, at least ${q.minOut}`,`Raw units. Price impact ${((q.priceImpactBps??0)/100).toFixed(2)}%. Nothing sent.`)}catch(e){fail('#r-res',e)}};
+$('#r-go').onclick=async()=>{const side=$('#r-side').value;try{const body=realBody();
+  if(!confirm(side==='buy'?`Buy ${body.token} with ${body[CH.amountKey]} ${CH.native} on ${CH.label}? This spends real funds.`:`Sell ${body.pct}% of ${body.token} on ${CH.label}? This is a real trade.`))return;
+  const t=await api('POST','/v1/trades/'+side,{...body,key:'ui-'+Date.now()});say('#r-res',t.state==='finalized',`${side==='buy'?'Buy':'Sell'} ${t.state}`,t.fill?`Received ${t.fill.received} (raw units) · trade ${t.key}`:(t.failure||''));refresh()}catch(e){fail('#r-res',e)}};
 let spot=null;
 async function marketPrice(){try{const q=await api('POST','/v1/quote',{side:'buy',token:'0xMEME',amount:'1000'});spot=1000/Number(q.amountOut);$('#m-px').textContent=`Market about ${spot.toPrecision(6)} quote per token`;defaults()}catch{}}
 function defaults(){if(!spot)return;const t=$('#o-type').value,f=x=>(spot*x).toFixed(6);
@@ -174,11 +224,19 @@ $('#b-go').onclick=async()=>{try{const id='bulk-'+Date.now();await api('POST','/
 $('#t-go').onclick=async()=>{try{const id='twap-'+Date.now(),n=Number($('#t-n').value),iv=Number($('#t-int').value);await api('POST','/v1/twap',{id,walletId:'w1',token:'0xMEME',side:$('#t-side').value,total:$('#t-total').value.trim(),slices:n,intervalS:iv});say('#b-res',true,'TWAP started',`${id}: ${n} slices, ${iv} s apart.`);
   const poll=async(k)=>{try{const s=await api('GET','/v1/twap/'+encodeURIComponent(ACC.userId+'.'+id));say('#b-res',!s.failed,`TWAP: ${s.filled} of ${n} filled${s.skipped?`, ${s.skipped} skipped`:''}`,s.done?'Done.':'Running…');if(!s.done&&k<40)setTimeout(()=>poll(k+1),1500);else refresh()}catch(e){fail('#b-res',e)}};setTimeout(()=>poll(0),1500)}catch(e){fail('#b-res',e)}};
 async function events(){
-  if(evAbort)evAbort.abort();evAbort=new AbortController();const box=$('#events');box.textContent='Listening…';
-  try{const r=await fetch('/v1/events',{headers:{authorization:'Bearer '+KEY},signal:evAbort.signal});const rd=r.body.getReader();let buf='';
-    for(;;){const{value,done}=await rd.read();if(done)break;buf+=new TextDecoder().decode(value);let i;while((i=buf.indexOf('\n\n'))>=0){const msg=buf.slice(0,i);buf=buf.slice(i+2);const d=msg.split('\n').find(l=>l.startsWith('data: '));if(!d)continue;
-      try{const e=JSON.parse(d.slice(6));const line=document.createElement('div');line.textContent=`${new Date().toLocaleTimeString()}  ${e.type}  ${e.id||e.key||''}  ${e.status||e.state||''}${e.filled!=null?` filled ${e.filled}`:''}`;if(box.textContent==='Listening…')box.textContent='';box.prepend(line);if(e.type==='order'||e.type==='trade')clearTimeout(window.__rt),window.__rt=setTimeout(refresh,400)}catch{}}}}
-  catch(e){if(e.name!=='AbortError')box.textContent='Event stream closed. Reconnect to resume.'}}
+  if(evAbort)evAbort.abort();evAbort=new AbortController();const box=$('#events'),where=CH?CH.label:'this account';box.textContent='Connecting…';
+  // The stream starts with ": connected" and sends ": hb" every 15 s; events are "data:" lines. Show the connection state until the first event arrives.
+  const idle=t=>{if(!box.querySelector('div[data-ev]'))box.innerHTML=`<span class="pill ok">connected</span> ${esc(where)}: no events yet. Trades, orders, bulk, TWAP and alerts appear here as they happen.<div class="small" style="margin-top:4px">${esc(t)}</div>`};
+  try{const r=await fetch(P('/v1/events'),{headers:{authorization:'Bearer '+KEY},signal:evAbort.signal});
+    if(!r.ok||!r.body){const j=await r.json().catch(()=>({}));box.innerHTML=`<span class="pill bad">not connected</span> ${esc(j.error?.message||'HTTP '+r.status)}${j.error?.fix?` <span class="small">${esc(j.error.fix)}</span>`:''}`;return}
+    idle('Stream open since '+new Date().toLocaleTimeString()+'.');
+    const rd=r.body.getReader(),dec=new TextDecoder();let buf='';
+    for(;;){const{value,done}=await rd.read();if(done)break;buf+=dec.decode(value,{stream:true});let i;while((i=buf.indexOf('\n\n'))>=0){const msg=buf.slice(0,i);buf=buf.slice(i+2);
+      if(msg.startsWith(': hb')){idle('Last heartbeat '+new Date().toLocaleTimeString()+' (every 15 s).');continue}
+      const d=msg.split('\n').find(l=>l.startsWith('data: '));if(!d)continue;
+      try{const e=JSON.parse(d.slice(6));const line=document.createElement('div');line.dataset.ev='1';line.textContent=`${new Date().toLocaleTimeString()}  ${e.type}  ${e.id||e.key||''}  ${e.status||e.state||''}${e.filled!=null?` filled ${e.filled}`:''}`;if(!box.querySelector('div[data-ev]'))box.textContent='';box.prepend(line);if(e.type==='order'||e.type==='trade')clearTimeout(window.__rt),window.__rt=setTimeout(refresh,400)}catch{}}}
+    box.insertAdjacentHTML('afterbegin','<div class="small"><span class="pill warn">closed</span> The event stream ended (the server restarted or your account moved to another node). Press Connect to resume.</div>')}
+  catch(e){if(e.name!=='AbortError')box.innerHTML='<span class="pill warn">closed</span> Event stream closed. Press Connect to resume.'}}
 orderForm();
 </script>
 </body>

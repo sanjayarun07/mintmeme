@@ -85,6 +85,9 @@ export function checkSpecs(specs: Record<string, ChainSpec>) {
   }
 }
 
+/** Whether users may BUY tokenized stocks on `chain`: <CHAIN>_STOCKS_ENABLED (SOLANA_STOCKS_ENABLED, BASE_STOCKS_ENABLED, ...) when set, else STOCKS_ENABLED, for all chains.
+ *  1 is on, anything else off. Sells always work. */
+export const stocksEnabled = (chain: string, e: NodeJS.ProcessEnv = process.env) => (e[`${chain.toUpperCase()}_STOCKS_ENABLED`] ?? e.STOCKS_ENABLED)?.trim() === '1';
 /** Redis key of the namespace's default chain (see the header). */
 export const defaultChainKey = (ns: string) => `${ns}:chains:default`;
 /** The state name a chain's account uses for `name`: the default chain keeps the old names, every other chain is prefixed. */

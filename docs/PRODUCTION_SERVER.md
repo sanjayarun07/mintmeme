@@ -69,10 +69,25 @@ One node group can serve every chain at once, so a user trades Solana, Base, BNB
 - **State stays separate and old data still loads.** The default chain keeps the unprefixed Redis names it always had (`<ns>:u:<user>:engine`, `...:solwallet`); every
   other chain is under `<ns>:u:<user>:@<chain>:<name>` (`@` cannot occur in an app end user's id, so the two never collide). The first start with `CHAINS` writes the default chain to `<ns>:chains:default`; a node whose first chain differs
   refuses to start, because its unprefixed state belongs to the other chain. That first start also refuses a default chain when the namespace already holds another
-  chain's single-chain accounts (a `basewallet` written by a `MODE=base-mainnet` server), whether or not that chain is listed: list it first, or use another namespace. Two existing single-chain namespaces (for example
-  Solana on 3501 and Base on 3500) cannot be merged without copying the second one's keys under its chain prefix; keep the larger as the default and move the other.
-- **Every node of a group must run the same `CHAINS`.** A node that lacks a chain answers `404 chain_not_enabled` instead of forwarding, and a user owned by such a
-  node has that chain's orders unwatched. Roll a `CHAINS` change out to all nodes together (drain, restart).
+  chain's single-chain accounts (a `basewallet` written by a `MODE=base-mainnet` server), whether or not that chain is listed: list it first, or use another namespace. Single-chain
+  namespaces are merged into one with `npm run server:merge` (below).
+- **Every node of a namespace serves the same chains.** A user's requests go to the node that holds their lease, so a node without a chain would answer
+  `404 chain_not_enabled` for that chain's users it owns. Each node's heartbeat records its chains, and a node **refuses to start** while another live node of the
+  namespace serves a different list. A mismatch that still happens (two nodes started at the same moment) is logged as `CHAINS MISMATCH` and shows as
+  `memedesk_chain_set_mismatch 1` in `/metrics`. To change `CHAINS`: stop every node, wait 15 s for the heartbeats to expire, start them all with the new list.
+- **Merging single-chain servers into one** (`npm run server:merge`, `apps/server/merge.ts`). Before `CHAINS`, each chain ran its own server on its own `NAMESPACE`.
+  The merge copies each source's per-user state into the target under its chain's prefix (`<from>:u:<user>:<name>` to `<into>:u:<user>:@<chain>:<name>`), adds its users
+  and app end users, and copies app webhooks and fee settings the target lacks. It is a dry run unless `--apply`, prints key names only (never values), and writes
+  nothing unless every check passes: it refuses while any node or user lease of these namespaces is alive, when a target key already exists, when two namespaces are the
+  same chain, and when an app's webhook or fees differ between them. Sources are kept but marked merged, so a server started on one refuses instead of trading from a
+  stale copy. The target's chain stays the default.
+  ```
+  npm run server:merge -- --into memedesk-real-test memedesk-base-real memedesk-robinhood-real            # the plan
+  # stop every server on these namespaces, wait 15 s, then:
+  npm run server:merge -- --into memedesk-real-test memedesk-base-real memedesk-robinhood-real --apply
+  NAMESPACE=memedesk-real-test CHAINS=solana,base,robinhood npm run server                                # every node
+  ```
+  A namespace with no pinned chain and no wallet link is named explicitly: `<ns>=<chain>`, and `--into-chain <chain>` for the target.
 - **Postgres and webhooks** say the chain: trades have the `chain` column set, trade keys of non-default chains are stored as `<chain>/<key>`, and webhook events carry
   `chain` when a server runs more than one. `GET /v1/records/trades` lists the user's trades on every chain (each row has `chain`), whichever prefix it is called with.
 - **The next EVM chain is configuration:** an entry in `CHAIN_SPECS` (`apps/server/chains.ts`: chain id, the env names of its RPC, Privy policy and caps, aggregator) and its
@@ -80,9 +95,15 @@ One node group can serve every chain at once, so a user trades Solana, Base, BNB
   code changes.
 
 Verified: `apps/server/chains.test.ts` (routing, per-chain linking and state, forwarding and failover with two chains, the pinned default chain, the legacy-namespace refusal,
-a chain failing alone, one rate budget across chains); `npm run verify:server-multi`: two nodes serving Solana, Base, BNB and Robinhood forks for one key (below).
+a chain failing alone, one rate budget across chains); `apps/server/merge.test.ts` (merging three single-chain namespaces and reading each chain's old state
+from a multi-chain node, every refusal, the same-chains rule); `npm run verify:server-multi`: two nodes serving Solana, Base, BNB and Robinhood forks for one key (below).
 
 ## BNB Chain and Robinhood Chain (`CHAINS=...,bnb,robinhood`)
+
+**Each chain's Privy policy:** `npm run privy:evm-policy -- bnb` prints the rules (that chain's V2 router and chain id, `value` capped at the chain's per-trade cap,
+KyberSwap rules when the chain routes through KyberSwap); `--create` creates the policy in Privy and prints the id for `PRIVY_BNB_POLICY_ID`. Then add that id to the
+server signer on the user's Privy Ethereum wallet, next to the Base and Robinhood ids. `memedesk-bnb` was created this way on 2026-11-19: `pancakeswap-v2-swaps`
+(router `0x10ed43c7…024e`, value at most 0.02 BNB) and `approve-router`.
 
 The Base account code with another network's contracts (`EVM_NETWORKS` in packages/sdk/src/base.ts, every address read back from the chain on 2026-11-18):
 
@@ -193,6 +214,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `JUPITERZ_MIN_SOL` | `100` | With `JUPITERZ=on`: the smallest SOL side (SOL spent on a buy, the minimum SOL received on a sell) that asks market makers. |
 | `JUPITERZ_MARGIN_BPS` | `20` | With `JUPITERZ=on`: how much more the firm quote must pay than the normal `/build` route, in basis points (0 to 1000). |
 | `STOCKS_ENABLED` | off | `1` lets users of a `solana-mainnet` server **buy** tokenized stocks (SDK_AND_API.md 4.9). Off: stock buys fail with `stocks_disabled` 403; sells always work. No issuer offers these tokens to US persons: enable only behind your own eligibility checks. |
+| `SOLANA_STOCKS_ENABLED`, `BASE_STOCKS_ENABLED`, `ROBINHOOD_STOCKS_ENABLED`, `BNB_STOCKS_ENABLED` | `STOCKS_ENABLED` | One chain's stock-buy switch on a multi-chain server; when set it wins over `STOCKS_ENABLED` for that chain (`1` on, anything else off). A merged server keeps each chain's old setting this way. |
 | `BASE_RPC_URL`, `PRIVY_BASE_POLICY_ID`, `BASE_MAX_TRADE_ETH`, `BASE_DAILY_CAP_ETH` | Alchemy, none, 0.01, 0.05 | `MODE=base-mainnet` (section above). |
 | `RELAY_API_KEY`, `BASE_RELAY` | none, on | `MODE=base-mainnet`: Relay's API key (needed for production; Relay's docs say from 2 Oct 2026), and `BASE_RELAY=off` to trade only Uniswap V2 pools. |
 | `BASE_AGGREGATOR`, `KYBER_CLIENT_ID` | relay, memedesk | `MODE=base-mainnet`: `kyberswap` routes tokens with no usable V2 pool through KyberSwap's router instead of Relay (gated and simulated the same way; the Privy Base policy needs `kyberswap-swaps` and `approve-kyberswap`, README → Base policy rules). `KYBER_CLIENT_ID` is sent as KyberSwap's `x-client-id`. |
@@ -203,7 +225,10 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `MODE` | practice | `practice` (fake funds), `solana-mainnet` (real funds, Privy; needs the PRIVY_* settings and `SOLANA_RPC_URL` or `ALCHEMY_API_KEY`) or `base-mainnet` (real funds on Base, Privy Ethereum wallets; needs `PRIVY_BASE_POLICY_ID`). |
 
 **API console:** every node serves `/console` (and `/`): paste an API key and use every API action from a page. Each response names the node that ran it
-(`x-memedesk-node`), so forwarding is visible. The page holds no secrets; the key stays in the browser tab.
+(`x-memedesk-node`), so forwarding is visible. The page holds no secrets; the key stays in the browser tab. On a server with several chains it shows a tab per
+chain (from `GET /v1/chains`) and sends every call to `/v1/<chain>/...`. A practice chain gets the full practice page; a real chain shows a **real funds** banner,
+the linked wallet and whether it is active, a market buy (spend in the chain's coin: SOL, ETH, BNB) or sell (percentage of the balance) by token address, mint or stock
+ticker, with Quote and a confirmation before each trade, plus that chain's orders (cancel), positions, trades and live events.
 
 **Hardening from the 2026-11-17 review:** request targets must be paths (no `//host/...`, so forwarding can never be pointed at another host); the `/solana` link
 needs a loopback peer AND a loopback `Host` (DNS rebinding) and nginx returns 404 for it and strips `x-memedesk-hop`; claims re-check their lease after starting and

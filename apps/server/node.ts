@@ -93,6 +93,7 @@ export async function createNode(o: NodeOptions) {
   for (const u of new Set(o.keys.map(k => k.userId))) r.cmd('SADD', usersKey(o.namespace), u);
 
   const chains = chainsOf(o, r), multi = chains.length > 1, defaultChain = chains[0].id, chainIds = new Set(chains.map(c => c.id));
+  sameChainsAsPeers(r, o.namespace, o.publicUrl, chains.map(c => c.id));
   /** Per user: the lease, and one slot per chain (an account, or why it could not be built and when to try again). */
   type Slot = { acct?: Account; error?: string; retryAt?: number };
   const owned = new Map<string, { lease: UserLease; slots: Map<string, Slot> }>(); const claiming = new Map<string, Promise<boolean>>(), reviving = new Map<string, Promise<void>>();
@@ -188,8 +189,11 @@ export async function createNode(o: NodeOptions) {
   const startedAt = Date.now();
   const activeOrders = () => { let n = 0; for (const x of owned.values()) for (const a of accountsOf(x)) n += a.trader.listOrders({ status: 'active' }).length; return n; };
   const heartbeat = () => { const orders = activeOrders();
-    r.cmd('SET', nodeKey(o.namespace, o.publicUrl), JSON.stringify({ id: nodeId(o.publicUrl), startedAt, users: owned.size, orders, draining, webhooks: hooks.stats, history: history?.stats ?? null, at: Date.now() }), 'PX', '15000'); r.cmd('SADD', nodesKey(o.namespace), o.publicUrl); };
-  heartbeat(); const beat = setInterval(() => { try { heartbeat(); } catch { /* the next beat retries */ } }, 5_000); beat.unref?.();
+    r.cmd('SET', nodeKey(o.namespace, o.publicUrl), JSON.stringify({ id: nodeId(o.publicUrl), startedAt, chains: [...chainIds], users: owned.size, orders, draining, webhooks: hooks.stats, history: history?.stats ?? null, at: Date.now() }), 'PX', '15000'); r.cmd('SADD', nodesKey(o.namespace), o.publicUrl); };
+  // two nodes started at the same moment both see no peer at startup: every beat checks again, and a mismatch is logged (and counted in /metrics) until it is fixed
+  let mismatch = '';
+  const checkPeers = () => { try { sameChainsAsPeers(r, o.namespace, o.publicUrl, [...chainIds]); mismatch = ''; } catch (e) { const msg = (e as Error).message; if (msg !== mismatch) log(`CHAINS MISMATCH: ${msg}`); mismatch = msg; } };
+  heartbeat(); const beat = setInterval(() => { try { heartbeat(); checkPeers(); } catch { /* the next beat retries */ } }, 5_000); beat.unref?.();
   let statusCache: { at: number; v: Awaited<ReturnType<typeof clusterStatus>> } | undefined;
   const status = async () => { if (statusCache && Date.now() - statusCache.at < 10_000) return statusCache.v; const v = await clusterStatus({ r, ns: o.namespace, history, checks: o.statusChecks ?? [] }); statusCache = { at: Date.now(), v }; return v; };
   const renewTimer = setInterval(() => {
@@ -245,6 +249,7 @@ export async function createNode(o: NodeOptions) {
     '# TYPE memedesk_capacity_refusals_total counter', `memedesk_capacity_refusals_total ${m.refusedNoCapacity}`,
     '# TYPE memedesk_webhooks_total counter', `memedesk_webhooks_total{result="delivered"} ${hooks.stats.delivered}`, `memedesk_webhooks_total{result="retried"} ${hooks.stats.retried}`, `memedesk_webhooks_total{result="failed"} ${hooks.stats.failed}`,
     '# TYPE memedesk_chain_accounts_unavailable gauge', `memedesk_chain_accounts_unavailable ${down}`,
+    '# TYPE memedesk_chain_set_mismatch gauge', `memedesk_chain_set_mismatch ${mismatch ? 1 : 0}`,
     '# TYPE memedesk_draining gauge', `memedesk_draining ${draining ? 1 : 0}`, ''].join('\n');
     eld.reset(); return out;
   };
@@ -260,7 +265,9 @@ export async function createNode(o: NodeOptions) {
     if (now?.error) return json(res, 503, { error: { code: 'chain_unavailable', message: `Your ${at.chain} account could not be started on this node: ${now.error}`, fix: `Retry in ${Math.ceil(RETRY_MS / 1000)} s; your other chains are not affected.` } }, { 'retry-after': String(Math.ceil(RETRY_MS / 1000)) });
     serveLocal(req, res, at);
   };
-  const chainList = () => ({ default: defaultChain, chains: chains.map(c => ({ id: c.id, label: c.label ?? CHAIN_SPECS[c.id]?.label ?? c.id, prefix: `/v1/${c.id}/`, default: c.id === defaultChain })) });
+  /** GET /v1/chains: each chain's kind and native coin, and the plain-units field its trades take for that coin (sol, eth, bnb), so a client can build its forms. */
+  const chainList = () => ({ default: defaultChain, chains: chains.map(c => { const sp = CHAIN_SPECS[c.id], native = sp?.evm?.nativeSymbol ?? (sp?.kind === 'solana' ? 'SOL' : null);
+    return { id: c.id, label: c.label ?? sp?.label ?? c.id, kind: sp?.kind ?? 'practice', native, amountKey: native ? native.toLowerCase() : null, chainId: sp?.evm?.chainId ?? null, prefix: `/v1/${c.id}/`, default: c.id === defaultChain }; }) });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -314,6 +321,21 @@ export function splitChain(path: string, served: Set<string>, defaultChain: stri
   return { chain: defaultChain };
 }
 
+/** Every node of a namespace must serve the same chains: a user's requests go to whichever node holds their lease, so a node without a chain would answer
+ *  chain_not_enabled for that chain's users it happens to own. A node refuses to start while another live node (its heartbeat is under 15 s old) serves a different
+ *  set; changing CHAINS means stopping every node and starting them all with the new list. A heartbeat from before chain lists were recorded counts as the
+ *  namespace's default chain alone (that node was single-chain). */
+export function sameChainsAsPeers(r: SyncRedis, ns: string, self: string, mine: string[]) {
+  const want = [...mine].sort().join(','), urls = ((r.cmd('SMEMBERS', nodesKey(ns)) as string[] | null) ?? []).filter(u => u !== self);
+  if (!urls.length) return;
+  const vals = r.cmd('MGET', ...urls.map(u => nodeKey(ns, u))) as (string | null)[], def = r.cmd('GET', defaultChainKey(ns)) as string | null;
+  urls.forEach((u, i) => {
+    const v = vals[i]; if (!v) return;
+    let theirs: string[]; try { const j = JSON.parse(v); theirs = Array.isArray(j.chains) ? j.chains : [def ?? 'default']; } catch { return; }
+    if ([...theirs].sort().join(',') !== want) throw new Error(`NAMESPACE ${ns}: node ${u} is running with chains ${theirs.join(',')} and this node has ${mine.join(',')}. Every node in a namespace must serve the same chains (a user's requests go to the node that owns them): stop all nodes, then start every one with the same CHAINS.`);
+  });
+}
+
 /** The node's chains: `o.chains`, or the one chain of `o.makeAccount`. Named chains are checked, and the namespace's default chain is pinned in Redis (chains.ts). */
 function chainsOf(o: NodeOptions, r: SyncRedis): ChainAccounts[] {
   if (!o.chains?.length) { if (!o.makeAccount) throw new Error('createNode needs makeAccount or chains'); return [{ id: 'default', makeAccount: o.makeAccount, extraRoutes: o.extraRoutes }]; }
@@ -330,6 +352,7 @@ function chainsOf(o: NodeOptions, r: SyncRedis): ChainAccounts[] {
     r.cmd('SET', key, def, 'NX');
   }
   const was = r.cmd('GET', key);
+  if (typeof was === 'string' && was.startsWith('merged-into:')) throw new Error(`NAMESPACE ${o.namespace} was merged into ${was.slice('merged-into:'.length)} (npm run server:merge): start the server on that namespace with CHAINS listing every chain`);
   if (was !== def) throw new Error(`NAMESPACE ${o.namespace} was started with ${was} as its default (first) chain, and its unprefixed state is ${was}'s: list ${was} first in CHAINS (now ${def}). Changing it needs a state migration.`);
   return o.chains;
 }
