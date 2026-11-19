@@ -100,3 +100,17 @@ test('open sign-up: an unmapped Privy user gets their own p- account, up to the 
     const full = await signIn(THIRD); assert.equal(full.status, 403); assert.equal(full.j.error.code, 'signup_full');
   } finally { await nd.drain?.(); const c = new SyncRedis(); try { for (const k of (c.cmd('KEYS', `${n}:*`) as string[] ?? [])) c.cmd('DEL', k); } finally { c.close(); } }
 });
+
+test('sign-in limit is per client: behind a proxy each visitor has their own budget; one client over 30 a minute is refused', { skip: up ? false : 'no local Redis' }, async () => {
+  const n = `memedesk-authlimit-test:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+  const port = await new Promise<number>(ok => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); }), url = `http://127.0.0.1:${port}`;
+  const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: n, publicUrl: url, keys: [], makeAccount: practiceAccount, leaseTtlMs: 3000, sweepMs: 60_000, requireAof: false, log: () => {},
+    privyAuth: { users: parsePrivyUsers(`${DID}=alice`), ttlS: 600, verify: t => verifyPrivyToken(t, { appId: APP, keys }) } });
+  await nd.listen(port);
+  const tryAs = (client: string, token = 'x.y.z') => fetch(url + '/v1/auth/privy', { method: 'POST', headers: { 'content-type': 'application/json', 'cf-connecting-ip': client }, body: JSON.stringify({ token }) }).then(r => r.status);
+  try {
+    for (let i = 0; i < 30; i++) assert.equal(await tryAs('198.51.100.1'), 401, 'bad tokens are refused, but within the budget');
+    assert.equal(await tryAs('198.51.100.1'), 429, 'the 31st try in a minute from one client is refused');
+    assert.equal(await tryAs('198.51.100.2', jwt(good)), 200, 'another visitor behind the same proxy is not affected');
+  } finally { await nd.drain?.(); const c = new SyncRedis(); try { for (const k of (c.cmd('KEYS', `${n}:*`) as string[] ?? [])) c.cmd('DEL', k); } finally { c.close(); } }
+});

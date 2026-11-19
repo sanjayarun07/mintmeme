@@ -73,7 +73,8 @@ async function v1(chain, method, path, body, headers = {}, retried = false) {
   const r = await fetch(`/v1/${chain}${path.replace(/^\/v1\//, '/')}`, { method, headers: { authorization: 'Bearer ' + S.key, ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
   // a Privy session expired: sign in again quietly with the Privy login this tab still has, then retry once (an idempotency key makes a retried trade safe)
-  if (r.status === 401 && S.via === 'privy' && !retried && await privySignIn(true)) return v1(chain, method, path, body, headers, true);
+  // at most once every 30 s: a refused call must never turn into a sign-in loop (seen live: many calls at once burned the sign-in limit and kept it burned)
+  if (r.status === 401 && S.via === 'privy' && !retried && Date.now() - (S.lastSignIn || 0) > 30_000 && await privySignIn(true)) return v1(chain, method, path, body, headers, true);
   if (!r.ok) { const e = j.error || {}; throw new ApiError([e.message, e.fix].filter(Boolean).join(' ') || 'The server answered HTTP ' + r.status + '.', e.code, r.status); }
   return j;
 }
@@ -83,6 +84,7 @@ let signing = null;
 function privySignIn(quiet) {
   const ss = window.MintPrivy?.session; if (!ss?.authenticated) return Promise.resolve(false);
   return signing ??= (async () => {
+    S.lastSignIn = Date.now();
     try {
       const token = await ss.accessToken(); if (!token) throw new Error('Privy is still finishing your login. Press Try again in a moment, or reload the page.');
       const r = await fetch('/v1/auth/privy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }), j = await r.json().catch(() => ({}));

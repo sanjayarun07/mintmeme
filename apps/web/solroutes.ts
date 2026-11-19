@@ -4,10 +4,10 @@
 import { NATIVE } from '../../packages/core/src/index.ts';
 import { SolanaChain, DevSolSigner, searchSolTokens, mintFacts, looksLikeMint } from '../../packages/sol/src/index.ts';
 import { GuardedRpc } from '../../packages/live/src/solreadonly.ts';
-import { urls } from '../../packages/live/src/config.ts';
+import { solanaRpc } from '../../packages/live/src/config.ts';
 
 const WSOL = 'So11111111111111111111111111111111111111112', LAMPORTS = 10_000_000n;
-const rpcFor = () => { const key = process.env.ALCHEMY_API_KEY; if (!key) throw Object.assign(new Error('ALCHEMY_API_KEY is not set (see .env.example)'), { status: 503 }); return { rpc: new GuardedRpc(urls(key).sol), redact: (s: string) => s.split(key).join('***') }; };
+const rpcFor = () => { const s = solanaRpc(); if (!s) throw Object.assign(new Error('No Solana RPC: set SOLANA_RPC_URL, HELIUS_API_KEY or ALCHEMY_API_KEY (see .env.example)'), { status: 503 }); return { rpc: new GuardedRpc(s.url), redact: (x: string) => x.split(s.secret).join('***') }; };
 const bad = (m: string) => Object.assign(new Error(m), { status: 400 });
 const safe = async <T>(f: () => Promise<T>) => { const { redact } = rpcFor(); try { return await f(); } catch (e) { throw Object.assign(new Error(redact((e as Error).message)), { status: (e as any).status ?? 502 }); } };
 

@@ -88,10 +88,13 @@ export function createSolServer(o: { stateDir?: string } = {}) {
     if ((origin !== undefined && origin !== `http://${host}`) || !String(req.headers['content-type'] ?? '').startsWith('application/json')) return refuse();
     let body: any = {}; { const chunks: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 256 * 1024) return send(413, '{}'); chunks.push(c as Buffer); } try { body = JSON.parse(Buffer.concat(chunks).toString() || '{}'); } catch { return send(400, '{}'); } }
     if (u.pathname === '/api/sol/rpc') {
-      const key = process.env.ALCHEMY_API_KEY; if (!key) return send(503, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'no RPC configured' } }));
+      // the repo's Solana RPC (config.ts solanaRpc: SOLANA_RPC_URL, else Helius, else Alchemy). Seen live: Alchemy's Solana limit answered 429 to getSlot while users
+      // linked wallets on the public site.
+      const sol = (await import('../../packages/live/src/config.ts')).solanaRpc();
+      if (!sol) return send(503, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'no RPC configured' } }));
       const one = (b: any) => b && typeof b.method === 'string' && RPC_OK.has(b.method);
       if (Array.isArray(body) ? !body.every(one) : !one(body)) return send(403, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32601, message: 'method not allowed by this relay' } }));
-      try { const r = await fetch((await import('../../packages/live/src/config.ts')).urls(key).sol, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }); return send(r.status, await r.text()); }
+      try { const r = await fetch(sol.url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15_000) }); return send(r.status, await r.text()); }
       catch { return send(502, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } })); }
     }
     body = { ...body, __session: session };

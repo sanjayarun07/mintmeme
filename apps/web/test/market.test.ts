@@ -92,3 +92,10 @@ test('meta reads decimals from the chain and price from the market, per token', 
   assert.deepEqual(r.tokens[A], { symbol: 'TSLA', name: 'Tesla', decimals: 18, price: 390.5, icon: null });
   assert.equal(r.tokens[B].decimals, null, 'no decimals() answer stays unknown'); assert.equal(Object.keys(r.tokens).length, 2, 'junk is dropped');
 });
+
+test('Solana RPC everywhere: SOLANA_RPC_URL, else Helius, else Alchemy; the key part is known so errors can hide it', async () => {
+  const { solanaRpc } = await import('../../../packages/live/src/config.ts');
+  assert.equal(solanaRpc({ SOLANA_RPC_URL: 'https://mainnet.helius-rpc.com/?api-key=h1', HELIUS_API_KEY: 'h2', ALCHEMY_API_KEY: 'a' } as any)!.secret, 'h1');
+  const h = solanaRpc({ HELIUS_API_KEY: 'h2', ALCHEMY_API_KEY: 'a' } as any)!; assert.equal(h.url, 'https://mainnet.helius-rpc.com/?api-key=h2'); assert.equal(h.name, 'Helius');
+  assert.equal(solanaRpc({ ALCHEMY_API_KEY: 'a' } as any)!.name, 'Alchemy'); assert.equal(solanaRpc({} as any), undefined);
+});

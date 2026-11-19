@@ -5,6 +5,7 @@
  *    - DexScreener (every chain): one token's pairs (price, liquidity, volume, buys and sells), and search.
  *  Every row is normalized to one shape (MarketRow) so the app never cares where it came from. Nothing here signs, trades or needs a key. */
 
+import { solanaRpc } from '../../packages/live/src/config.ts';
 export type Chain = 'solana' | 'base' | 'robinhood' | 'bnb';
 export const CHAINS: Chain[] = ['solana', 'base', 'robinhood', 'bnb'];
 const GECKO: Record<Chain, string> = { solana: 'solana', base: 'base', robinhood: 'robinhood', bnb: 'bsc' };
@@ -209,7 +210,7 @@ export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } =
   const ok = (h: string) => chain === 'solana' ? /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(h) : /^0x[0-9a-fA-F]{64}$/.test(h);
   const hashes = [...new Set((Array.isArray(body?.hashes) ? body.hashes : []).map((x: unknown) => String(x).trim()).filter(ok))].slice(0, 40) as string[];
   const net = { solana: 'solana-mainnet', base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' }[chain], rpcEnv = { solana: 'SOLANA_RPC_URL', base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' }[chain];
-  const rpc = env[rpcEnv] || (env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : '');
+  const rpc = chain === 'solana' ? (solanaRpc(env)?.url ?? '') : env[rpcEnv] || (env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : '');   // Solana: Helius first
   const out: Record<string, number | null> = {};
   if (!rpc) { hashes.forEach(h => out[h] = null); return { chain, times: out }; }
   const call = async (method: string, params: unknown[]) => { const r = await f(rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(10_000) }); return (await r.json() as any)?.result; };

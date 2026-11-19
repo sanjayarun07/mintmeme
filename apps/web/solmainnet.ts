@@ -22,7 +22,7 @@ import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
 /** Jupiter API key from .env (optional): route building and quotes use the keyed host instead of the keyless rate limit. */
 const JUP_KEY = process.env.JUPITER_API_KEY?.trim() || undefined;
 import { Trader } from '../../packages/sdk/src/trader.ts';
-import { urls } from '../../packages/live/src/config.ts';
+import { solanaRpc } from '../../packages/live/src/config.ts';
 import { TradeGuard, GuardError, DEFAULT_LIMITS } from './solguard.ts';
 import type { Limits } from './solguard.ts';
 
@@ -60,8 +60,8 @@ export class SolMainnet {
     this.guard = new TradeGuard(limits, Date.now, () => this.persist(), { killed: init?.killed, spent: init?.spent });
   }
   private persist() { const l = this.guard.limits; writeFileSync(this.settingsFile, JSON.stringify({ limits: { maxTradeLamports: l.maxTradeLamports.toString(), dailyCapLamports: l.dailyCapLamports.toString(), maxSlippageBps: l.maxSlippageBps }, ...this.guard.snapshot()}, null, 2)); }
-  private rpcEndpoint() { if (this.rpcUrl) return this.rpcUrl; const key = process.env.ALCHEMY_API_KEY; if (!key) throw bad('ALCHEMY_API_KEY is not set (see .env.example)', 503); return urls(key).sol; }
-  private redact(s: string) { const k = process.env.ALCHEMY_API_KEY; return k ? s.split(k).join('***') : s; }
+  private rpcEndpoint() { if (this.rpcUrl) return this.rpcUrl; const s = solanaRpc(); if (!s) throw bad('No Solana RPC: set SOLANA_RPC_URL, HELIUS_API_KEY or ALCHEMY_API_KEY (see .env.example)', 503); return s.url; }
+  private redact(s: string) { for (const k of [solanaRpc()?.secret, process.env.ALCHEMY_API_KEY, process.env.HELIUS_API_KEY]) if (k) s = s.split(k).join('***'); return s; }
 
   /** `yours`: this browser holds the session of the current connection (so it can disconnect, resume trading, change limits). A browser without it can still sign in, which takes over. */
   async status(b?: any) {

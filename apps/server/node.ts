@@ -295,9 +295,13 @@ export async function createNode(o: NodeOptions) {
       return json(res, 200, { signedOut: true });
     }
     if (req.method !== 'POST') return err(405, 'method_not_allowed', 'Use POST with { token }.');
-    const ip = String(req.socket.remoteAddress ?? ''), t = authTries.get(ip) ?? { n: 0, at: Date.now() };
-    if (Date.now() - t.at > 60_000) { t.n = 0; t.at = Date.now(); } t.n++; authTries.set(ip, t);
-    if (t.n > 10) return err(429, 'rate_limited', 'Too many sign-in attempts.', 'Wait a minute and try again.');
+    // per CLIENT: behind a proxy or tunnel on this machine every request comes from 127.0.0.1, so the client is the address the proxy names (one shared budget for
+    // every visitor was the bug: seen live as constant 429s once a few people signed in). A forwarding header is trusted only from a loopback peer (our own proxy).
+    const peer = String(req.socket.remoteAddress ?? ''), fwd = isLoopback(peer) ? String(req.headers['cf-connecting-ip'] ?? req.headers['x-real-ip'] ?? String(req.headers['x-forwarded-for'] ?? '').split(',')[0]).trim() : '';
+    const ip = fwd || peer, now = Date.now(), t = authTries.get(ip) ?? { n: 0, at: now };
+    if (now - t.at > 60_000) { t.n = 0; t.at = now; } t.n++; authTries.set(ip, t);
+    if (authTries.size > 10_000) for (const [k, v] of authTries) if (now - v.at > 60_000) authTries.delete(k);
+    if (t.n > 30) return err(429, 'rate_limited', 'Too many sign-in attempts from your address.', 'Wait a minute and try again.');
     let body: any; try { const ch: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 16_384) return err(413, 'too_large', 'The request is too large.'); ch.push(c as Buffer); } body = JSON.parse(Buffer.concat(ch).toString() || '{}'); } catch { return err(400, 'bad_request', 'Send JSON: { "token": "<Privy access token>" }.'); }
     try {
       const { did } = await o.privyAuth.verify(body?.token);

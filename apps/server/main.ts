@@ -39,6 +39,7 @@ const need = (k: string) => env[k] || fail(`${k} is not set. See the header of a
 const int = (k: string, d: number, min: number, max: number) => { const v = env[k] === undefined ? d : Number(env[k]); if (!Number.isInteger(v) || v < min || v > max) fail(`${k} must be a whole number from ${min} to ${max}`); return v; };
 
 import { parseKeyFile, watchKeyFile } from './keyfile.ts';
+import { solanaRpc } from '../../packages/live/src/config.ts';
 export { parseKeyFile, watchKeyFile };
 
 /** JupiterZ RFQ fills (docs/JUPITERZ.md), off unless JUPITERZ=on. JUPITERZ_MIN_SOL (default 100): the smallest SOL side that asks market makers; JUPITERZ_MARGIN_BPS
@@ -67,8 +68,8 @@ export function solanaCaps(e: NodeJS.ProcessEnv, jupiterz?: { minLamports: bigin
 
 /** MODE=solana-mainnet: real accounts signed through each user's Privy wallet (solaccount.ts). Needs the Privy settings and a Solana RPC. */
 export function solanaMode(e: NodeJS.ProcessEnv) {
-  const rpcUrl = e.SOLANA_RPC_URL || (e.ALCHEMY_API_KEY ? `https://solana-mainnet.g.alchemy.com/v2/${e.ALCHEMY_API_KEY}` : '');
-  const privy = privyConfig(e), missing = [!rpcUrl && 'SOLANA_RPC_URL (or ALCHEMY_API_KEY)', !privy && 'PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID, PRIVY_AUTH_PRIVATE_KEY, PRIVY_SOLANA_POLICY_ID'].filter(Boolean);
+  const rpcUrl = solanaRpc(e)?.url ?? '';   // SOLANA_RPC_URL, else Helius (HELIUS_API_KEY), else Alchemy
+  const privy = privyConfig(e), missing = [!rpcUrl && 'SOLANA_RPC_URL (or HELIUS_API_KEY, or ALCHEMY_API_KEY)', !privy && 'PRIVY_APP_ID, PRIVY_APP_SECRET, PRIVY_AUTH_KEY_ID, PRIVY_AUTH_PRIVATE_KEY, PRIVY_SOLANA_POLICY_ID'].filter(Boolean);
   if (missing.length) throw new Error(`MODE=solana-mainnet needs ${missing.join(' and ')} (README → Custody plan).`);
   // fee sharing: the operator's fee (PLATFORM_FEE_WALLET, PLATFORM_FEE_BPS) on every trade, plus the app's own fee (PUT /v1/app/fees) on its users' trades
   const pw = e.PLATFORM_FEE_WALLET, pbps = Number(e.PLATFORM_FEE_BPS ?? 0);
