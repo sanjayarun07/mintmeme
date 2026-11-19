@@ -366,8 +366,8 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
       <button class="btn" id="base-go" type="submit">Compare</button>
     </form>
     <div class="tw"><table>
-      <thead><tr><th>Venue</th><th>Path</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
-      <tbody id="base-rows"><tr><td colspan="6" class="muted">Pick a chain, a stock and an amount, then Compare.</td></tr></tbody>
+      <thead><tr><th>Venue</th><th>Path</th><th class="num" title="The aggregator's own fee, and the network fee it estimates. The pools' trading fees are already inside each output.">Fee</th><th class="num" title="Price impact as the venue reports it (or the dollar value out against in, fee included), and the slippage tolerance its transaction would carry">Impact · slippage</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
+      <tbody id="base-rows"><tr><td colspan="8" class="muted">Pick a chain, a stock and an amount, then Compare.</td></tr></tbody>
     </table></div>
   </div>
   <div class="panel" id="liq-e" style="margin-top:16px"><div class="ph"><h2>Liquidity</h2><span class="muted">Public pools holding this stock</span></div><div class="empty">Compare to see where this stock's liquidity is.</div></div>
@@ -527,10 +527,19 @@ document.querySelectorAll('[data-eside]').forEach(b => b.onclick = () => {
   $('#base-eth').value = ESIDE === 'buy' ? '0.5' : '1'; evmLabels();
 });
 $('#base-sym').onchange = evmLabels;
+/** Fee and Impact · slippage for an EVM venue, from what it reports: its own fee in bps (and dollars), the network fee in dollars, the impact and its source, the slippage. */
+function evmCostCells(v) {
+  const fee = v.feeBps === undefined ? '–' : v.feeBps === 0 ? 'none' : `${n(v.feeBps, v.feeBps < 10 ? 1 : 0)} bps`;
+  const feeTip = [v.feeBps ? `${n(v.feeBps, 1)} bps${v.feeUsd !== undefined ? ` ($${n(v.feeUsd, 4)})` : ''} to the aggregator` : 'no aggregator fee', v.gasUsd !== undefined ? `network about $${n(v.gasUsd, 4)}` : 'network fee not reported'].join('; ');
+  const imp = v.impactPct === undefined ? '–' : `${n(Math.abs(v.impactPct), 2)}%`;
+  const slip = v.slippageBps !== undefined ? ` · ≤${n(v.slippageBps / 100, 2)}%` : v.slippageNote ? ' · at build' : '';
+  const impTip = `${v.impactPct === undefined ? 'No impact figure' : `Impact ${imp}${v.impactFrom ? ` (${v.impactFrom})` : ''}`}; ${v.slippageBps !== undefined ? `may fill up to ${n(v.slippageBps / 100, 2)}% below the quote` : `slippage ${v.slippageNote ?? 'not reported'}`}`;
+  return `<td class="num" title="${esc(feeTip)}">${esc(fee)}${v.gasUsd !== undefined ? `<span class="muted"> + $${n(v.gasUsd, v.gasUsd < 0.01 ? 4 : 2)} gas</span>` : ''}</td><td class="num" title="${esc(impTip)}">${esc(imp)}<span class="muted">${esc(slip)}</span></td>`;
+}
 $('#base-f').onsubmit = async e => {
   e.preventDefault(); const amount = Number($('#base-eth').value.replace(/,/g, '')), body = $('#base-rows');
-  if (!(amount > 0)) { body.innerHTML = '<tr><td colspan="6" class="err">Enter an amount above zero</td></tr>'; return; }
-  $('#base-go').disabled = true; $('#base-go').textContent = 'Asking…'; body.innerHTML = '<tr><td colspan="6"><span class="skel"></span></td></tr>';
+  if (!(amount > 0)) { body.innerHTML = '<tr><td colspan="8" class="err">Enter an amount above zero</td></tr>'; return; }
+  $('#base-go').disabled = true; $('#base-go').textContent = 'Asking…'; body.innerHTML = '<tr><td colspan="8"><span class="skel"></span></td></tr>';
   try {
     const r = await (await fetch('/api/evm/quote', { method: 'POST', body: JSON.stringify({ chain: $('#base-chain').value, symbol: $('#base-sym').value, side: ESIDE, amount }) })).json();
     if (r.error) throw new Error(r.error);
@@ -540,13 +549,13 @@ $('#base-f').onsubmit = async e => {
     const inUsd = buy && r.nativeUsd ? amount * r.nativeUsd : null;
     $('#base-meta').textContent = `${r.label}: ${buy ? `pay ${n(amount, 4)} ${r.native}${inUsd ? ` ≈ ${usd(inUsd)}` : ''}` : `sell ${n(amount, 4)} ${r.symbol}`} · share price ${r.refUsd ? usd(r.refUsd) : 'unknown'}${mult !== 1 ? ` · ${n(mult, 6)} shares per token` : ''} · server route: ${r.serverRoute}`;
     body.innerHTML = sorted.map(v => {
-      if (!v.out) return `<tr><td class="name">${esc(v.name)}</td><td class="sub" colspan="5">${esc(v.none ?? 'no quote')}</td></tr>`;
+      if (!v.out) return `<tr><td class="name">${esc(v.name)}</td><td class="sub" colspan="7">${esc(v.none ?? 'no quote')}</td></tr>`;
       const out = Number(v.out) / 10 ** outDec, shares = (buy ? out : amount) * mult, dollars = r.nativeUsd ? (buy ? amount : out) * r.nativeUsd : null;
       const per = dollars && shares ? dollars / shares : null, vsRef = per && r.refUsd ? (per / r.refUsd - 1) * 1e4 : null, worse = vsRef === null ? null : buy ? vsRef > 0 : vsRef < 0, vsBest = (Number(v.out) / Number(best) - 1) * 1e4;
-      return `<tr><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td><td class="num">${n(out, buy ? 4 : 6)}</td><td class="num">${per ? usd(per) : '–'}</td>
+      return `<tr><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td>${evmCostCells(v)}<td class="num">${n(out, buy ? 4 : 6)}</td><td class="num">${per ? usd(per) : '–'}</td>
         <td class="num">${vsRef === null ? '–' : `<span class="${worse ? 'neg' : 'pos'}">${bpsTxt(vsRef)}</span>`}</td><td class="num">${vsBest === 0 ? '<span class="muted">Best</span>' : `<span class="neg">${bpsTxt(vsBest)}</span>`}</td></tr>`;
     }).join('');
-  } catch (err) { body.innerHTML = `<tr><td colspan="6" class="err">${esc(err.message)}</td></tr>`; }
+  } catch (err) { body.innerHTML = `<tr><td colspan="8" class="err">${esc(err.message)}</td></tr>`; }
   $('#base-go').disabled = false; $('#base-go').textContent = 'Compare';
 };
 /** Where a token's liquidity is: every public pool DexScreener lists for it, grouped by DEX, and the largest pools. */
