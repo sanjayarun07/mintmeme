@@ -1,0 +1,9 @@
+{
+  "name": "memedesk-mcp",
+  "private": true,
+  "type": "module",
+  "description": "MCP server (stdio) for the Meme execution server and the RFQ desk. Isolated from the dependency-free core: only apps/mcp/main.ts imports the MCP SDK.",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2"
+  }
+}

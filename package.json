@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Trading SDK (engine, Solana and EVM adapters, HTTP API), a horizontally scalable execution server, and a Solana test UI",
   "scripts": {
-    "test": "node --experimental-transform-types --no-warnings --test \"packages/core/test/*.test.ts\" \"packages/evm/test/*.test.ts\" \"packages/sol/test/*.test.ts\" \"packages/sdk/test/*.test.ts\" \"apps/web/test/*.test.ts\" \"apps/server/*.test.ts\"",
+    "test": "node --experimental-transform-types --no-warnings --test \"packages/core/test/*.test.ts\" \"packages/evm/test/*.test.ts\" \"packages/sol/test/*.test.ts\" \"packages/sdk/test/*.test.ts\" \"apps/web/test/*.test.ts\" \"apps/server/*.test.ts\" \"apps/mcp/*.test.ts\"",
     "bench": "node --experimental-transform-types --no-warnings bench/bench.ts",
     "build:sdk": "cd packages/sdk && node scripts/build.mjs",
     "pack:sdk": "npm run build:sdk && cd packages/sdk && npm pack",
@@ -12,6 +12,8 @@
     "server": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/server/main.ts",
     "server:key": "node --experimental-transform-types --no-warnings apps/server/keys.ts",
     "web": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/web/server.ts",
+    "mcp": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/mcp/main.ts",
+    "mcp:install": "cd apps/mcp && npm install --no-audit --no-fund",
     "rfq": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings apps/rfq/server.ts",
     "build:privy": "cd apps/privy && npm install && npm run build",
     "verify:sol-guard": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/solguardfork.ts",
