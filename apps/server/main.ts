@@ -93,8 +93,8 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
 export function evmMode(spec: ChainSpec, e: NodeJS.ProcessEnv) {
   const v = spec.evm; if (!v) throw new Error(`chain ${spec.id} is not an EVM chain`);
   const rpcUrl = e[v.rpcEnv] || (e.ALCHEMY_API_KEY && v.alchemyNet ? `https://${v.alchemyNet}.g.alchemy.com/v2/${e.ALCHEMY_API_KEY}` : '');
-  const c = { appId: e.PRIVY_APP_ID, appSecret: e.PRIVY_APP_SECRET, authKey: e.PRIVY_AUTH_PRIVATE_KEY, signerId: e.PRIVY_AUTH_KEY_ID, policyId: e[v.policyEnv] };
-  const missing = [!rpcUrl && `${v.rpcEnv}${v.alchemyNet ? ' (or ALCHEMY_API_KEY)' : ''}`, ...Object.entries({ PRIVY_APP_ID: c.appId, PRIVY_APP_SECRET: c.appSecret, PRIVY_AUTH_PRIVATE_KEY: c.authKey, PRIVY_AUTH_KEY_ID: c.signerId, [v.policyEnv]: c.policyId }).filter(([, x]) => !x?.trim()).map(([k]) => k)].filter(Boolean);
+  const c = { appId: e.PRIVY_APP_ID, appSecret: e.PRIVY_APP_SECRET, authKey: e.PRIVY_AUTH_PRIVATE_KEY, signerId: e.PRIVY_AUTH_KEY_ID, policyId: e.PRIVY_EVM_POLICY_ID?.trim() || e[v.policyEnv] }; // Privy lets a signer carry ONE policy, so one shared EVM policy (every rule pinned to its chain id) wins over the per-chain ids
+  const missing = [!rpcUrl && `${v.rpcEnv}${v.alchemyNet ? ' (or ALCHEMY_API_KEY)' : ''}`, ...Object.entries({ PRIVY_APP_ID: c.appId, PRIVY_APP_SECRET: c.appSecret, PRIVY_AUTH_PRIVATE_KEY: c.authKey, PRIVY_AUTH_KEY_ID: c.signerId, [`${v.policyEnv} (or PRIVY_EVM_POLICY_ID)`]: c.policyId }).filter(([, x]) => !x?.trim()).map(([k]) => k)].filter(Boolean);
   if (missing.length) throw new Error(`${spec.id} needs ${missing.join(', ')} (README → Base with Privy).`);
   // the platform fee is paid in SOL inside Solana trades; EVM chains have no fee router yet, so a fee set for a server with no Solana chain would never be charged
   if (e.PLATFORM_FEE_BPS && e.PLATFORM_FEE_BPS !== '0' && !parseChains(e).some(s => s.kind === 'solana')) throw new Error(`PLATFORM_FEE_BPS is set, but fees are not collected on ${spec.label} yet (no on-chain fee router): unset it, or add solana to CHAINS (the fee is charged on Solana trades only)`);

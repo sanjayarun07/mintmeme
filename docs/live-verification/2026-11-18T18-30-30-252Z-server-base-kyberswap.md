@@ -1,0 +1,27 @@
+# Execution server, MODE=base-mainnet, on a local Base fork
+
+Aggregator for tokens without a usable V2 pool: KyberSwap (BASE_AGGREGATOR=kyberswap)
+
+Run: 2026-11-18T18:30:30.251Z
+Node: loopback anvil forked from Base mainnet; NOT mainnet. Fake ETH, throwaway key, Privy stand-in (same request signing, README Base policy).
+Result: **PASS** (15/15 checks)
+
+- pass: B1 before linking: no wallet, the account explains how to link
+- pass: B2 a buy before linking is refused (wallet_not_active), nothing signed
+- pass: B3 linking with a signature from another key is refused
+- pass: B4 linking with the wallet's personal_sign activates the account
+- pass: B5 buy 0.002 ETH of KEYCAT: finalized, tokens arrived, about 0.002 ETH + gas left the wallet
+- pass: B6 the signed transaction Privy returned was checked and sent as is (hash on chain)
+- pass: B7 sell 100%: approval + swap both signed by Privy, tokens gone, ETH back
+- pass: B14 buy 0.002 ETH of ZORA (dust V2 pool): routed through KyberSwap's router, gated and simulated, finalized, tokens arrived
+- pass: B15 sell 100% of ZORA (best venue: KyberSwap, through its router): exact approval + swap signed by Privy, tokens gone, ETH back
+- pass: B8 a buy above the per-trade cap fails before signing: nothing sent
+- pass: B9 Privy returns a changed transaction: refused, nothing sent
+- pass: B10 Privy signs with another key: refused, nothing sent
+- pass: B11 signer removed in Privy: the next trade fails, nothing sent
+- pass: B12 relinking while the signer is removed is refused with the reason
+- pass: B13 a token with neither a Uniswap V2 WETH pool nor a KyberSwap route is refused with the reason
+
+## Not covered
+- Real Privy (its policy engine and TEE) and real Base: the one tiny mainnet trade the user approves covers them.
+- Uniswap V3/V4 and Aerodrome pools are not supported; only V2 WETH pools.
