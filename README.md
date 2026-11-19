@@ -46,6 +46,7 @@ npm test                    # unit, HTTP and cluster tests (cluster tests need a
 | `BASE_AGGREGATOR`, `KYBER_CLIENT_ID` | Base: which aggregator routes tokens with no usable Uniswap V2 pool | `relay` (default) or `kyberswap`. KyberSwap needs no key; `KYBER_CLIENT_ID` is sent as its `x-client-id` (default `memedesk`). The Privy Base policy must allow the chosen aggregator (custody section → Base policy rules). |
 | `JUPITER_API_KEY`, `RELAY_API_KEY` | Jupiter (Solana routes, quotes, prices, JupiterZ, the RFQ Desk) and Relay (Base) | Optional but recommended: without them each service holds you to its keyless rate limit. Get them from Jupiter's and Relay's developer portals. |
 | `PRIVY_USERS`, `PRIVY_SESSION_HOURS`, `PRIVY_VERIFICATION_KEY` | Sign in with Privy on `/app` (no API key in the page) | `did:privy:<id>=<account>,...`: which Privy users may open a session, and for which account. Unset: Privy sign-in is off and API keys still work. Sessions last 12 h by default. The verification key is optional (otherwise Privy's published keys are fetched). |
+| `PRIVY_SIGNUP`, `PRIVY_SIGNUP_MAX`, `SIGNUP_STOCKS_ENABLED` | Letting anyone with a Privy login sign up on `/app` | `PRIVY_SIGNUP=open`: a Privy user not in `PRIVY_USERS` gets their own account, `p-<privy id>`, on first sign-in (at most `PRIVY_SIGNUP_MAX`, default 1,000). Each trades only the Privy wallet they link and allow themselves, within the server's per-trade and daily caps. Their stock buys stay off unless `SIGNUP_STOCKS_ENABLED=1` (no issuer offers tokenized stocks to US persons). Before real users: Privy dashboard → **Upgrade to production**. |
 | `SOLANA_RPC_URL` | Solana RPC for the execution server | For example Helius (`https://mainnet.helius-rpc.com/?api-key=...`); without it the server uses Alchemy. |
 | `RFQ_DESK_URL`, `BRIDGE_MAX_ETH` | `/app`: the RFQ tab, and bridge-then-buy | The RFQ desk's address (default `http://127.0.0.1:3700`). The most a single bridge from Base may send (default `0.01`). |
 | `STOCKS_ENABLED` | buying tokenized stocks through `MODE=solana-mainnet` | Off by default. No issuer offers them to US persons: set `1` only behind your own eligibility checks. [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §4.9, [`docs/XSTOCKS.md`](docs/XSTOCKS.md). |
@@ -157,7 +158,8 @@ Step by step. More detail, every setting and the Docker stack: [`docs/PRODUCTION
    - `JUPITER_API_KEY` on a paid plan (the RFQ desk and JupiterZ make many calls), `RELAY_API_KEY`.
 3. **Who may trade:**
    - Bots and developers: `npm run server:key -- <account>`; the hash line it prints goes into `API_KEYS_FILE`.
-   - People using `/app`: map their Privy user to an account in `PRIVY_USERS` (`did:privy:<id>=<account>`). A first sign-in that is not mapped shows the `did:privy:…` to add.
+   - People using `/app`: map their Privy user to an account in `PRIVY_USERS` (`did:privy:<id>=<account>`), or let anyone sign up with `PRIVY_SIGNUP=open` (each gets their own
+     `p-<privy id>` account, capped by `PRIVY_SIGNUP_MAX`; stock buys off for them unless `SIGNUP_STOCKS_ENABLED=1`). Real users: Privy dashboard → Upgrade to production.
 4. **Redis** with AOF (`appendonly yes`) and a password, on a private network. Optional: Postgres (`PG_URL`) for trade history and the audit log.
 5. **Start** the three processes (one node per machine, each with its own `NODE_PUBLIC_URL`; or Docker: `deploy/server/docker-compose.yml`):
 

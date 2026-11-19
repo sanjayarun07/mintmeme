@@ -8,7 +8,7 @@
  *      carries this server's signer with the policy. Only then is {address, walletId} saved under the user in Redis (through the user's lease, fail-closed).
  *   GET /v1/wallet shows the link; DELETE /v1/wallet removes it. Removing the signer in Privy also stops signing at once (Privy refuses; nothing is sent).
  *  Every claim of the user by a node asks Privy again before anything is signed, so a revoked wallet is never traded after a failover or restart. */
-import { stocksEnabled } from './chains.ts';
+import { stocksEnabled, stocksForUser } from './chains.ts';
 import { randomBytes } from 'node:crypto';
 import type { Backend } from '../../packages/core/src/index.ts';
 import { PrivyApi, verifySignature, looksLikeMint, SolJsonRpc, STOCKS_SOLANA, STOCK_LIST_META, stockByMint, findStock, underlying, readStockStates, rawForShares, sharesForRaw, perTokenPrice, checkFillPrice, JupiterStockPrices, fetchRfqQuote } from '../../packages/sol/src/index.ts';
@@ -96,6 +96,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
   };
   const stocksOff = () => new SdkError('stocks_disabled', 'buying tokenized stocks is not enabled on this server', 'The operator enables it (STOCKS_ENABLED=1) after checking that its users may hold them: no issuer offers them to US persons.', 403);
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
+    const stocksOk = stocksOn && stocksForUser(userId);   // a sign-up account (p-...) buys stocks only with SIGNUP_STOCKS_ENABLED=1
     const link = readLink(state('solwallet'));
     const set = readSettings(state('settings')), mev = { enabled: set.mevProtection, maxTipLamports: toUnits(set.maxTipSol, 9, 'maxTipSol'), jito: c.jito };
     // JupiterZ: a stock sell is sized by the maker's output (thin pools give a far too low minOut); when RFQ is not used, a stock trade's normal route is checked on its
@@ -113,7 +114,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     // copy trading: a copied buy passes the same checks as a manual one (token safety, and for a stock the operator switch and the fill price), never with allowRiskyToken
     const copies = solCopies({ trader: s.trader, follower: link?.address, chainId: s.chain.id, rpc: leaderRpc, state, caps: c.caps ?? SOLANA_DEFAULT_CAPS, active: () => s.active, prepare: s.prepare, log: c.log,
-      gate: async (mint, lamports) => { const st = stockByMint(mint); if (st && !stocksOn) throw stocksOff(); await s.checkBuy(mint, false); if (st) { await s.sync(); await stockPriceCheck(s, st, 'buy', lamports); } } });
+      gate: async (mint, lamports) => { const st = stockByMint(mint); if (st && !stocksOk) throw stocksOff(); await s.checkBuy(mint, false); if (st) { await s.sync(); await stockPriceCheck(s, st, 'buy', lamports); } } });
     copies.restore();   // before the node calls trader.resume(): restored runners finish their in-flight copies
     return { trader: s.trader, copies, prepare: async (raw: any, path: string) => {
       if (path === '/v1/copies' || path.startsWith('/v1/copies/')) return raw;   // copy bodies are validated by solcopy.ts (plain units of their own)
@@ -126,7 +127,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
       if (stock && raw.perShare === true) raw = await perShareBody(raw, await stockState(stock.mint), isBuy(path, raw));
       const body = await s.simple(path, raw);
       if (trades || typeof tok === 'string') await s.sync();   // the chain's clock (deadlines) and pool state (quotes) as of now, not as of the last tick
-      if (stock && isBuy(path, body) && !stocksOn) throw stocksOff();
+      if (stock && isBuy(path, body) && !stocksOk) throw stocksOff();
       if (isBuy(path, body) && typeof body?.token === 'string') await s.checkBuy(body.token, raw?.allowRiskyToken === true);   // before anything is signed
       // a stock route must fill near the share price: refuses broken or thin routes (Ondo on Solana filled at about 3x the share price) that Jupiter's impact figure does not show
       const side = isBuy(path, body) ? 'buy' : path === '/v1/trades/sell' || path === '/v1/bulk/sell' ? 'sell' : undefined, amt = body?.amount ?? body?.total;

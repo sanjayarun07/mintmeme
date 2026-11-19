@@ -5,7 +5,7 @@
  *  Linking: POST /v1/wallet/link/start {address} -> a one-time message; the wallet signs it with personal_sign; POST /v1/wallet/link/finish {address, signature (0x, 65
  *  bytes)}: the signer is recovered from the signature (proves this API user controls the wallet), then Privy is asked whether the wallet carries this server's signer
  *  with the Base policy. Only then is {address, walletId} saved under the user. GET /v1/wallet shows the link; DELETE /v1/wallet removes it. */
-import { stocksEnabled } from './chains.ts';
+import { stocksEnabled, stocksForUser } from './chains.ts';
 import { randomBytes } from 'node:crypto';
 import type { Backend } from '../../packages/core/src/index.ts';
 import { PrivyApi } from '../../packages/sol/src/index.ts';
@@ -95,13 +95,14 @@ export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { m
     if (!check.ok) throw new SdkError('bad_price', check.why!, 'Try a smaller amount, or send allowRiskyToken: true to trade anyway.', 409);
   };
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
+    const stocksOk = stocksOn && stocksForUser(userId);   // a sign-up account (p-...) buys stocks only with SIGNUP_STOCKS_ENABLED=1
     const link = readBaseLink(state(walletState(net.id)));
     const s = await createBaseTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, rpc, privy, state, caps: c.caps, ethUsd, log: c.log, relay: c.relay, aggregator: c.aggregator, kyber: c.kyber, network: net });
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy Ethereum wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     // copy trading (evmcopy.ts): a copied buy passes the same checks as a manual one first: for a stock, the operator switch and the share-price check
     const copies = evmCopies({ trader: s.trader, follower: link?.address, chainId: s.chain.id, label: net.label, native: net.native, weth: net.weth, rpc, state, caps: c.caps ?? BASE_DEFAULT_CAPS,
       active: () => s.active, prepare: s.prepare, findStock: stocksHere ? findStock : undefined, log: c.log,
-      gate: async (token, wei) => { const st = stocksHere ? findStock(token) : undefined; if (st && !stocksOn) throw stocksOff(); if (st) { await s.sync(); await stockPriceCheck(s, st, 'buy', wei, await s.decimals(st.address)); } } });
+      gate: async (token, wei) => { const st = stocksHere ? findStock(token) : undefined; if (st && !stocksOk) throw stocksOff(); if (st) { await s.sync(); await stockPriceCheck(s, st, 'buy', wei, await s.decimals(st.address)); } } });
     copies.restore();   // before the node calls trader.resume(): restored runners finish their in-flight copies
     return { trader: s.trader, copies, prepare: async (raw: any, path: string) => {
       if (path === '/v1/copies' || path.startsWith('/v1/copies/')) return raw;   // copy bodies are validated by evmcopy.ts (plain units of their own)
@@ -113,7 +114,7 @@ export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { m
       const stock = stocksHere && typeof tok === 'string' ? findStock(tok) : undefined;
       const body = await s.simple(path, raw);
       if (trades || typeof tok === 'string') await s.sync();   // chain clock (deadlines) and pool reserves (quotes) as of now
-      if (stock && isBuy(path, body) && !stocksOn) throw stocksOff();
+      if (stock && isBuy(path, body) && !stocksOk) throw stocksOff();
       // a stock route must fill near the share price (before anything is signed); a limit order is checked at its size now, its trigger price guards the fill itself
       const side = isBuy(path, body) ? 'buy' : isSell(path) ? 'sell' : undefined, amt = body?.amount ?? body?.total;
       if (stock && side && raw?.allowRiskyToken !== true && typeof amt === 'string' && /^\d+$/.test(amt) && BigInt(amt) > 0n) await stockPriceCheck(s, stock, side, BigInt(amt), await s.decimals(stock.address));

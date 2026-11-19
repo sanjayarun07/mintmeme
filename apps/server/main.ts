@@ -145,11 +145,13 @@ if (import.meta.main) {
   if ((env.HOST ?? '127.0.0.1') === '127.0.0.1' && !/^(localhost|127\.0\.0\.1)$/.test(pub.hostname)) console.warn(`warning: HOST is 127.0.0.1 but NODE_PUBLIC_URL is ${pub.host}: other nodes cannot reach this one. Set HOST=0.0.0.0 (or this machine's private address).`);
   // Privy sign-in for the /app trading app (privyauth.ts): on only when PRIVY_USERS maps Privy user ids to accounts; API keys keep working either way
   let privyAuth: Parameters<typeof createNode>[0]['privyAuth'];
-  if (env.PRIVY_USERS?.trim()) {
+  if (env.PRIVY_USERS?.trim() || env.PRIVY_SIGNUP === 'open') {
     const { parsePrivyUsers, privyKeys, verifyPrivyToken } = await import('./privyauth.ts');
     let users: Map<string, string> = new Map(); try { users = parsePrivyUsers(env.PRIVY_USERS); } catch (e) { fail((e as Error).message); }
     const appId = need('PRIVY_APP_ID').trim(), keysOf = privyKeys(appId, { pem: env.PRIVY_VERIFICATION_KEY?.trim() || undefined });
-    privyAuth = { users, ttlS: int('PRIVY_SESSION_HOURS', 12, 1, 168) * 3600, verify: t => verifyPrivyToken(t, { appId, keys: keysOf }) };
+    privyAuth = { users, ttlS: int('PRIVY_SESSION_HOURS', 12, 1, 168) * 3600, verify: t => verifyPrivyToken(t, { appId, keys: keysOf }),
+      ...(env.PRIVY_SIGNUP === 'open' ? { signup: { max: int('PRIVY_SIGNUP_MAX', 1000, 1, 1_000_000) } } : {}) };
+    if (env.PRIVY_SIGNUP && env.PRIVY_SIGNUP !== 'open') fail('PRIVY_SIGNUP must be "open" or unset');
   }
   const node = await createNode({
     privyAuth,

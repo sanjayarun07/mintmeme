@@ -127,7 +127,10 @@ minute per address and refused while Redis is unreachable.
 |---|---|---|
 | `bad_token`, `bad_signature`, `wrong_app` | 401 | Not a Privy login token for this app, or not signed by Privy. |
 | `expired` | 401 | The Privy login expired: get a fresh token from Privy (`getAccessToken()`). |
-| `not_mapped` | 403 | Valid login, but no account for that Privy user. The message names the `did:privy:…` to add to `PRIVY_USERS`. |
+| `not_mapped` | 403 | Valid login, but no account for that Privy user (and sign-up is not open). The message names the `did:privy:…` to add to `PRIVY_USERS`. |
+| `signup_full` | 403 | Open sign-up has reached `PRIVY_SIGNUP_MAX` accounts. |
+
+**Open sign-up** (`PRIVY_SIGNUP=open`): a verified Privy user who is not in `PRIVY_USERS` gets their own account, `p-<privy id>` (the same one on every later sign-in), up to `PRIVY_SIGNUP_MAX` (default 1,000). Mapped users keep their mapped account. A sign-up account trades only the wallet its owner links and allows, within the server's caps; it cannot buy tokenized stocks unless `SIGNUP_STOCKS_ENABLED=1`. Account ids starting with `p-` are reserved for sign-ups.
 | `not_configured` | 404 | This server has no `PRIVY_USERS`: use an API key. |
 
 TypeScript: `const { client } = await MemeClient.signInWithPrivy({ baseUrl, privyToken, chain? })`, and `client.signOut()`.

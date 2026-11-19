@@ -25,6 +25,7 @@ import { recordRoutes, clusterStatus, statusHtml, nodeKey, nodesKey, nodeId } fr
 import type { WebhookOptions } from './webhooks.ts';
 import { CHAIN_SPECS, CHAIN_ID_RE, RESERVED_SEGMENTS, defaultChainKey, stateName } from './chains.ts';
 import { AuthError, openSession, lookupSession, closeSession } from './privyauth.ts';
+import { SIGNUP_PREFIX } from './chains.ts';
 
 /** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
 /** `copies` (optional): copy trading for this account (POST/GET/DELETE /v1/copies): the host builds the leader source and keeps the configs in the user's state. */
@@ -38,7 +39,10 @@ export interface ChainAccounts { id: string; label?: string; makeAccount: MakeAc
 export interface NodeOptions {
   redisUrl: string; namespace: string;
   /** Optional: sign in with Privy (privyauth.ts). POST /v1/auth/privy { token } opens a session for the account the Privy user id is mapped to; DELETE /v1/auth/session closes it. */
-  privyAuth?: { verify: (token: unknown) => Promise<{ did: string }>; users: Map<string, string>; ttlS: number };
+  privyAuth?: { verify: (token: unknown) => Promise<{ did: string }>; users: Map<string, string>; ttlS: number;
+    /** Open sign-up (PRIVY_SIGNUP=open): a verified Privy user who is not in `users` gets an account of their own, p-<privy id>, up to `max` such accounts. Each still
+     *  trades only a wallet they link and allow themselves, within the server's caps; stock buys stay off for them unless SIGNUP_STOCKS_ENABLED=1 (chains.ts). */
+    signup?: { max: number } };
   /** How OTHER nodes reach this one (http://, e.g. http://10.0.3.7:3500). Must be routable from the other nodes. */
   publicUrl: string;
   keys: ApiKey[];
@@ -297,7 +301,15 @@ export async function createNode(o: NodeOptions) {
     let body: any; try { const ch: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 16_384) return err(413, 'too_large', 'The request is too large.'); ch.push(c as Buffer); } body = JSON.parse(Buffer.concat(ch).toString() || '{}'); } catch { return err(400, 'bad_request', 'Send JSON: { "token": "<Privy access token>" }.'); }
     try {
       const { did } = await o.privyAuth.verify(body?.token);
-      const user = o.privyAuth.users.get(did);
+      let user = o.privyAuth.users.get(did);
+      if (!user && o.privyAuth.signup) {   // open sign-up: their own account, named after their Privy id; a new one only while under the cap
+        const id = SIGNUP_PREFIX + did.slice('did:privy:'.length), key = `${o.namespace}:signups`;
+        if (Number(r.cmd('SADD', key, id)) === 1) {
+          if (Number(r.cmd('SCARD', key)) > o.privyAuth.signup.max) { r.cmd('SREM', key, id); return err(403, 'signup_full', 'This server is not taking new accounts right now.', 'Ask the operator to raise PRIVY_SIGNUP_MAX.'); }
+          r.cmd('SADD', usersKey(o.namespace), id); log(`[auth] new sign-up account ${id}`);
+        }
+        user = id;
+      }
       if (!user) return err(403, 'not_mapped', `Your Privy login is valid, but it is not connected to a trading account on this server (Privy user ${did}).`, `Ask the operator to add ${did}=<account> to PRIVY_USERS.`);
       return json(res, 200, openSession(r, o.namespace, user, did, o.privyAuth.ttlS));
     } catch (e) {

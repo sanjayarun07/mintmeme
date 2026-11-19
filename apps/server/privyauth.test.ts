@@ -82,3 +82,21 @@ test('through a node: sign in, trade-scope calls work with the session, an unmap
     await assert.rejects(MemeClient.signInWithPrivy({ baseUrl: url, privyToken: jwt({ ...good, sub: OTHER }) }), (e: any) => e.code === 'not_mapped');
   } finally { await nd.drain?.(); const c = new SyncRedis(); try { for (const k of (c.cmd('KEYS', `${n}:*`) as string[] ?? [])) c.cmd('DEL', k); } finally { c.close(); } }
 });
+
+test('open sign-up: an unmapped Privy user gets their own p- account, up to the cap; mapped users keep theirs; sign-up accounts buy stocks only when allowed', { skip: up ? false : 'no local Redis' }, async () => {
+  const { stocksForUser } = await import('./chains.ts');
+  assert.equal(stocksForUser('arun', {}), true); assert.equal(stocksForUser('p-abc', {}), false); assert.equal(stocksForUser('p-abc', { SIGNUP_STOCKS_ENABLED: '1' }), true);
+  const n = `memedesk-signup-test:${Date.now()}:${Math.random().toString(36).slice(2)}`, THIRD = 'did:privy:cmuser0000000000000000003';
+  const port = await new Promise<number>(ok => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const p = (s.address() as any).port; s.close(() => ok(p)); }); }), url = `http://127.0.0.1:${port}`;
+  const nd = await createNode({ redisUrl: 'redis://127.0.0.1:6379', namespace: n, publicUrl: url, keys: [], makeAccount: practiceAccount, leaseTtlMs: 3000, sweepMs: 60_000, requireAof: false, log: () => {},
+    privyAuth: { users: parsePrivyUsers(`${DID}=alice`), ttlS: 600, signup: { max: 1 }, verify: t => verifyPrivyToken(t, { appId: APP, keys }) } });
+  await nd.listen(port);
+  const signIn = async (sub: string) => { const r = await fetch(url + '/v1/auth/privy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: jwt({ ...good, sub }) }) }); return { status: r.status, j: await r.json() as any }; };
+  try {
+    const a = await signIn(DID); assert.equal(a.j.userId, 'alice', 'a mapped user keeps the mapped account (and uses no sign-up slot)');
+    const o = await signIn(OTHER); assert.equal(o.status, 200); assert.equal(o.j.userId, 'p-' + OTHER.slice('did:privy:'.length));
+    const ov = await fetch(url + '/v1/overview', { headers: { authorization: 'Bearer ' + o.j.session } }); assert.equal(((await ov.json()) as any).userId, o.j.userId, 'the new account works');
+    assert.equal((await signIn(OTHER)).j.userId, o.j.userId, 'signing in again: the same account, no new slot');
+    const full = await signIn(THIRD); assert.equal(full.status, 403); assert.equal(full.j.error.code, 'signup_full');
+  } finally { await nd.drain?.(); const c = new SyncRedis(); try { for (const k of (c.cmd('KEYS', `${n}:*`) as string[] ?? [])) c.cmd('DEL', k); } finally { c.close(); } }
+});
