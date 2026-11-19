@@ -77,6 +77,14 @@ export interface NodeOptions {
 /** The files and calls of the /solana page (apps/web/solana.html and the scripts it loads). */
 const SOLANA_SAMPLE = new Set(['/solana', '/solana.html', '/solana.css', '/styles.css', '/solcore.js', '/views3.js', '/views4.js', '/solpro.js', '/solboot.js', '/privy.bundle.js', '/app', '/app.html', '/app.css', '/app.js']);
 export const isSolanaSamplePath = (p: string) => SOLANA_SAMPLE.has(p) || p.startsWith('/api/sol/') || p === '/rfqdesk' || p.startsWith('/rfqdesk/');
+/** What a PROXIED request may reach of the page server: the trading app, its read-only data (market, bridge quotes, balances, the read-only RFQ desk, the public config, the
+ *  read-only RPC relay). A reverse proxy or a tunnel on this machine connects from 127.0.0.1, so "loopback" alone does not mean "this machine's user": a request carrying a
+ *  forwarding header came from elsewhere. The /solana console and every route that acts for its single-user session (trades, trading key, kill switch, settings, Privy use,
+ *  wallet session) answer only to direct requests on this machine. */
+const APP_PUBLIC = new Set(['/app', '/app.html', '/app.css', '/app.js', '/privy.bundle.js', '/rfqdesk', '/api/sol/config', '/api/sol/rpc']);
+export const isPublicAppPath = (p: string) => APP_PUBLIC.has(p) || p.startsWith('/rfqdesk/') || /^\/api\/sol\/(market|bridge|evm|rfq)\/[a-z-]+$/.test(p);
+const FORWARD_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-real-ip', 'forwarded', 'cf-connecting-ip', 'cf-ray', 'true-client-ip'];
+export const isProxied = (h: Record<string, unknown>) => FORWARD_HEADERS.some(k => h[k] !== undefined);
 export const isLoopback = (a: string | undefined) => a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 export const isLoopbackHost = (h: string | undefined) => /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(h ?? '');
 const HOP = 'x-memedesk-hop', NODE_HEADER = 'x-memedesk-node';
@@ -151,7 +159,7 @@ export async function createNode(o: NodeOptions) {
   /** One API per chain (same keys, one shared rate budget per key): routes, wallet linking and event streams are per chain; app routes and records are the same on all. */
   const buckets = new Map<string, { tokens: number; at: number }>(), apps = [...appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100), ...recordRoutes(history, true)];
   const apis = new Map(chains.map(c => {
-    const copiesOf = (u: string) => { const cp = acctOf(u, c.id)?.copies; if (!cp) throw new SdkError('not_configured', `copy trading is not available for this account on ${c.id}`, 'Copy trading needs a leader source for this chain (Solana has one).', 501); return cp; };
+    const copiesOf = (u: string) => { const cp = acctOf(u, c.id)?.copies; if (!cp) throw new SdkError('not_configured', `copy trading is not available for this account on ${c.id}`, 'Copy trading runs on the real chains (Solana, Base, BNB Chain, Robinhood Chain); this chain has no leader source.', 501); return cp; };
     const extra = c.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? stateOf(x.lease, c.id) : undefined; }, reload: u => reload(u, c.id) });
     const audit = history ? (e: Parameters<NonNullable<Parameters<typeof createApi>[0]['onChange']>>[0]) => history.audit({ ...e, path: multi ? e.path.replace(/^\/v1\//, `/v1/${c.id}/`) : e.path, node: o.publicUrl, body: auditBody(e.body) }) : undefined;
     return [c.id, createApi({ keys: o.keys, sessions: o.privyAuth ? h => lookupSession(r, o.namespace, h) : undefined, buckets, traderFor: u => acctOf(u, c.id)?.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: audit, prepare: (u, body, path) => acctOf(u, c.id)?.prepare?.(body, path),
@@ -311,6 +319,7 @@ export async function createNode(o: NodeOptions) {
       if (path === '/console' || path === '/') { res.writeHead(200, CONSOLE_HEADERS); return res.end(CONSOLE_HTML); }
       if (isSolanaSamplePath(path)) {
         if (!o.solanaSampleUrl || !isLoopback(req.socket.remoteAddress) || !isLoopbackHost(req.headers.host)) return json(res, 404, { error: { code: 'not_found', message: `No route ${path}.` } });
+        if (isProxied(req.headers) && !isPublicAppPath(path)) return json(res, 404, { error: { code: 'not_found', message: `No route ${path}.` } });   // through a proxy: the app and its read-only data only
         return toTerminal(req, res, o.solanaSampleUrl);
       }
       m.requests++;

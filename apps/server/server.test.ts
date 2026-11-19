@@ -112,6 +112,15 @@ test('the /solana sample page is linked to a local terminal: page and /api/sol c
     const evil = await fetch(url + '/api/sol/status', { method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://evil.example' }, body: '{}' });
     assert.equal(evil.status, 403, 'a foreign origin is passed through unchanged and refused'); assert.equal(seen.at(-1)!.origin, 'https://evil.example');
     assert.equal((await fetch(bare.url + '/solana')).status, 404, 'no link configured: nothing is served');
+    // through a proxy or tunnel on this machine (it connects from 127.0.0.1 but adds a forwarding header): the trading app and its read-only data only
+    const n0 = seen.length, via = (p: string, h: Record<string, string>, method = 'GET') => fetch(url + p, { method, headers: { 'content-type': 'application/json', ...h }, body: method === 'POST' ? '{}' : undefined });
+    for (const h of [{ 'x-forwarded-for': '203.0.113.9' }, { 'cf-connecting-ip': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }]) {
+      for (const p of ['/solana', '/views3.js', '/api/sol/kill', '/api/sol/trade/confirm', '/api/sol/tradingkey/use', '/api/sol/wallet/status', '/api/sol/privy/use']) assert.equal((await via(p, h, p.startsWith('/api/') ? 'POST' : 'GET')).status, 404, `${p} is refused through a proxy (${Object.keys(h)[0]})`);
+      for (const p of ['/app', '/app.js', '/rfqdesk', '/api/sol/config']) assert.equal((await via(p, h)).status, 200, `${p} is served through a proxy`);
+      assert.equal((await via('/api/sol/market/list', h, 'POST')).status, 200, 'the app\'s market data is served through a proxy');
+    }
+    assert.ok(!seen.slice(n0).some(s => /kill|trade|tradingkey|wallet|privy\/use|solana|views3/.test(s.path)), 'refused calls never reached the terminal');
+    assert.equal((await via('/api/sol/kill', {}, 'POST')).status, 200, 'directly on this machine, without a forwarding header, the session routes still work');
     assert.ok(isSolanaSamplePath('/api/sol/trade/confirm') && isSolanaSamplePath('/views4.js') && !isSolanaSamplePath('/v1/orders'));
     assert.ok(isLoopback('127.0.0.1') && isLoopback('::1') && isLoopback('::ffff:127.0.0.1') && !isLoopback('10.0.3.7') && !isLoopback(undefined), 'only this machine is served');
   } finally { await nd.drain().catch(() => {}); await bare.nd.drain().catch(() => {}); term.close(); wipe(n); }
