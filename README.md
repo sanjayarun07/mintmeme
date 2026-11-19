@@ -18,6 +18,7 @@ full web terminal, markets, indexer, more fork harnesses) is preserved in git ta
 | **HTTP API** | `apps/api` | Every `Trader` method over HTTP/JSON with API keys, per-user isolation, rate limits, OpenAPI, live events. | [`docs/HTTP_API.md`](docs/HTTP_API.md) (integration guide), [`docs/SDK_AND_API.md`](docs/SDK_AND_API.md) §8 |
 | **Execution server** | `apps/server`, `deploy/server` | Identical nodes on one Redis: per-user ownership, forwarding, failover, health and metrics, Docker. Serves the API and `/console`. | [`docs/PRODUCTION_SERVER.md`](docs/PRODUCTION_SERVER.md) |
 | **RFQ Desk** | `apps/rfq` | Desk for JupiterZ market-maker quotes on tokenized stocks: a firm quote with expiry, the decoded transaction and the gate's checks, a size ladder against normal routes (`npm run rfq`). Read-only until you connect a wallet; then it can send a quote your wallet signed, if the gate, the simulation and the share-price check pass, up to `RFQ_DESK_MAX_USD` ($1,500 by default). The desk itself never signs. | [`docs/JUPITERZ.md`](docs/JUPITERZ.md) |
+| **Deploy** | `apps/server`, `apps/web`, `apps/rfq`, `deploy/server` | Real funds on every chain with the trading app: Privy, RPCs, keys, Redis, the three processes, checks, first trades. | [Deploy](#deploy-real-funds-every-chain-the-trading-app) |
 | **Trading app** | `apps/web` (`app.html`, `app.js`, `market.ts`, `bridge.ts`, `rfqdesk.ts`), `apps/privy` | `/app` on the execution server: Discover (trending, new, stocks, watchlist on every chain, sort and filters), token page (chart, safety, market / limit / TP-SL / TWAP), Portfolio, Copy trading, Alerts, the RFQ desk (read-only), Account. Sign in with Privy; bridge-then-buy from Base. Real funds. | [Use the trading app](#use-the-trading-app-app) |
 | **Solana test UI** | `apps/web`, `apps/privy` | `/solana`: the older one-page console (wallet sign-in, orders, trading key, kill switch, execution-server setup). Mainnet, real funds. | [`docs/SOLANA_MAINNET_TEST_CHECKLIST.md`](docs/SOLANA_MAINNET_TEST_CHECKLIST.md) |
 
@@ -136,6 +137,49 @@ open http://127.0.0.1:3500/app                          # this machine only (see
 
 Limits: `/app` and `/rfqdesk` are served only to this machine (the node forwards them to the page server for loopback requests), like `/solana`; serving them to
 other users needs a public front end (not built). Copy trading needs a leader source and runs on Solana only. No platform fee is collected on the EVM chains yet.
+
+## Deploy (real funds, every chain, the trading app)
+
+Step by step. More detail, every setting and the Docker stack: [`docs/PRODUCTION_SERVER.md`](docs/PRODUCTION_SERVER.md).
+
+1. **Privy** ([setup checklist](#setup-checklist-do-this-once-npm-run-setupcheck-shows-what-is-still-missing) below):
+   - TEE turned on (Wallet infrastructure → Advanced).
+   - The server's authorization key: `PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`. The app secret: `PRIVY_APP_SECRET`.
+   - The Solana policy: `PRIVY_SOLANA_POLICY_ID`.
+   - **One** EVM policy with every EVM chain's rules, each pinned to its `chain_id`: `PRIVY_EVM_POLICY_ID` (`npm run privy:evm-policy -- <chain>` prints one chain's rules).
+   - Allowed origins: your app's address, `http://127.0.0.1:3500`, `http://127.0.0.1:3700`.
+2. **RPCs and data** in `.env`:
+   - `ALCHEMY_API_KEY` with Base, BNB and Robinhood enabled (or `BASE_RPC_URL`, `BNB_RPC_URL`, `ROBINHOOD_RPC_URL`).
+   - `SOLANA_RPC_URL` (for example Helius).
+   - `JUPITER_API_KEY` on a paid plan (the RFQ desk and JupiterZ make many calls), `RELAY_API_KEY`.
+3. **Who may trade:**
+   - Bots and developers: `npm run server:key -- <account>`; the hash line it prints goes into `API_KEYS_FILE`.
+   - People using `/app`: map their Privy user to an account in `PRIVY_USERS` (`did:privy:<id>=<account>`). A first sign-in that is not mapped shows the `did:privy:…` to add.
+4. **Redis** with AOF (`appendonly yes`) and a password, on a private network. Optional: Postgres (`PG_URL`) for trade history and the audit log.
+5. **Start** the three processes (one node per machine, each with its own `NODE_PUBLIC_URL`; or Docker: `deploy/server/docker-compose.yml`):
+
+   ```bash
+   npm run rfq                                         # the RFQ desk on :3700
+   ```
+
+   ```bash
+   PORT=3010 npm run web                               # the page server: /app, /solana, /rfqdesk
+   ```
+
+   ```bash
+   CHAINS=solana,base,robinhood,bnb SOLANA_SAMPLE_URL=http://127.0.0.1:3010 REDIS_URL=redis://:<password>@<redis>:6379 \
+     API_KEYS_FILE=keys.txt NODE_PUBLIC_URL=http://<this node>:3500 PORT=3500 npm run server
+   ```
+
+6. **Check:**
+   - `npm run setup:check` (what is configured; never prints secrets).
+   - `GET /healthz` and `/readyz` on each node, and `GET /v1/chains`.
+   - Open `http://127.0.0.1:3500/app`, sign in with Privy, then in Account allow trading and link each chain. `GET /v1/<chain>/wallet` shows `linked` and `active`.
+7. **First trades:** small, one per chain, with the owner's approval. Caps per chain: `SOLANA_MAX_TRADE_SOL`, `BASE_MAX_TRADE_ETH`, `ROBINHOOD_MAX_TRADE_ETH`,
+   `BNB_MAX_TRADE_ETH` and their daily caps.
+
+Not covered yet: `/app` and `/rfqdesk` are served only to the same machine (loopback), like `/solana`. Offering the app to other people needs a public front end and a
+Privy-approved domain (not built).
 
 ## Use the Solana test UI (real funds)
 
