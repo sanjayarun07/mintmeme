@@ -24,6 +24,10 @@ export interface WatchCfg {
   /** Hold an event until its block has this many confirmations (0 = act as soon as it is mined). One policy per watcher. */
   minConfirmations: number;
   startBlock?: number; maxBlocksPerPoll?: number; trackDepth?: number;
+  /** How new blocks are searched. 'blocks' (default): every block with its transactions. 'logs': only ERC-20 Transfer logs to or from a leader (eth_getLogs, two calls
+   *  per range), then just those transactions: far fewer and smaller calls on fast chains (Base, BNB and Robinhood make 2 to 10 blocks a second). A swap always moves a
+   *  token to or from the leader, so 'logs' finds every swap 'blocks' finds; what it does not see is a transaction that moves only the native coin (no swap). */
+  scan?: 'blocks' | 'logs';
 }
 export interface Tracked { txHash: string; blockHash: string; blockNumber: number }
 type Held = LeaderEvent & Tracked;
@@ -62,7 +66,28 @@ export class LeaderWatcher {
     }
     this.tracked = stillTracked;
     // 2. scan new blocks
-    const end = Math.min(head, this.cursor + (this.cfg.maxBlocksPerPoll ?? 50) - 1), found: Held[] = [];
+    const found: Held[] = [];
+    if (this.cfg.scan === 'logs') {
+      // one range: the leaders' Transfer logs (as sender, then as receiver), then each matching transaction once, in block order. The cursor moves past the whole range
+      // only after every transaction in it was read, so a failed call rescans the same range next time (dedupe by `known` keeps that safe).
+      const end = Math.min(head, this.cursor + (this.cfg.maxBlocksPerPoll ?? 500) - 1);
+      if (end >= this.cursor) {
+        const lead = [...this.leaders].map(l => '0x' + l.slice(2).padStart(64, '0')), range = { fromBlock: hex(this.cursor), toBlock: hex(end) };
+        const [out, inn] = await Promise.all([this.rpc.call<any[]>('eth_getLogs', [{ ...range, topics: [TRANSFER, lead] }]), this.rpc.call<any[]>('eth_getLogs', [{ ...range, topics: [TRANSFER, null, lead] }])]);
+        const txs = new Map<string, { n: number; blockHash: string }>();
+        for (const l of [...(out ?? []), ...(inn ?? [])]) if (!l.removed) txs.set(l.transactionHash, { n: Number(big(l.blockNumber)), blockHash: l.blockHash });
+        for (const [h, { n, blockHash }] of [...txs].sort((a, b) => a[1].n - b[1].n)) {
+          const tx: any = await this.rpc.call('eth_getTransactionByHash', [h]); if (!tx || !tx.to || !this.leaders.has(lc(tx.from))) continue;   // only what the leader itself sent
+          const ev = await this.parse(tx, n, head); if (!ev) continue;
+          const id = `${ev.txHash}:${ev.logIndex}`; if (this.known.has(id) || found.some(f => `${f.txHash}:${f.logIndex}` === id)) continue;
+          found.push({ ...ev, blockHash, blockNumber: n });
+        }
+        const tip: any = await this.rpc.call('eth_getBlockByNumber', [hex(end), false]); if (!tip) throw new Error(`block ${end} not available`);
+        for (const f of found) this.known.add(`${f.txHash}:${f.logIndex}`);
+        this.cursor = end + 1; this.tipHash = tip.hash;
+      }
+    }
+    const end = this.cfg.scan === 'logs' ? this.cursor - 1 : Math.min(head, this.cursor + (this.cfg.maxBlocksPerPoll ?? 50) - 1);
     for (let n = this.cursor; n <= end; n++) {
       const blk: any = await this.rpc.call('eth_getBlockByNumber', [hex(n), true]); if (!blk) throw new Error(`block ${n} not available`);
       for (const tx of blk.transactions as any[]) {

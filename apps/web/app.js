@@ -603,34 +603,49 @@ function sellPct(r, p) {
   });
 }
 
-/* Copy trading (Solana) */
+/* Copy trading: every real chain (Solana, Base, Robinhood, BNB). Amounts are in the chain's coin: fixedSol / fixedEth / fixedBnb and the matching caps. */
+const COPY_DEFAULT = { solana: '0.02', base: '0.001', robinhood: '0.001', bnb: '0.005' };
+const copyKey = c => ({ SOL: 'Sol', ETH: 'Eth', BNB: 'Bnb' })[CH[c].native];
 V.copy = async (main) => {
-  main.innerHTML = `<div class="page"><div class="ph"><div><h1>Copy trading</h1><p>Follow up to 10 wallets on Solana. When they buy, you buy with your own size and limits; when they sell, you can follow them out.</p></div></div>
+  let chain = S.chain !== 'all' ? S.chain : store.get('copyChain', 'solana'), mode = 'fixed';
+  main.innerHTML = `<div class="page"><div class="ph"><div><h1>Copy trading</h1><p>Follow up to 10 wallets per chain. When they buy, you buy with your own size and limits; when they sell, you can follow them out. Each copied buy passes the same checks as one you make yourself.</p></div></div>
     <div class="grid2"><div class="card"><h2>Running copies</h2><div id="clist" class="pad"><span class="skel" style="width:50%"></span></div></div>
     <form class="card form" id="cform" autocomplete="off"><h2 style="padding:0;font-size:15px">Copy a wallet</h2>
-      <label class="field"><span>Leader wallets (one per line)</span><textarea id="cl" rows="3" class="input" style="padding:10px 12px;resize:vertical;font-family:var(--mono);font-size:12.5px" placeholder="Solana address" spellcheck="false"></textarea></label>
+      <div class="seg" id="cchain">${IDS.map(c => `<button type="button" data-c="${c}">${badge(c)} ${esc(CH[c].short)}</button>`).join('')}</div>
+      <label class="field"><span>Leader wallets (one per line)</span><textarea id="cl" rows="3" class="input" style="padding:10px 12px;resize:vertical;font-family:var(--mono);font-size:12.5px" spellcheck="false"></textarea></label>
       <div class="seg" id="csz"><button type="button" data-z="fixed" aria-selected="true">Fixed size</button><button type="button" data-z="percent" aria-selected="false">Share of theirs</button></div>
-      <label class="field"><span id="cszl">SOL per copied buy</span><span class="input"><input id="cv" inputmode="decimal" value="0.05"><span class="unit" id="cvu">SOL</span></span></label>
-      <div class="pair"><label class="field"><span>Max per trade</span><span class="input"><input id="cmax" inputmode="decimal" value="0.2"><span class="unit">SOL</span></span></label><label class="field"><span>Max per day</span><span class="input"><input id="cday" inputmode="decimal" value="1"><span class="unit">SOL</span></span></label></div>
-      <label class="field"><span>When they sell</span><span class="input"><select id="cexit"><option value="proportional">Sell the same share they sold</option><option value="full-on-exit">Sell everything when they fully exit</option><option value="full-on-any-sell">Sell everything on any sell</option><option value="ignore">Keep my position</option></select></span></label>
+      <label class="field"><span id="cszl"></span><span class="input"><input id="cv" inputmode="decimal"><span class="unit" id="cvu"></span></span></label>
+      <div class="pair"><label class="field"><span>Max per trade</span><span class="input"><input id="cmax" inputmode="decimal" placeholder="account limit"><span class="unit cu"></span></span></label><label class="field"><span>Max per day</span><span class="input"><input id="cday" inputmode="decimal" placeholder="account limit"><span class="unit cu"></span></span></label></div>
+      <label class="field"><span>When they sell</span><span class="input"><select id="cexit"><option value="full-on-exit">Sell everything when they fully exit</option><option value="proportional">Sell the same share they sold</option><option value="full-on-any-sell">Sell everything on any sell</option><option value="ignore">Keep my position</option></select></span></label>
       <label class="check"><input type="checkbox" id="ctest" checked> Test first: record what would be bought, send nothing</label>
       <div id="cout"></div><button class="btn primary block" type="submit">Start copying</button></form></div></div>`;
-  let mode = 'fixed';
-  $$('#csz button').forEach(b => b.onclick = () => { mode = b.dataset.z; $$('#csz button').forEach(x => x.setAttribute('aria-selected', String(x === b))); $('#cszl').textContent = mode === 'fixed' ? 'SOL per copied buy' : 'Share of what they spend'; $('#cvu').textContent = mode === 'fixed' ? 'SOL' : '%'; $('#cv').value = mode === 'fixed' ? '0.05' : '10'; });
+  const draw = () => {
+    const N = CH[chain].native;
+    $$('#cchain button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.c === chain)));
+    $('#cl').placeholder = chain === 'solana' ? 'Solana address' : `0x address on ${CH[chain].label}`;
+    $('#cszl').textContent = mode === 'fixed' ? `${N} per copied buy` : 'Share of what they spend'; $('#cvu').textContent = mode === 'fixed' ? N : '%';
+    if (!$('#cv').dataset.touched) $('#cv').value = mode === 'fixed' ? COPY_DEFAULT[chain] : '10';
+    $$('#cform .cu').forEach(u => u.textContent = N);
+  };
+  $$('#cchain button').forEach(b => b.onclick = () => { chain = b.dataset.c; store.set('copyChain', chain); delete $('#cv').dataset.touched; draw(); });
+  $$('#csz button').forEach(b => b.onclick = () => { mode = b.dataset.z; $$('#csz button').forEach(x => x.setAttribute('aria-selected', String(x === b))); delete $('#cv').dataset.touched; draw(); });
+  $('#cv').oninput = () => { $('#cv').dataset.touched = '1'; };
+  draw();
   const list = async () => {
     const el = $('#clist'); if (!S.key) { el.innerHTML = `<div class="empty"><b>Sign in first</b><a class="btn sm" href="#/setup">Open Account</a></div>`; return; }
-    try {
-      const cs = await v1('solana', 'GET', '/v1/copies'), arr = Array.isArray(cs) ? cs : cs.copies || [];
-      el.innerHTML = arr.length ? arr.map(c => `<div class="step" style="grid-template-columns:1fr auto"><div><b>${esc((c.leaders || []).map(short).join(', '))}</b><small>${c.sizing?.fixedLamports ? fromRaw(c.sizing.fixedLamports, 9) + ' SOL each' : (c.sizing?.percent ?? '?') + '% of theirs'} · ${esc(c.exitMode || '')}${c.trackOnly ? ' · test mode' : ''}${c.lastError ? ` · <span class="down">${esc(c.lastError)}</span>` : ''}</small></div><button class="btn sm" data-stop="${esc(c.id)}">Stop</button></div>`).join('') : '<div class="empty"><b>Not copying anyone yet</b>Paste a wallet on the right.</div>';
-      $$('[data-stop]', el).forEach(b => b.onclick = async () => { b.disabled = true; try { await v1('solana', 'DELETE', `/v1/copies/${encodeURIComponent(b.dataset.stop)}`); toast('ok', 'Copy stopped', 'Copies already sent finish on the chain.'); list(); } catch (e) { toast('err', 'Not stopped', e.message); b.disabled = false; } });
-    } catch (e) { el.innerHTML = note('err', 'Copy trading is unavailable', esc(e.message)); }
+    const chains = S.served.filter(c => S.wallets[c]?.linked), rows = [], errs = [];
+    await Promise.all(chains.map(async c => { try { const cs = await v1(c, 'GET', '/v1/copies'); (Array.isArray(cs) ? cs : cs.copies || []).forEach(x => rows.push([c, x])); } catch (e) { errs.push(`${CH[c].label}: ${e.message}`); } }));
+    const size = (c, x) => { const f = x[`fixed${copyKey(c)}`]; return f != null ? `${f} ${CH[c].native} each` : `${x.percent}% of theirs`; };
+    el.innerHTML = (rows.length ? rows.map(([c, x]) => `<div class="step" style="grid-template-columns:auto 1fr auto"><span>${badge(c)}</span><div><b>${esc((x.leaders || []).map(short).join(', '))}</b><small>${esc(size(c, x))} · ${esc(x.exitMode || '')}${x.trackOnly ? ' · test mode' : ''}${x.running === false ? ' · <span class="down">not running</span>' : ''}${x.lastError ? ` · <span class="down">${esc(x.lastError)}</span>` : ''}${x.skippedByChecks?.length ? ` · ${x.skippedByChecks.length} skipped by checks` : ''}</small></div><button class="btn sm" data-stop="${esc(c)}|${esc(x.id)}">Stop</button></div>`).join('')
+      : `<div class="empty"><b>Not copying anyone yet</b>${chains.length ? 'Paste a wallet on the right.' : 'Link a chain in Account first.'}</div>`) + (errs.length ? note('warn', 'Some chains did not answer', esc(errs.join(' · '))) : '');
+    $$('[data-stop]', el).forEach(b => b.onclick = async () => { const [c, id] = b.dataset.stop.split('|'); b.disabled = true; try { await v1(c, 'DELETE', `/v1/copies/${encodeURIComponent(id)}`); toast('ok', 'Copy stopped', 'Copies already sent finish on the chain.'); list(); } catch (e) { toast('err', 'Not stopped', e.message); b.disabled = false; } });
   };
   $('#cform').onsubmit = async e => {
-    e.preventDefault(); const out = $('#cout'), leaders = $('#cl').value.split(/\s+/).map(s => s.trim()).filter(Boolean);
+    e.preventDefault(); const out = $('#cout'), leaders = $('#cl').value.split(/\s+/).map(s => s.trim()).filter(Boolean), k = copyKey(chain);
     if (!leaders.length) { out.innerHTML = note('warn', 'Add a wallet to copy'); return; }
-    const why = needSetup('solana'); if (why && !$('#ctest').checked) { out.innerHTML = note('warn', 'Not ready to trade', esc(why)); return; }
-    const body = { leaders, ...(mode === 'fixed' ? { fixedSol: $('#cv').value.trim() } : { percent: +$('#cv').value }), maxPerTradeSol: $('#cmax').value.trim(), dailySol: $('#cday').value.trim(), exitMode: $('#cexit').value, trackOnly: $('#ctest').checked };
-    try { await v1('solana', 'POST', '/v1/copies', body); out.innerHTML = note('ok', body.trackOnly ? 'Copying in test mode' : 'Copying', body.trackOnly ? 'Nothing will be bought. Turn test mode off when you are happy with what it records.' : 'Their next buy will be copied with your size and limits.'); list(); }
+    const why = needSetup(chain); if (why) { out.innerHTML = note('warn', 'Not ready', esc(why)); return; }
+    const body = { leaders, ...(mode === 'fixed' ? { [`fixed${k}`]: $('#cv').value.trim() } : { percent: +$('#cv').value }), ...($('#cmax').value.trim() ? { [`maxPerTrade${k}`]: $('#cmax').value.trim() } : {}), ...($('#cday').value.trim() ? { [`daily${k}`]: $('#cday').value.trim() } : {}), exitMode: $('#cexit').value, trackOnly: $('#ctest').checked };
+    try { await v1(chain, 'POST', '/v1/copies', body); out.innerHTML = note('ok', body.trackOnly ? `Copying on ${CH[chain].label} in test mode` : `Copying on ${CH[chain].label}`, body.trackOnly ? 'Nothing will be bought. Turn test mode off when you are happy with what it records.' : 'Their next buy will be copied with your size and limits.'); list(); }
     catch (err) { out.innerHTML = note('err', 'Not started', esc(err.message)); }
   };
   list();

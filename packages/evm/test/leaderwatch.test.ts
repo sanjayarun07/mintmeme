@@ -26,6 +26,10 @@ class Node {
         return { number: hx(b.number), hash: b.hash, transactions: p[1] ? b.txs.map(t => ({ hash: t.hash, from: t.from, to: t.to, value: hx(t.value) })) : b.txs.map(t => t.hash) } as any; }
       case 'eth_getTransactionReceipt': { const f = this.find(p[0]); if (!f) return null as any; return { status: f.t.status ?? '0x1', blockHash: f.b.hash, blockNumber: hx(f.b.number), logs: f.t.logs } as any; }
       case 'eth_call': { const who = '0x' + p[0].data.slice(34), blk = Number(BigInt(p[1])); return w32(this.bal.get(`${p[0].to}|${who}|${blk}`) ?? 0n) as any; }
+      case 'eth_getTransactionByHash': { const f = this.find(p[0]); return (f ? { hash: f.t.hash, from: f.t.from, to: f.t.to, value: hx(f.t.value), blockNumber: hx(f.b.number) } : null) as any; }
+      case 'eth_getLogs': { const q = p[0], lo = Number(BigInt(q.fromBlock)), hi = Number(BigInt(q.toBlock)), [t0, t1, t2] = q.topics, any = (want: any, got: string) => want == null || (Array.isArray(want) ? want.includes(got) : want === got), out: any[] = [];
+        for (const b of this.blocks.slice(lo, hi + 1)) for (const t of b.txs) for (const l of t.logs) if (any(t0, l.topics[0]) && any(t1, l.topics[1]) && any(t2, l.topics[2])) out.push({ ...l, transactionHash: t.hash, blockNumber: hx(b.number), blockHash: b.hash });
+        return out as any; }
       default: throw new Error('unexpected ' + method);
     }
   }
@@ -76,4 +80,25 @@ test('node errors do not lose progress; snapshot/load resumes at the same cursor
   const n = new Node(); const w = new LeaderWatcher(cfg({ startBlock: 11 }), n); n.mine([buy()]); n.setBal(TOKEN, LEADER, 11, 2_000_000n);
   n.fail = true; await assert.rejects(() => w.poll(), /node down/); assert.equal(w.cursor, 11); n.fail = false;
   assert.equal((await w.poll()).events.length, 1); const w2 = new LeaderWatcher(cfg({ startBlock: 11 }), n); w2.load(structuredClone(w.snapshot())); n.mine([]); assert.equal((await w2.poll()).events.length, 0); assert.equal(w2.cursor, 13);
+});
+
+test("scan 'logs': finds the leader's buys and sells from Transfer logs, reads only those transactions, and ignores trades the leader did not send", async () => {
+  const n = new Node(), w = new LeaderWatcher(cfg({ scan: 'logs' }), n); await w.poll();   // start: now
+  for (let i = 0; i < 40; i++) n.mine([]);                                                // 40 empty blocks: no block is read whole
+  n.mine([buy('0x11')]); const b = n.blocks.length - 1; n.setBal(TOKEN, LEADER, b - 1, 0n); n.setBal(TOKEN, LEADER, b, 2_000_000n);
+  n.mine([{ hash: '0x12', from: OTHER, to: ROUTER, value: 10n ** 17n, logs: [tr(TOKEN, PAIR, LEADER, 5n, 2)] }]);   // someone else's trade sends the leader tokens: not the leader's
+  n.calls.length = 0; const r = await w.poll();
+  assert.deepEqual(r.events.map(e => [e.txHash, e.kind, e.side]), [['0x11', 'swap', 'buy']]);
+  assert.equal(n.calls.filter(c => c === 'eth_getBlockByNumber').length, 1, 'only the range tip is read as a block');
+  assert.equal(n.calls.filter(c => c === 'eth_getLogs').length, 2, 'one range: leader as sender, then as receiver');
+  n.mine([sell('0x13')]); const s = n.blocks.length - 1; n.setBal(TOKEN, LEADER, s - 1, 2_000_000n); n.setBal(TOKEN, LEADER, s, 0n);
+  const r2 = await w.poll(); assert.deepEqual(r2.events.map(e => [e.txHash, e.side, e.quoteAmount]), [['0x13', 'sell', 9n * 10n ** 17n]]);
+  assert.equal((await w.poll()).events.length, 0, 'nothing twice');
+});
+
+test("scan 'logs': a failed call leaves the cursor, so the same range is read again and nothing is lost or doubled", async () => {
+  const n = new Node(), w = new LeaderWatcher(cfg({ scan: 'logs' }), n); await w.poll();
+  n.mine([buy('0x21')]); const b = n.blocks.length - 1; n.setBal(TOKEN, LEADER, b - 1, 0n); n.setBal(TOKEN, LEADER, b, 2_000_000n);
+  const before = w.cursor; n.fail = true; await assert.rejects(w.poll()); assert.equal(w.cursor, before);
+  n.fail = false; assert.deepEqual((await w.poll()).events.map(e => e.txHash), ['0x21']); assert.equal((await w.poll()).events.length, 0);
 });

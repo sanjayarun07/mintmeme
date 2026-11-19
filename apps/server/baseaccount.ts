@@ -12,7 +12,8 @@ import { PrivyApi } from '../../packages/sol/src/index.ts';
 import type { PrivyConfig } from '../../packages/sol/src/index.ts';
 import { isAddress, personalSigner, JsonRpcError } from '../../packages/evm/src/index.ts';
 import type { RpcLike } from '../../packages/evm/src/index.ts';
-import { createBaseTrader, baseEthUsd, EvmJsonRpc, EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
+import { createBaseTrader, baseEthUsd, EvmJsonRpc, EVM_NETWORKS, BASE_DEFAULT_CAPS } from '../../packages/sdk/src/base.ts';
+import { evmCopies } from './evmcopy.ts';
 import { SdkError } from '../../packages/sdk/src/wire.ts';
 import type { Account } from './node.ts';
 import type { Route } from '../api/server.ts';
@@ -97,7 +98,13 @@ export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { m
     const link = readBaseLink(state(walletState(net.id)));
     const s = await createBaseTrader({ userId, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, rpc, privy, state, caps: c.caps, ethUsd, log: c.log, relay: c.relay, aggregator: c.aggregator, kyber: c.kyber, network: net });
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy Ethereum wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
-    return { trader: s.trader, prepare: async (raw: any, path: string) => {
+    // copy trading (evmcopy.ts): a copied buy passes the same checks as a manual one first: for a stock, the operator switch and the share-price check
+    const copies = evmCopies({ trader: s.trader, follower: link?.address, chainId: s.chain.id, label: net.label, native: net.native, weth: net.weth, rpc, state, caps: c.caps ?? BASE_DEFAULT_CAPS,
+      active: () => s.active, prepare: s.prepare, findStock: stocksHere ? findStock : undefined, log: c.log,
+      gate: async (token, wei) => { const st = stocksHere ? findStock(token) : undefined; if (st && !stocksOn) throw stocksOff(); if (st) { await s.sync(); await stockPriceCheck(s, st, 'buy', wei, await s.decimals(st.address)); } } });
+    copies.restore();   // before the node calls trader.resume(): restored runners finish their in-flight copies
+    return { trader: s.trader, copies, prepare: async (raw: any, path: string) => {
+      if (path === '/v1/copies' || path.startsWith('/v1/copies/')) return raw;   // copy bodies are validated by evmcopy.ts (plain units of their own)
       const trades = TRADE_PATHS.test(path); if (trades) s.refuseIfInactive();
       if (raw && typeof raw === 'object' && raw.token === undefined && typeof raw.mint === 'string') { raw = { ...raw, token: raw.mint }; delete raw.mint; }   // 'mint' works too
       // a stock may be named by its symbol (NVDAc on Base) or ticker (NVDA; TSLA on Robinhood Chain), as `token` or `stock`: replaced by its address

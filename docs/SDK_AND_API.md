@@ -359,7 +359,7 @@ Stocks on Base, BNB Chain and Robinhood Chain are not tradable yet.
 
 ---
 
-### 4.10 Copy trading on the execution server (`MODE=solana-mainnet`)
+### 4.10 Copy trading on the execution server (Solana; Base, BNB Chain and Robinhood Chain below)
 
 The server copies leader wallets on Solana for each user (`apps/server/solcopy.ts`). The leader source is `SolLeaderWatcher` (`packages/sol/src/leaderwatch.ts`): it reads the
 leaders' confirmed transactions and turns each into a swap from the leader's own balance changes, so it sees a swap on any DEX. The follower can copy it only where this server
@@ -399,6 +399,9 @@ Rules:
 Verified on a local validator with two server nodes and a crash (`npm run verify:server-copy`, report in `docs/live-verification/`); not on mainnet.
 
 ## 5. How it works in the backend
+
+
+**EVM chains** (`/v1/base/copies`, `/v1/robinhood/copies`, `/v1/bnb/copies`, apps/server/evmcopy.ts): the same rules and answers, amounts in the chain's coin (`fixedEth`, `maxPerTradeEth`, `dailyEth`, `maxPerTokenEth`; `…Bnb` on BNB Chain), leader age `maxAgeS` (seconds, default 60). The leader source is `LeaderWatcher` (packages/evm/src/leaderwatch.ts) with `scan: 'logs'`: the leaders' ERC-20 Transfer logs, then only those transactions, so fast chains are not read block by block. A copied buy of a tokenized stock passes the operator switch and the share-price check like a manual one. Verified on a Base fork: `npm run verify:server-evmcopy` (9 checks).
 
 ### 5.1 The path of one request
 

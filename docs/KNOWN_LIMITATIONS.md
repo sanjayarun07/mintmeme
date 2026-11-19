@@ -51,7 +51,7 @@ After the 2026-11-18 review: `npm test` 465 of 466 pass (the Postgres test is sk
 
 ## SDK and HTTP API
 15. Tested on the practice chain, an Ethereum mainnet fork and a Solana validator. Snipe creation over HTTP answers 501 unless the host supplies a launch source; copy creation
-    answers 501 too, except on the execution server in `MODE=solana-mainnet`, which supplies the leader source (copy trading over the API, SDK_AND_API.md 4.10; validator-tested, not on mainnet). No wallet creation, withdrawals, bridging or billing.
+    answers 501 too, except on the execution server, which supplies the leader source on Solana and on Base, BNB Chain and Robinhood Chain (copy trading over the API, SDK_AND_API.md 4.10; Solana validator-tested and EVM Base-fork-tested, not on mainnet; EVM leaders are found from their own transactions only, not smart wallets). No wallet creation, withdrawals, bridging or billing.
 16. The package archive `memedesk-sdk-0.1.0.tgz` is not rebuilt automatically: run `npm run pack:sdk` after source changes.
 
 ## Execution server (`apps/server`)

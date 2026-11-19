@@ -326,15 +326,20 @@ A blocked buy answers `409 unsafe_token` with the reasons. Sells are never block
 
 ---
 
-## 10. Copy trading (Solana)
+## 10. Copy trading (Solana, Base, BNB Chain, Robinhood Chain)
 
-`POST /v1/copies` follows leader wallets, in plain units. The linked wallet is the follower.
+`POST /v1/<chain>/copies` follows leader wallets on that chain, in plain units of the chain's coin. The wallet linked on that chain is the follower.
 
 ```json
 {"leader":"<leader address>","fixedSol":"0.01","maxPerTradeSol":"0.02","dailySol":"0.1","exitMode":"full-on-exit","slippagePct":5}
+{"leader":"0x…","fixedEth":"0.002","maxPerTradeEth":"0.005","dailyEth":"0.02","exitMode":"full-on-exit"}      // Base, Robinhood Chain
+{"leader":"0x…","percent":25,"maxPerTradeBnb":"0.01"}                                                   // BNB Chain
 ```
 
-- **Sizing:** exactly one of `fixedSol` (the same SOL each copied buy) or `percent` (of what the leader spent).
+- **Amounts** are named after the chain's coin: `fixedSol` / `maxPerTradeSol` / `dailySol` / `maxPerTokenSol` on Solana, `…Eth` on Base and Robinhood Chain, `…Bnb` on BNB Chain. Another chain's names are refused, naming the right ones.
+- **Sizing:** exactly one of `fixed<Coin>` (the same amount each copied buy) or `percent` (of what the leader spent).
+- **Leader age:** Solana `maxAgeSlots` (default 150), EVM chains `maxAgeS` (seconds, default 60): a leader buy older than that when seen is not copied.
+- **How leaders are read on EVM chains:** from ERC-20 Transfer logs to and from the leader (blocks come every 0.1 to 0.5 s, so whole blocks are never read); only transactions the leader wallet sent itself are copied, not trades a smart wallet or another contract made for it.
 - **Optional:** `leaders` (up to 10), `allow` / `block` (mints or stock tickers), `sides` (`both` or `buy`), `exitMode` (`full-on-exit`, `proportional`, `full-on-any-sell`, `ignore`), `cooldownS`, `maxPositions`, `minConfirmations`, `maxDeviationPct`, `maxAgeSlots`, `trackOnly` (record what would be bought, send nothing), `id`.
 - **Unknown fields** are refused.
 - **History:** it never copies past trades, or a leader buy that's already stale when seen.
@@ -481,7 +486,7 @@ Scopes: **R** = `read` or higher; **T** = `trade`; **A** = app key. Modes: all m
 | GET | `/v1/positions`, `/v1/history` | R | Positions with P&L; confirmed history |
 | POST | `/v1/entries/pause`, `/v1/entries/resume` | T | Pause / resume new buys |
 | GET / POST | `/v1/snipes` | R / T | Launch snipers (only where the operator supplies a launch source) |
-| GET / POST | `/v1/copies` | R / T | Copy trading (S; section 10) |
+| GET / POST | `/v1/copies` | R / T | Copy trading (every real chain; section 10) |
 | DELETE | `/v1/copies/:id` | T | Stop a copy config |
 | GET | `/v1/events` | R | Server-sent events |
 | GET / DELETE | `/v1/wallet` | R / T | The linked wallet / unlink (S, B) |

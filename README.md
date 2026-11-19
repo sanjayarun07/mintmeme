@@ -130,13 +130,16 @@ open http://127.0.0.1:3500/app                          # this machine only (see
      deposit in Privy (the server's signer never bridges). Each quote is checked first: one Base transaction to Relay's depository, `depositNative` credited to your own
      wallet, you as sender and recipient, at most `BRIDGE_MAX_ETH`.
    - **Portfolio:** balances and value per chain, positions with cost and P&L, open orders (cancel), history with the time from the chain.
-   - **Copy trading** (Solana), **Alerts**, **Pause new buys** (sells and stop losses keep working).
+   - **Copy trading** on every chain (Solana, Base, Robinhood, BNB): follow leader wallets with your own size and caps, a test mode that sends nothing, and the same
+     checks as a manual buy on every copied buy. **Alerts**, **Pause new buys** (sells and stop losses keep working).
    - **RFQ:** the whole RFQ desk (quote, size ladder, gate lab, EVM chains, how it works), **read-only**: the page server serves it at `/rfqdesk` with the wallet
      button hidden and forwards only its quote and price routes; `/api/execute` is refused. Trades go through the token page, where the server takes a market maker's
      fill itself when it wins.
 
-Limits: `/app` and `/rfqdesk` are served only to this machine (the node forwards them to the page server for loopback requests), like `/solana`; serving them to
-other users needs a public front end (not built). Copy trading needs a leader source and runs on Solana only. No platform fee is collected on the EVM chains yet.
+Serving it to others: put a proxy or tunnel in front of the node (for example Cloudflare to `127.0.0.1:3500`). A request that carries a forwarding header
+(`X-Forwarded-For`, `CF-Connecting-IP`, ...) reaches only the app, `/rfqdesk` and the app's read-only data; the `/solana` console and every route that acts for its
+single-user session answer only to direct requests on this machine (`apps/server/node.ts` `isPublicAppPath`; `deploy/server/nginx.conf` allows the same list).
+Add the public address to the Privy app's allowed origins. No platform fee is collected on the EVM chains yet.
 
 ## Deploy (real funds, every chain, the trading app)
 
@@ -178,8 +181,8 @@ Step by step. More detail, every setting and the Docker stack: [`docs/PRODUCTION
 7. **First trades:** small, one per chain, with the owner's approval. Caps per chain: `SOLANA_MAX_TRADE_SOL`, `BASE_MAX_TRADE_ETH`, `ROBINHOOD_MAX_TRADE_ETH`,
    `BNB_MAX_TRADE_ETH` and their daily caps.
 
-Not covered yet: `/app` and `/rfqdesk` are served only to the same machine (loopback), like `/solana`. Offering the app to other people needs a public front end and a
-Privy-approved domain (not built).
+Public address: a proxy or tunnel in front of the node, and that address in the Privy app's allowed origins. Through a proxy only the app, `/rfqdesk` and the app's
+read-only data are served; the `/solana` console stays on the machine itself. Example: https://mintmeme.openledger.dev (follows `cleanup/sdk-server-only`).
 
 ## Use the Solana test UI (real funds)
 
@@ -325,6 +328,7 @@ Real funds so far: the `/solana` UI (wallet sign-in, Privy automatic trading, th
 | `npm run verify:server-sol` | The execution server in `MODE=solana-mainnet`: two nodes, local Redis, a local Solana validator and a Privy stand-in: linking, a forwarded buy and a sell in plain units, idempotency, caps, an order surviving an owner crash, revocation, priority fee on the transaction, MEV protection per account and per trade through a stand-in Jito block engine, token safety, fee sharing on a buy and a sell (15 checks; with `PG_TEST_URL` also the stored trade history, 16) | `solana-test-validator`, Redis, `ALCHEMY_API_KEY` |
 | `npm run verify:server-base` | The execution server in `MODE=base-mainnet` on a local anvil fork of Base, with a Privy stand-in: linking by `personal_sign` (and refusing another key's signature), a KEYCAT buy and a 100% sell with its exact approval, the ETH cap, a Privy answer that changes the transaction or comes from another key (refused, nothing sent), a removed signer, a ZORA buy and 100% sell through Relay (router, then approval proxy), a token with neither a V2 pool nor a Relay route (15 checks). `BASE_AGGREGATOR=kyberswap` runs the same checks through KyberSwap's router | anvil, Redis, `ALCHEMY_API_KEY` with Base enabled (or `BASE_RPC_URL`) |
 | `npm run verify:server-multi` | One execution server with `CHAINS=solana,base,bnb,robinhood`: two nodes, one API key, a local Solana validator and anvil forks of Base, BNB and Robinhood Chain, Privy stand-ins: a wallet linked per chain, a buy on every chain through the non-owner node, the BNB quote equal to PancakeSwap's router, per-chain caps, failover with all four wallets, sells on the new owner | `ALCHEMY_API_KEY` (Base, BNB, Robinhood enabled), anvil, `solana-test-validator`, Redis |
+| `npm run verify:server-evmcopy` | EVM copy trading on the execution server, on a local Base fork with a Privy stand-in: an impersonated leader wallet really trades KEYCAT on Uniswap V2; its buy from before the copy existed is not copied, its next buy is copied (0.002 ETH, signed, tokens arrive), its full sell is followed out, caps and Solana field names are refused, DELETE stops it (9 checks) | anvil, Redis, `ALCHEMY_API_KEY` with Base enabled (or `BASE_RPC_URL`) |
 | `npm run verify:server-copy` | Copy trading on the execution server in `MODE=solana-mainnet`: two nodes, a local Solana validator, a Privy stand-in and a leader wallet: a copied buy and the leader's sell followed, checks before copied buys, caps, a node crash with the copy config restored and nothing copied twice, delete (11 checks) | `solana-test-validator`, Redis, `ALCHEMY_API_KEY` |
 | `npm run test:pg` | `npm test` plus the Postgres trade-history test (`apps/server/records.test.ts`), which drops and recreates its tables in `PG_TEST_URL`. Default: the `memedesk_test` database of a local Postgres container started with `docker run -d --name memedesk-pg -e POSTGRES_USER=memedesk -e POSTGRES_PASSWORD=memedesk-local-pw -e POSTGRES_DB=memedesk -p 127.0.0.1:55433:5432 -v memedesk-pg-data:/var/lib/postgresql/data postgres:16-alpine` and `docker exec memedesk-pg psql -U memedesk -c "create database memedesk_test"`. Never point it at a database you keep | Docker |
 | `npm run verify:evm` | The SDK `Trader` and HTTP API on a local Ethereum mainnet fork, real Uniswap V2 WETH/USDC pool, fake ETH: market buy and sell with approval, orders, bulk, TWAP, restart | `anvil`, `ALCHEMY_API_KEY` |
