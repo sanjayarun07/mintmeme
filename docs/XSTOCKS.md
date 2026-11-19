@@ -193,7 +193,17 @@ Before real use:
 | Ondo | 15 bridged tokens (official CSV), e.g. TSLAon `0xb197f36c…4309`; only about $45–51k V4 pools against the matching Robinhood token |
 | Venues | Uniswap V3: NVDA/USDG $1.9M, CRCL/USDG $2.2M, TSLA/USDG $448k. Uniswap V4: SPY/USDG $2.4M, MSTR/USDG $1.4M. Metric prop AMM. Uniswap V2 (factory `0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f`) max about $4.9k |
 
-**Tradable here now: through KyberSwap (2026-11-19), fork-tested, no mainnet trade yet.** V2 holds dust; the liquidity is on V3/V4 and KyberSwap's PMM, which KyberSwap reaches (chain name `robinhood`, the same router address as on Base with its own code, 13,724 bytes; real builds decode the same and pass the same gate; `eth_simulateV1` works on Alchemy's and Robinhood's own RPC). `verify:server-multi` M12/M13 buy and sell Robinhood's TSLA through it on a fork. Before a real trade: a Privy policy for chain 4663 with the KyberSwap rules. Ticker lookup and a share-price check for Robinhood's stock tokens are not built yet (they use `uiMultiplier()`).
+**Tradable here now: through KyberSwap (2026-11-19), fork-tested, no mainnet trade yet.** V2 holds dust; the liquidity is on V3/V4 and KyberSwap's PMM, which KyberSwap reaches (chain name `robinhood`, the same router address as on Base with its own code, 13,724 bytes; real builds decode the same and pass the same gate; `eth_simulateV1` works on Alchemy's and Robinhood's own RPC). `verify:server-multi` M12/M13 buy and sell Robinhood's TSLA through it on a fork.
+
+**Privy policy:** `memedesk-robinhood` (created 2026-11-19, id in `PRIVY_ROBINHOOD_POLICY_ID`). It has four rules, all with `chain_id` `4663`:
+- `uniswap-v2-swaps` and `kyberswap-swaps`: `to` is that router, value up to 0.01 ETH.
+- `approve-router` and `approve-kyberswap`: value 0, and the approve spender is that router.
+
+**Ticker lookup and share-price check (built 2026-11-19, `apps/server/baseaccount.ts`):**
+- **Lookup:** all 203 tokens are listed in `packages/evm/src/robinhoodstocks.ts`. Name one by ticker (`token: "TSLA"` or `stock: "tsla"`) or by address.
+- **Buys:** a buy needs `STOCKS_ENABLED=1`. Sells always work.
+- **Price check:** a stock trade must fill within 3% of the share price. One token counts as `uiMultiplier()/1e18` shares, read on chain and kept for a minute. The reference is Jupiter's share price for the Solana stock of the same ticker. 198 tickers have one; ABCL, CLOV, NAVN, RUN and XNDU do not, and refuse with `no_reference_price` unless `allowRiskyToken`.
+- **Checked read-only on mainnet (2026-11-19):** with KyberSwap routes, 0.002 ETH of TSLA, 0.002 ETH of NVDA and a 0.01 SPY sell all passed. No mainnet trade has been made yet.
 
 Earlier note: The `.env` RPC for this chain is the testnet, and nothing here was tested on mainnet.
 
@@ -234,7 +244,7 @@ Tests: `packages/sol/test/stocks.test.ts`, and `apps/server/stocks.test.ts` (off
 - No market-hours warning.
 
 Stock-specific gaps that remain on every chain:
-- **EVM chains:** all of the Solana features above have yet to be built, starting with a venue (Robinhood stock tokens carry `uiMultiplier()` instead of a Token-2022 multiplier).
+- **EVM chains:** Base and Robinhood Chain have three of the Solana features: ticker lookup, the `STOCKS_ENABLED` switch, and the share-price check (on Robinhood Chain it uses `uiMultiplier()`). The rest have yet to be built. BNB Chain has none of them.
 - **Solana:**
   - re-check the fill price when an automated order executes;
   - positions in shares;

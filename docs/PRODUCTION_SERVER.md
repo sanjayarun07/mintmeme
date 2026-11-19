@@ -96,6 +96,11 @@ are not wired on these chains (`no_route` otherwise). The quote venue is reporte
 the quote math uses). Each chain's Privy policy must allow that chain's V2 router (swaps, value capped) and `approve(router)`, with its chain id (README → Base policy
 rules, with that chain's router). Not yet traded on either mainnet.
 
+**Robinhood Chain:**
+- **Venues:** it has KyberSwap besides V2 (`ROBINHOOD_AGGREGATOR`, default `kyberswap`), so the BNB note above (V2 pools only) does not apply here.
+- **Privy policy:** `memedesk-robinhood` (chain id 4663, created 2026-11-19) allows both routers, approvals to those two routers only, and buys up to 0.01 ETH.
+- **Stock tokens:** they work as Base stocks do. Look one up by ticker (`token: "TSLA"`); buys need `STOCKS_ENABLED=1`; the share-price check counts `uiMultiplier()` shares per token (docs/XSTOCKS.md, "Robinhood Chain").
+
 ## How it works
 
 ```

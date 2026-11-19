@@ -63,3 +63,50 @@ test('Base stocks: an ordinary token is not touched by any of this', async () =>
   const a = await world({ enabled: false, perEth: 1n }).make();
   const t = '0x' + '77'.repeat(20), b = await a.prepare({ token: t, eth: '0.1' }, '/v1/trades/buy'); assert.equal(b.token, t);
 });
+
+/* ---------------- Robinhood stock tokens on Robinhood Chain: the same checks, with the share multiplier read on chain (uiMultiplier) ---------------- */
+import { EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
+import { ROBINHOOD_STOCKS, UI_MULTIPLIER_SELECTOR } from '../../packages/evm/src/robinhoodstocks.ts';
+import { findRobinhoodStock } from './baseaccount.ts';
+const RH = EVM_NETWORKS.robinhood, RH_TSLA = ROBINHOOD_STOCKS.TSLA.toLowerCase();
+
+/** ETH at $2,000, TSLA at $400 a share, one token worth `mult` shares (1.25 by default, so a fair token is $500: 4 tokens per ETH). Routes come from a KyberSwap stand-in. */
+function rhWorld(o: { perEth?: bigint; mult?: bigint | 'revert'; enabled?: boolean } = {}) {
+  const perEth = o.perEth ?? 4n * 10n ** 18n, p = fakePrivyEvm(), multAsked: string[] = [];
+  const rpc = { call: async (m: string, a: any[] = []): Promise<any> => {
+    if (m === 'eth_getBlockByNumber') return { number: '0x64', timestamp: '0x' + Math.floor(Date.now() / 1000).toString(16) };
+    if (m === 'eth_call' && a[0].to === RH.factory) return '0x' + '0'.repeat(64);                          // no V2 pool
+    if (m === 'eth_call' && a[0].data === '0x313ce567') return '0x' + w(18n);                                // decimals()
+    if (m === 'eth_call' && a[0].data === UI_MULTIPLIER_SELECTOR) { multAsked.push(a[0].to); if (o.mult === 'revert') throw new Error('execution reverted'); return '0x' + w(o.mult ?? 125n * 10n ** 16n); }
+    if (m === 'eth_call' && a[0].to === RH.usd.pair) return '0x' + w(1000n * 10n ** 18n) + w(2_000_000n * 10n ** 6n) + w(0n);   // WETH (token0), USDG
+    throw new Error(`unscripted ${m} ${JSON.stringify(a[0])}`); } };
+  const kyber = { client: { quote: async (tin: string, _t: string, amt: bigint) => ({ amountOut: tin === NATIVE ? amt * perEth / 10n ** 18n : amt * 10n ** 18n / perEth, routeSummary: {}, path: ['metric'] }) } as any };
+  const prices = new JupiterStockPrices({ fetchFn: (async () => new Response(JSON.stringify({ [TSLA_SOL]: { usdPrice: 400, stockData: { price: 400 } } }))) as any });
+  const acc = baseAccounts({ rpcUrl: 'http://rpc.test', rpc, network: 'robinhood', privy: { ...p.cfg, fetchFn: p.fetchFn } as any, aggregator: 'kyberswap', kyber, stocks: { enabled: o.enabled ?? true, prices } });
+  const state = mem(); state('robinhoodwallet').write(JSON.stringify({ address: p.address.toLowerCase(), walletId: 'evm-wallet-1', linkedAt: 1 }));
+  return { make: () => acc.make('u1', state), multAsked };
+}
+
+test('findRobinhoodStock: by address or ticker, any case; a Base or Solana symbol is not one', () => {
+  assert.equal(Object.keys(ROBINHOOD_STOCKS).length, 203);
+  assert.equal(findRobinhoodStock('tsla')?.address, RH_TSLA); assert.equal(findRobinhoodStock(ROBINHOOD_STOCKS.TSLA)?.symbol, 'TSLA');
+  assert.equal(findRobinhoodStock('TSLAc'), undefined); assert.equal(findRobinhoodStock('TSLAx'), undefined); assert.equal(findBaseStock('0x322f0929c4625ed5bad873c95208d54e1c003b2d'), undefined);
+});
+
+test('Robinhood stocks: the ticker becomes the address, and the price check counts shares with uiMultiplier (a fair 1.25-share token passes)', async () => {
+  const wld = rhWorld(), a = await wld.make();
+  const b = await a.prepare({ token: 'TSLA', eth: '0.1' }, '/v1/trades/buy'); assert.equal(b.token, RH_TSLA);
+  const s = await a.prepare({ stock: 'tsla', amount: String(10n ** 18n) }, '/v1/trades/sell'); assert.equal(s.token, RH_TSLA);
+  assert.deepEqual(wld.multAsked, [RH_TSLA], 'read once, then kept');
+  // the same route with the multiplier taken as 1 would be $500 a share against $400: refused
+  await assert.rejects((await rhWorld({ mult: 10n ** 18n }).make()).prepare({ token: 'TSLA', eth: '0.1' }, '/v1/trades/buy'), (e: any) => e?.code === 'bad_price' && /\$500 per share against a share price of \$400/.test(e.message));
+});
+
+test('Robinhood stocks: an unreadable multiplier refuses (no_reference_price) unless allowRiskyToken; buys need the operator switch', async () => {
+  const a = await rhWorld({ mult: 'revert' }).make();
+  await assert.rejects(a.prepare({ token: 'TSLA', eth: '0.1' }, '/v1/trades/buy'), (e: any) => e?.code === 'no_reference_price' && /multiplier of TSLA/.test(e.message));
+  assert.equal((await a.prepare({ token: 'TSLA', eth: '0.1', allowRiskyToken: true }, '/v1/trades/buy')).token, RH_TSLA);
+  const off = await rhWorld({ enabled: false }).make();
+  await assert.rejects(off.prepare({ token: 'TSLA', eth: '0.1' }, '/v1/trades/buy'), code('stocks_disabled'));
+  assert.equal((await off.prepare({ token: 'TSLA', amount: String(10n ** 18n) }, '/v1/trades/sell')).token, RH_TSLA);
+});
