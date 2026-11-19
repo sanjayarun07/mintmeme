@@ -126,6 +126,20 @@ Live check in the RFQ Desk, $100k USDC→TSLAx (read-only): RFQ +44 bps against 
 
 Found on the way: the default quote wallet's USDC account is **frozen by the issuer** (Token error 17). The desk now skips frozen token accounts when it picks a quote wallet, and names the error when a simulation hits one.
 
+## Ondo and other maker-only stocks (added 2026-11-19)
+
+Ondo Global Markets stocks on Solana (TSLAon, AAPLon, NVDAon, SPYon, …) have almost no pool liquidity: $1 for TSLAon, $1.2k for AAPLon and $2.5k for NVDAon on 2026-11-19. JupiterZ makers quote them firmly in both directions, and JupiterZ was the best router for every Ondo buy checked at $1k and $10k. Per token, TSLAon and TSLAx were within 0.05% of each other, and a buy-then-sell cost about 0.33% for both.
+
+The registry's `tradable` comes from a 0.05 SOL pool route, so it marked these stocks not tradable (2 of 415 Ondo stocks). What changed:
+
+- **RFQ snapshot.** `npm run stocks:rfq` (`packages/live/src/rfqregistry.ts`) asks JupiterZ alone for a $1,000 USDC buy of every registered stock that has a share price. It keeps the stocks whose price per share, multiplier included, is at most 3% above the share price, and writes `packages/sol/src/rfqlist.generated.ts`. Each registry entry now has `market.pool`, `market.rfq` and `market.rfqDeviationPct`, and `tradable` means either a pool or a maker. First run, 2026-11-19: of 2,011 registered stocks with a share price, makers quoted 967, and 793 were within 3%. That is 480 xStocks (454 of them with no usable pool) and 313 Ondo stocks (311 with no usable pool). Backpack got no quotes. So `tradable` went from 113 stocks to 878.
+- **Server price check.** A stock trade's route must fill near the share price. When the pool route fails that check, the server now asks JupiterZ for a quote (`fetchRfqQuote`: no taker, nothing built) and accepts the trade if the maker fills it near the share price. That applies to buys of `JUPITERZ_MIN_SOL` or more, and to sells the maker pays at least that much SOL for. Below that size, the refusal hint says from what size makers quote.
+- **Sells.** A stock sell is sized by the maker's SOL output (`sizeByQuote`). Before, it was sized by the pool route's minimum output, which for Ondo is far below the threshold, so RFQ was never tried.
+- **No fallback to a thin pool.** If RFQ isn't used when the trade is signed (no maker quote then, or a refusal), the normal route's simulated output is checked against the share price before signing (`checkFallback`). So a trade accepted because of a maker's quote is never filled at the pool's price. This applies to every stock trade on SOL while JupiterZ is on. It is skipped for stocks the user traded with `allowRiskyToken: true`; that list is kept in memory, so after a restart the check applies again.
+- **Listings.** `GET /v1/stocks` has `rfqOnly: true` for stocks only makers trade. The desk lists them, grouped by issuer, as "(market makers only)".
+- **Unchanged.** The gate and the simulation are the same: they look up each mint's token program, so Ondo's Token-2022 mints work. The registry's pinned Ondo keys (freeze and pause authorities, no permanent delegate) still apply.
+- **Tests.** Sell sizing by the maker's output, `checkFallback` refusing before signing, and a server test for buys and sells with a thin pool and a fair or unfair maker, plus JupiterZ off.
+
 ## RFQ Desk (`npm run rfq`)
 
 A standalone app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:3700) on top of the same code the engine uses. The desk never signs. It is read-only until you connect a wallet; then it forwards a quote your wallet signed to Jupiter, under RFQ_DESK_MAX_USD (default $1,500). A quote is offered for signing only when the gate accepts it, the simulation passes and the fill passes the share-price check (the same check the engine applies through `checkFill`); otherwise the desk says which one failed. It shows:

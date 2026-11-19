@@ -59,8 +59,11 @@ export interface SolChainConfig { id: string; wsol: string; /** Raydium AMM v4 p
   submitter?: TxSubmitter;
   /** JupiterZ RFQ fills for large orders (jupiterz.ts, docs/JUPITERZ.md). Off unless set. Chosen per trade only when one side of the trade is SOL (at least `minLamports`)
    *  or a quote asset listed in `minQuote` (mint -> smallest raw amount on that side, for example USDC: market makers quote stocks closest against USDC), the trade
-   *  carries no platform fee, and the maker's output beats Jupiter's /build route by `marginBps`. `checkFill` may refuse the RFQ output (the stock share-price check). */
-  jupiterz?: RfqCfg & { minLamports: bigint; minQuote?: Record<string, bigint>; marginBps: number; maxExpirySec?: number; checkFill?: (tx: SimTx, outAmount: bigint) => Promise<string | undefined>; log?: (m: string) => void } }
+   *  carries no platform fee, and the maker's output beats Jupiter's /build route by `marginBps`. `checkFill` may refuse the RFQ output (the stock share-price check).
+   *  `sizeByQuote(tx)`: a trade that RECEIVES the quote side is sized by the maker's output instead of tx.minOut (a stock whose pools are thin: their minOut is far too low).
+   *  `checkFallback(tx, out)`: when RFQ is not used, the normal /build route's simulated output is checked before signing; a reason refuses the trade (nothing signed). */
+  jupiterz?: RfqCfg & { minLamports: bigint; minQuote?: Record<string, bigint>; marginBps: number; maxExpirySec?: number; checkFill?: (tx: SimTx, outAmount: bigint) => Promise<string | undefined>;
+    sizeByQuote?: (tx: SimTx) => boolean; checkFallback?: (tx: SimTx, outAmount: bigint) => Promise<string | undefined>; log?: (m: string) => void } }
 const FINAL = 32, TOKEN_ACCOUNT_SIZE = 165;
 /** A token account (classic: exactly 165 bytes; Token-2022: 165, or longer with account type 2 at byte 165 and extensions after). Mint, owner and amount sit at the same offsets in both. */
 const isTokenAccount = (x: { owner: string; data: Buffer }) => (x.owner === PROGRAMS.token && x.data.length === TOKEN_ACCOUNT_SIZE)
@@ -328,7 +331,9 @@ export class SolanaChain implements ChainPort {
     const jv = this.jupVenue(tx);
     const priv = this.privateSend(tx);
     if (jv && this.cfg.jupiterz) { const r = await this.tryRfq(tx, jv).catch(e => { this.rfqNote = `JupiterZ not used: ${(e as Error).message}`; return undefined; }); this.cfg.jupiterz.log?.(this.rfqNote ?? ''); if (r) return r; }
-    if (jv) { const sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; const { message } = await this.buildJupiter(tx, jv, extra); const sig = await this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig)); return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) }; }
+    if (jv) { const sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; const { message, simulatedOut } = await this.buildJupiter(tx, jv, extra);
+      const why = await this.cfg.jupiterz?.checkFallback?.(tx, simulatedOut); if (why) throw new JupiterRefused(why);
+      const sig = await this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig)); return { raw: Buffer.from(wireV0(message, [sig])).toString('base64'), hash: base58(sig) }; }
     const ixs = this.fees && (tx.kind ?? 'swap') === 'swap' ? await this.withPriority(this.instructions(tx), tx.wallet) : this.instructions(tx), sub = this.cfg.submitter, extra = priv && sub?.extraInstruction ? await sub.extraInstruction(tx.wallet) : undefined; if (extra) ixs.push(extra);
     const bh: any = await this.rpcCall('getLatestBlockhash', [{ commitment: 'confirmed' }]);
     const message = compileLegacy(tx.wallet, ixs, b58decode(bh.value.blockhash)), sig = await this.signer.sign(tx.wallet, message); if (extra) this.tipped.add(base58(sig));
@@ -392,11 +397,13 @@ export class SolanaChain implements ChainPort {
     const qIn = quoteMin(tx.tokenIn), qOut = quoteMin(tx.tokenOut);
     if (qIn === undefined && qOut === undefined) return no(`RFQ is used only with SOL${z.minQuote ? ' or ' + Object.keys(z.minQuote).map(m => m.slice(0, 4)).join(', ') : ''} on one side`);
     const [size, min, unit] = qIn !== undefined ? [tx.amountIn, qIn, tx.tokenIn === NATIVE ? 'lamports' : 'raw units'] : [tx.minOut, qOut!, tx.tokenOut === NATIVE ? 'lamports' : 'raw units'];
-    if (size < min) return no(`${size} ${unit} is below the RFQ threshold ${min}`);
+    const byQuote = qIn === undefined && size < min && !!z.sizeByQuote?.(tx);   // sized below by the maker's output
+    if (size < min && !byQuote) return no(`${size} ${unit} is below the RFQ threshold ${min}`);
     // our platform fee is paid in SOL inside the transaction, which an RFQ transaction cannot carry
     if (tx.platformFeeBps && (tx.tokenIn !== NATIVE && tx.tokenOut !== NATIVE ? true : this.feeSplit(tx).each.length > 0)) return no('the trade carries a platform fee, which an RFQ transaction cannot pay');
     const [b, o] = await Promise.all([fetchBuild({ ...j, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w, slippageBps: 50 }), fetchRfqOrder({ ...z, inputMint: inM, outputMint: outM, amount: tx.amountIn, taker: w })]);
     if ('none' in o) return no(o.none);
+    if (byQuote && o.outAmount < min) return no(`the maker pays ${o.outAmount} ${unit}, below the RFQ threshold ${min}`);
     const need = b.outAmount * BigInt(10_000 + z.marginBps) / 10_000n;
     if (o.outAmount < need) return no(`RFQ pays ${o.outAmount}, /build ${b.outAmount}: not ${z.marginBps} bps better`);
     if (o.outAmount < tx.minOut) return no(`RFQ pays ${o.outAmount}, below the minimum ${tx.minOut}`);

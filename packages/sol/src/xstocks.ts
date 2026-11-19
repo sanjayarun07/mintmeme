@@ -9,6 +9,7 @@
  *  None is for US persons (and other restricted places, per each issuer's terms): eligibility is the operator's job, this engine does not know who the user is. */
 import type { IssuedAsset } from './tokensafety.ts';
 import { STOCK_LIST, STOCK_LIST_META } from './stocklist.generated.ts';
+import { RFQ_LIST, RFQ_LIST_META } from './rfqlist.generated.ts';
 
 /** xStocks (Backed). 8 decimals. Extensions: metadataPointer, tokenMetadata, permanentDelegate, defaultAccountState (initialized), scaledUiAmountConfig, pausableConfig, confidentialTransferMint, transferHook (no program). */
 export const XSTOCKS_KEYS = { freezeAuthority: 'JDq14BWvqCRFNu1krb12bcRpbGtJZ1FLEakMw6FdxJNs', permanentDelegate: '5aMNNLQJwAEeoemTEMkv5NVjqKwvvefRYCQ5Z67HFvEq', pauseAuthority: 'JDq14BWvqCRFNu1krb12bcRpbGtJZ1FLEakMw6FdxJNs' } as const;
@@ -20,15 +21,18 @@ const ISSUERS = { x: { issuer: 'Backed (xStocks)', keys: XSTOCKS_KEYS }, on: { i
 
 export interface StockEntry extends IssuedAsset {
   decimals: number; /** The underlying ticker: TSLAx, TSLAon and Backpack's TSLA are all TSLA. */ underlying: string;
-  /** Snapshot from the registry run (STOCK_LIST_META.generatedAt). */ market: { liquidityUsd: number | null; deviationPct: number | null; tradable: boolean };
+  /** Snapshot from the registry run (STOCK_LIST_META.generatedAt). `pool`: a 0.05 SOL route filled within 3% of the share price. `rfq`: JupiterZ market makers quoted a
+   *  $1,000 buy within 3% (RFQ_LIST_META.generatedAt; rfqDeviationPct is that quote's deviation), so it trades at JupiterZ sizes only. `tradable` = either. */
+  market: { liquidityUsd: number | null; deviationPct: number | null; tradable: boolean; pool: boolean; rfq: boolean; rfqDeviationPct: number | null };
 }
 /** Every registered stock (TokenSafety's default allowance list). */
+const RFQ = new Map(RFQ_LIST);
 export const STOCKS_SOLANA: readonly StockEntry[] = STOCK_LIST.map(([code, symbol, mint, decimals, underlying, liq, dev, ok]) => ({ mint, symbol, ...ISSUERS[code], keys: { ...ISSUERS[code].keys }, decimals, underlying,
-  market: { liquidityUsd: liq, deviationPct: dev, tradable: ok === 1 } }));
+  market: { liquidityUsd: liq, deviationPct: dev, tradable: ok === 1 || RFQ.has(mint), pool: ok === 1, rfq: RFQ.has(mint), rfqDeviationPct: RFQ.get(mint) ?? null } }));
 export const XSTOCKS_SOLANA = STOCKS_SOLANA.filter(a => a.issuer === ISSUERS.x.issuer);
 export const ONDO_SOLANA = STOCKS_SOLANA.filter(a => a.issuer === ISSUERS.on.issuer);
 export const BACKPACK_SOLANA = STOCKS_SOLANA.filter(a => a.issuer === ISSUERS.bp.issuer);
-export { STOCK_LIST_META };
+export { STOCK_LIST_META, RFQ_LIST_META };
 
 const byMint = new Map(STOCKS_SOLANA.map(a => [a.mint, a]));
 /** Symbols are unique per issuer (xStocks end in x, Ondo in on) but could clash across issuers: the tradable one, then the most liquid, wins. */

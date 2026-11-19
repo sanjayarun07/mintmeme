@@ -114,6 +114,15 @@ test('chain: a Jupiter swap is built from raw instructions, gated, simulated aga
   const sentSim = s.log.find(l => l[0] === 'simulateTransaction')!; assert.equal(sentSim[1][1].sigVerify, false);
 });
 
+test('chain: with JupiterZ on but not used, checkFallback sees the normal route\'s simulated output and can refuse it before anything is signed', async () => {
+  const seen: bigint[] = [], { c, s } = world();
+  (c as any).cfg.jupiterz = { minLamports: 10n ** 15n, marginBps: 20, checkFallback: async (_t: SimTx, out: bigint) => { seen.push(out); return 'the normal route: this route pays $1,200 per share against a share price of $400'; } };
+  const signs = (c as any).signer.sign; let signed = 0; (c as any).signer.sign = (...a: any[]) => { signed++; return signs.apply((c as any).signer, a); };
+  await assert.rejects(c.prepare(tx()), /\$1,200 per share/); assert.deepEqual(seen, [149_900_000n]); assert.equal(signed, 0); assert.ok(!s.calls.includes('sendTransaction'));
+  assert.match(c.rfqNote ?? '', /below the RFQ threshold/);
+  (c as any).cfg.jupiterz.checkFallback = async () => undefined; const p = await c.prepare(tx()); assert.ok(p.hash); assert.equal(signed, 1);
+});
+
 test('chain: slippage is never looser than the engine allows: a tighter minOut makes us ask Jupiter for a tighter slippage; an impossible one is refused', async () => {
   const urls: string[] = [];
   const w1 = world({ jup: (u) => { urls.push(u); const bps = Number(new URL(u).searchParams.get('slippageBps')); const out = 150_000_000n; return { ...world().build(), otherAmountThreshold: String(out * BigInt(10_000 - bps) / 10_000n), slippageBps: bps }; } });

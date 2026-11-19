@@ -589,7 +589,7 @@ async function status(sig: string) {
   return v ? { found: true, confirmation: v.confirmationStatus ?? null, err: v.err ?? null, slot: v.slot } : { found: false };
 }
 
-const STOCKS = STOCKS_SOLANA.filter(a => a.market.tradable).sort((a, b) => (b.market.liquidityUsd ?? 0) - (a.market.liquidityUsd ?? 0)).map(a => ({ symbol: a.symbol, mint: a.mint, issuer: a.issuer, underlying: (a as any).underlying ?? a.symbol, liquidityUsd: a.market.liquidityUsd, decimals: a.decimals }));
+const STOCKS = STOCKS_SOLANA.filter(a => a.market.tradable).sort((a, b) => (b.market.liquidityUsd ?? 0) - (a.market.liquidityUsd ?? 0)).map(a => ({ symbol: a.symbol, mint: a.mint, issuer: a.issuer, underlying: (a as any).underlying ?? a.symbol, liquidityUsd: a.market.liquidityUsd, decimals: a.decimals, rfqOnly: a.market.rfq && !a.market.pool }));
 const json = (res: http.ServerResponse, code: number, o: unknown) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? String(v) : v))); };
 const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, bad) => { let s = ''; req.on('data', c => { s += c; if (s.length > 200_000) bad(new Error('body too large')); }); req.on('end', () => { try { ok(s ? JSON.parse(s) : {}); } catch { bad(new Error('the request body is not JSON')); } }); });
 

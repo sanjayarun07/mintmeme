@@ -58,6 +58,19 @@ export async function fetchRfqOrder(o: { inputMint: string; outputMint: string; 
   const tx = Uint8Array.from(Buffer.from(j.transaction, 'base64'));
   return { requestId: j.requestId, maker: j.maker, expireAt, inAmount, outAmount, feeBps: Number(j.feeBps ?? 0), tx, message: Uint8Array.from(splitWire(tx).message) };
 }
+/** What JupiterZ market makers would pay right now, with no taker: a price only, nothing is built or signed. Used before a trade is accepted (the server's share-price
+ *  check on a stock whose pools are too thin); the trade itself still goes through fetchRfqOrder, the gate and the simulation. */
+export async function fetchRfqQuote(o: { inputMint: string; outputMint: string; amount: bigint } & RfqCfg): Promise<{ outAmount: bigint } | RfqNone> {
+  if (!(o.amount > 0n)) throw new Error('amount must be positive');
+  const u = new URL(o.orderUrl ?? JUPITERZ.orderUrl);
+  u.search = new URLSearchParams({ inputMint: o.inputMint, outputMint: o.outputMint, amount: o.amount.toString(), excludeRouters: JUPITERZ.others }).toString();
+  const res = await (o.fetchFn ?? fetch)(u.toString(), { headers: headers(o), signal: AbortSignal.timeout(o.timeoutMs ?? 10_000) });
+  const j: any = await res.json().catch(() => undefined);
+  if (!res.ok || !j) return { none: `JupiterZ /order answered HTTP ${res.status}` };
+  if (j.error || j.router !== 'jupiterz') return { none: j.error ? `JupiterZ: ${String(j.error).slice(0, 160)}` : 'no JupiterZ quote' };
+  if (j.inputMint !== o.inputMint || j.outputMint !== o.outputMint || String(j.inAmount) !== o.amount.toString()) return { none: 'JupiterZ answered for a different request' };
+  const out = big(j.outAmount, 'outAmount'); return out > 0n ? { outAmount: out } : { none: 'JupiterZ quoted nothing' };
+}
 
 export interface RfqFill { inputAmount: bigint; outputAmount: bigint; expireAt: number; feeBps?: number }
 /** Decodes an Order Engine `fill`: 8-byte discriminator, input_amount u64, output_amount u64, expire_at i64, then an optional 5-byte trailer the program does not read. */

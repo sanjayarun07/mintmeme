@@ -19,7 +19,7 @@ const rows: string[] = [], fails: string[] = [], prices = new JupiterStockPrices
 const solUsd = Number((await fetchJupiterQuote({ inputMint: WSOL, outputMint: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', amount: 1_000_000_000n })).outAmount) / 1e6;
 const line = (s: string) => { console.log(s); rows.push(s); };
 
-for (const a of STOCKS_SOLANA.filter(x => (process.env.XSTOCKS_ALL === '1' || x.market.tradable) && (!process.env.XSTOCKS_ONLY || x.issuer.includes(process.env.XSTOCKS_ONLY)))) {   // default: the registry's tradable set
+for (const a of STOCKS_SOLANA.filter(x => (process.env.XSTOCKS_ALL === '1' || x.market.pool) && (!process.env.XSTOCKS_ONLY || x.issuer.includes(process.env.XSTOCKS_ONLY)))) {   // default: the registry's tradable set
   const out: string[] = [];
   try {
     const m: any = await rpc.call('getAccountInfo', [a.mint, { encoding: 'jsonParsed', commitment: 'confirmed' }]); const v = m?.value, info = v?.data?.parsed?.info;

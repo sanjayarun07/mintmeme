@@ -49,7 +49,9 @@ export interface SolanaTraderOptions {
   /** JupiterZ RFQ fills for large orders (off when absent; docs/JUPITERZ.md). A trade whose SOL side is at least `minLamports` and carries no platform fee asks Jupiter's
    *  market makers for a firm quote; it is used only when it beats the normal /build route by `marginBps`, passes the RFQ gate and the simulation, and `checkFill`
    *  (the stock share-price check) does not refuse it. Otherwise the normal route runs. Signing still goes through Privy, whose policy must allow the Order Engine program. */
-  jupiterz?: { minLamports: bigint; marginBps: number; maxExpirySec?: number; checkFill?: (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }, outAmount: bigint) => Promise<string | undefined> };
+  jupiterz?: { minLamports: bigint; marginBps: number; maxExpirySec?: number; checkFill?: (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }, outAmount: bigint) => Promise<string | undefined>;
+    /** Size a trade that receives SOL by the maker's output, not its minOut (stocks whose pools are thin). */ sizeByQuote?: (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }) => boolean;
+    /** Checked on the normal route's simulated output when RFQ is not used; a reason refuses the trade before signing. */ checkFallback?: (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }, outAmount: bigint) => Promise<string | undefined> };
   log?: (m: string) => void;
 }
 export interface SolanaTrader { trader: Trader; chain: SolanaChain; active: boolean; why?: string; prepare: (token: string) => Promise<void>; sync: () => Promise<void>; refuseIfInactive: () => void;

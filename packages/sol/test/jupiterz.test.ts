@@ -170,6 +170,24 @@ test('engine: a stock share-price refusal (checkFill) stops RFQ before anything 
   await assert.rejects(w.chain.prepare(w.simtx())); assert.match(w.chain.rfqNote ?? '', /per share/);
 });
 
+test('engine: a stock sell whose pool minOut is below the threshold is sized by the maker output when sizeByQuote says so', async () => {
+  const sell = (w: ReturnType<typeof world>, minOut: bigint): any => { w.chain.state.venues.set('jup:XsDoVf>So1111', new JupiterVenue('jup:XsDoVf>So1111', TSLA, WSOL, WSOL, w.out, BigInt(F.inAmount), 10));
+    return { ...w.simtx(), venue: 'jup:XsDoVf>So1111', tokenIn: TSLA, tokenOut: NATIVE, amountIn: w.out, minOut }; };
+  // without sizeByQuote: the pool's low minOut keeps RFQ off, nothing asked
+  const a = world(); await assert.rejects(a.chain.prepare(sell(a, 1_000_000n))); assert.match(a.chain.rfqNote ?? '', /below the RFQ threshold/);
+  // with it: the maker is asked; a maker output below the threshold still keeps RFQ off
+  const b = world(), asked: string[] = []; (b.chain as any).cfg.jupiterz.sizeByQuote = (t: any) => t.tokenIn === TSLA;
+  const f = (async (u: string) => { asked.push(u);
+    if (u.includes('/swap/v2/build')) return new Response(JSON.stringify({ inputMint: TSLA, outputMint: WSOL, inAmount: b.out.toString(), outAmount: '1000', otherAmountThreshold: '1', slippageBps: 50, transactionVersion: 0, swapInstruction: { programId: 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', accounts: [], data: '' } }));
+    return new Response(JSON.stringify({ ...F, inputMint: TSLA, outputMint: WSOL, inAmount: b.out.toString(), outAmount: '5000000000', taker: b.wallet, expireAt: String(b.expireAt), transaction: Buffer.from(b.tx).toString('base64') })); }) as any;
+  (b.chain as any).cfg.jupiterz.fetchFn = f; (b.chain as any).cfg.jupiter.fetchFn = f;
+  await assert.rejects(b.chain.prepare(sell(b, 1_000_000n))); assert.ok(asked.some(u => u.includes('/swap/v2/order')), 'the maker was asked');
+  assert.match(b.chain.rfqNote ?? '', /the maker pays 5000000000 lamports, below the RFQ threshold 100000000000/); assert.equal(b.s.executes.length, 0);
+  // not a stock sell (sizeByQuote false): unchanged
+  (b.chain as any).cfg.jupiterz.sizeByQuote = () => false; asked.length = 0;
+  await assert.rejects(b.chain.prepare(sell(b, 1_000_000n))); assert.equal(asked.filter(u => u.includes('/swap/v2/order')).length, 0); assert.match(b.chain.rfqNote ?? '', /below the RFQ threshold/);
+});
+
 test('engine: a failed /execute before the quote expires is an unknown outcome (RpcError, looked up again); after expiry and not on chain it is final', async () => {
   const w = world({ execute: () => ({ status: 'Failed', code: -2000, error: 'Failed to land' }) }), tx = w.simtx();
   const p = await w.chain.prepare(tx); tx.hash = p.hash; tx.raw = p.raw;

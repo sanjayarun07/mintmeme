@@ -11,7 +11,8 @@
 import { stocksEnabled } from './chains.ts';
 import { randomBytes } from 'node:crypto';
 import type { Backend } from '../../packages/core/src/index.ts';
-import { PrivyApi, verifySignature, looksLikeMint, SolJsonRpc, STOCKS_SOLANA, STOCK_LIST_META, stockByMint, findStock, underlying, readStockStates, rawForShares, sharesForRaw, perTokenPrice, checkFillPrice, JupiterStockPrices } from '../../packages/sol/src/index.ts';
+import { PrivyApi, verifySignature, looksLikeMint, SolJsonRpc, STOCKS_SOLANA, STOCK_LIST_META, stockByMint, findStock, underlying, readStockStates, rawForShares, sharesForRaw, perTokenPrice, checkFillPrice, JupiterStockPrices, fetchRfqQuote } from '../../packages/sol/src/index.ts';
+const WSOL = 'So11111111111111111111111111111111111111112';
 import { NATIVE } from '../../packages/core/src/index.ts';
 import type { PrivyConfig } from '../../packages/sol/src/index.ts';
 import { createSolanaTrader, jupiterSolUsd, toUnits, SOLANA_DEFAULT_CAPS } from '../../packages/sdk/src/solana.ts';
@@ -37,15 +38,16 @@ const TRADE_PATHS = /^\/v1\/(trades\/(buy|sell)$|orders\/[a-z-]+$|twap$|bulk\/(b
 /** The share-price check for a JupiterZ (RFQ) fill, on the maker's ACTUAL output: a stock bought or sold through RFQ must fill near the underlying share price,
  *  exactly like a normal route (checkFillPrice). Returns the refusal reason, or undefined to allow. Fails closed: with no SOL price or no share price, RFQ is not
  *  used (the normal route, checked when the request came in, runs instead). A trade that is not a registered stock is not affected. */
-export function rfqFillCheck(d: { solUsd: () => Promise<{ price: number; at: number } | null>; prices: JupiterStockPrices; stockState: (mint: string) => Promise<{ decimals: number; multiplier: string }>; maxDeviationPct: number }) {
+export function rfqFillCheck(d: { solUsd: () => Promise<{ price: number; at: number } | null>; prices: JupiterStockPrices; stockState: (mint: string) => Promise<{ decimals: number; multiplier: string }>; maxDeviationPct: number; /** Names the route in a refusal (default RFQ). */ label?: string }) {
+  const label = d.label ?? 'RFQ';
   return async (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }, outAmount: bigint): Promise<string | undefined> => {
     const buy = stockByMint(tx.tokenOut), sell = buy ? undefined : stockByMint(tx.tokenIn), stock = buy ?? sell; if (!stock) return undefined;
-    if ((buy ? tx.tokenIn : tx.tokenOut) !== NATIVE) return 'the RFQ share-price check covers SOL trades only';
+    if ((buy ? tx.tokenIn : tx.tokenOut) !== NATIVE) return `the ${label} share-price check covers SOL trades only`;
     const [st, sol, ref] = await Promise.all([d.stockState(stock.mint), d.solUsd(), d.prices.get([stock.mint]).then(m => m.get(stock.mint)?.stockPrice ?? null)]);
-    if (!sol) return 'no SOL price right now, so the RFQ fill cannot be checked against the share price';
-    if (!ref) return `no share price for ${underlying(stock)} right now, so the RFQ fill cannot be checked`;
+    if (!sol) return `no SOL price right now, so the ${label} fill cannot be checked against the share price`;
+    if (!ref) return `no share price for ${underlying(stock)} right now, so the ${label} fill cannot be checked`;
     const r = checkFillPrice({ side: buy ? 'buy' : 'sell', solLamports: buy ? tx.amountIn : outAmount, tokensRaw: buy ? outAmount : tx.amountIn, decimals: st.decimals, multiplier: st.multiplier, solUsd: sol.price, referenceUsd: ref, maxDeviationPct: d.maxDeviationPct });
-    return r.ok ? undefined : `RFQ ${r.why}`;
+    return r.ok ? undefined : `${label} ${r.why}`;
   };
 }
 
@@ -72,17 +74,40 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
     return { st, check: checkFillPrice({ side, solLamports: side === 'buy' ? amount : out, tokensRaw: side === 'buy' ? out : amount, decimals: st.decimals, multiplier: st.multiplier, solUsd: sol.price, referenceUsd: ref, maxDeviationPct: maxDev }) };
   };
   /** A stock trade must fill near the share price: refuses broken or thin routes (Ondo on Solana filled at about 3x the share price) that Jupiter's impact figure does not show. */
+  /** A stock whose pools are too thin (Ondo on Solana) may still trade at JupiterZ sizes: what makers quote now, held to the same share-price check. Undefined when
+   *  JupiterZ is off, the trade is below its threshold or no maker quotes; else the check. The trade itself re-asks, gates and simulates (solchain.ts tryRfq), and if
+   *  RFQ is not used then, the normal route is checked again on its real output (checkFallback below). */
+  const rfqCheck = async (mint: string, side: 'buy' | 'sell', amount: bigint) => {
+    const z = c.jupiterz; if (!z || (side === 'buy' && amount < z.minLamports)) return undefined;
+    const q = await fetchRfqQuote({ inputMint: side === 'buy' ? WSOL : mint, outputMint: side === 'buy' ? mint : WSOL, amount, apiKey: c.jupiterApiKey }).catch(() => ({ none: 'no answer' }));
+    if ('none' in q || (side === 'sell' && q.outAmount < z.minLamports)) return undefined;
+    const [st, sol, ref] = await Promise.all([stockState(mint), solUsd(), prices.get([mint]).then(m => m.get(mint)?.stockPrice ?? null)]); if (!sol) return undefined;
+    return checkFillPrice({ side, solLamports: side === 'buy' ? amount : q.outAmount, tokensRaw: side === 'buy' ? q.outAmount : amount, decimals: st.decimals, multiplier: st.multiplier, solUsd: sol.price, referenceUsd: ref, maxDeviationPct: maxDev });
+  };
   const stockPriceCheck = async (s: Awaited<ReturnType<typeof createSolanaTrader>>, stock: NonNullable<ReturnType<typeof stockByMint>>, side: 'buy' | 'sell', amount: bigint) => {
-    const { check } = await fill(s, stock.mint, side, amount);
-    if (!check) throw new SdkError('no_route', `no route prices ${stock.symbol} right now`, 'Retry shortly.', 503);
+    const { check: pool } = await fill(s, stock.mint, side, amount);
+    const rfq = !pool?.ok || !pool.referenceUsd ? await rfqCheck(stock.mint, side, amount) : undefined;
+    if (rfq?.ok && rfq.referenceUsd) return;   // makers fill it near the share price
+    const check = pool;
+    const mm = c.jupiterz && stock.market.rfq ? ` Market makers (JupiterZ) quote ${stock.symbol} from ${Number(c.jupiterz.minLamports) / 1e9} SOL.` : '';
+    if (!check) throw new SdkError('no_route', `no route prices ${stock.symbol} right now`, `Retry shortly.${mm}`, 503);
     if (!check.referenceUsd) throw new SdkError('no_reference_price', `the share price of ${underlying(stock)} is not available right now, so the fill cannot be checked`, 'Retry shortly, or send allowRiskyToken: true to trade without the check.', 503);
-    if (!check.ok) throw new SdkError('bad_price', check.why!, 'Try another issuer of the same stock (GET /v1/stocks), a smaller amount, or send allowRiskyToken: true to trade anyway.', 409);
+    if (!check.ok) throw new SdkError('bad_price', check.why!, `Try another issuer of the same stock (GET /v1/stocks), a ${mm ? 'larger or ' : ''}smaller amount, or send allowRiskyToken: true to trade anyway.${mm}`, 409);
   };
   const stocksOff = () => new SdkError('stocks_disabled', 'buying tokenized stocks is not enabled on this server', 'The operator enables it (STOCKS_ENABLED=1) after checking that its users may hold them: no issuer offers them to US persons.', 403);
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
     const link = readLink(state('solwallet'));
     const set = readSettings(state('settings')), mev = { enabled: set.mevProtection, maxTipLamports: toUnits(set.maxTipSol, 9, 'maxTipSol'), jito: c.jito };
-    const jupiterz = c.jupiterz ? { ...c.jupiterz, checkFill: rfqFillCheck({ solUsd, prices, stockState, maxDeviationPct: maxDev }) } : undefined;
+    // JupiterZ: a stock sell is sized by the maker's output (thin pools give a far too low minOut); when RFQ is not used, a stock trade's normal route is checked on its
+    // simulated output before signing, so a trade let in by a maker's quote never falls back to a thin pool. Mints this user traded with allowRiskyToken skip that check
+    // (kept in memory: after a restart the check applies again, the safe side).
+    const risky = new Set<string>(), fallbackFill = rfqFillCheck({ solUsd, prices, stockState, maxDeviationPct: maxDev, label: 'the normal route:' });
+    const jupiterz = c.jupiterz ? { ...c.jupiterz, checkFill: rfqFillCheck({ solUsd, prices, stockState, maxDeviationPct: maxDev }),
+      sizeByQuote: (tx: { tokenIn: string; tokenOut: string }) => tx.tokenOut === NATIVE && !!stockByMint(tx.tokenIn),
+      checkFallback: async (tx: { tokenIn: string; tokenOut: string; amountIn: bigint; minOut: bigint }, out: bigint) => {
+        const st = stockByMint(tx.tokenOut) ?? stockByMint(tx.tokenIn); if (!st || risky.has(st.mint) || (tx.tokenIn !== NATIVE && tx.tokenOut !== NATIVE)) return undefined;
+        return fallbackFill(tx, out);
+      } } : undefined;
     const s = await createSolanaTrader({ userId, jupiterApiKey: c.jupiterApiKey, jupiterz, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, tokenSafety: set.tokenSafety, fees: c.fees ? () => c.fees!(userId) : undefined, caps: c.caps, venues: c.venues, solUsd, log: c.log });
     live.set(userId, s);
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
@@ -97,6 +122,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
       if (raw && typeof raw === 'object') { const t = raw.token ?? raw.mint ?? raw.stock; if (typeof t === 'string' && !looksLikeMint(t)) { const a = findStock(t); if (a) { raw = { ...raw, token: a.mint }; delete raw.mint; } } delete raw?.stock; }
       const tok = raw?.token ?? raw?.mint; if (typeof tok === 'string') await s.prepare(tok);   // learn the token first: plain units need its decimals
       const stock = typeof tok === 'string' ? stockByMint(tok) : undefined;
+      if (stock && raw?.allowRiskyToken === true) risky.add(stock.mint);
       if (stock && raw.perShare === true) raw = await perShareBody(raw, await stockState(stock.mint), isBuy(path, raw));
       const body = await s.simple(path, raw);
       if (trades || typeof tok === 'string') await s.sync();   // the chain's clock (deadlines) and pool state (quotes) as of now, not as of the last tick
@@ -163,7 +189,7 @@ export function linkRoutes(o: { privy: PrivyApi; safety?: (userId: string, mint:
         const hit = STOCKS_SOLANA.filter(a => (all || a.market.tradable) && (!q || a.symbol.toLowerCase() === q || a.underlying.toLowerCase() === q || a.symbol.toLowerCase().startsWith(q)) && (!iss || a.issuer.toLowerCase().includes(iss)))
           .sort((x, y) => Number(y.market.tradable) - Number(x.market.tradable) || (y.market.liquidityUsd ?? -1) - (x.market.liquidityUsd ?? -1) || x.symbol.localeCompare(y.symbol));
         return { buyEnabled: o.stocksEnabled?.() ?? false, total: hit.length, offset, registry: { generatedAt: STOCK_LIST_META.generatedAt, verified: STOCK_LIST_META.verified, tradable: STOCK_LIST_META.tradable },
-          stocks: hit.slice(offset, offset + limit).map(a => ({ symbol: a.symbol, underlying: underlying(a), issuer: a.issuer, mint: a.mint, decimals: a.decimals, liquidityUsd: a.market.liquidityUsd, routeDeviationPct: a.market.deviationPct, tradable: a.market.tradable })),
+          stocks: hit.slice(offset, offset + limit).map(a => ({ symbol: a.symbol, underlying: underlying(a), issuer: a.issuer, mint: a.mint, decimals: a.decimals, liquidityUsd: a.market.liquidityUsd, routeDeviationPct: a.market.deviationPct, tradable: a.market.tradable, rfqOnly: a.market.rfq && !a.market.pool })),
           note: 'Not for US persons or other restricted jurisdictions (issuer terms). "tradable" is the last registry run; every trade is re-checked against the share price. One token can be more than one share after dividends: GET /v1/stocks/:symbol shows the multiplier.' };
       } },
     { method: 'GET', path: '/v1/stocks/:symbol', scope: 'read', summary: 'One stock: multiplier (shares per token), issuer pause, the share price, what the best route pays per share now, and your holding in shares',

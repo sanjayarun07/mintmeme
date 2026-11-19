@@ -463,7 +463,9 @@ addEventListener('hashchange', route);
 async function boot() {
   CFG = await (await fetch('/api/config')).json();
   $('#st-node').textContent = CFG.rpc; $('#st-jup').textContent = CFG.keyed ? 'Jupiter API key' : 'Jupiter keyless';
-  $('#mint').innerHTML = CFG.stocks.map(s => `<option value="${s.mint}">${esc(s.symbol)} · ${esc(s.issuer)}</option>`).join('');
+  // grouped by issuer; a stock with no usable pool (Ondo) trades through market makers only
+  const groups = [...new Set(CFG.stocks.map(s => s.issuer))];
+  $('#mint').innerHTML = groups.map(g => `<optgroup label="${esc(g)}">${CFG.stocks.filter(s => s.issuer === g).map(s => `<option value="${s.mint}">${esc(s.symbol)}${s.rfqOnly ? ' (market makers only)' : ''}</option>`).join('')}</optgroup>`).join('');
   const t = CFG.stocks.find(s => s.symbol === 'TSLAx'); if (t) $('#mint').value = t.mint;
   const EV = CFG.evmStocks ?? { base: { label: 'Base', native: 'ETH', symbols: CFG.baseStocks ?? [] } };
   $('#base-chain').innerHTML = Object.entries(EV).map(([k, v]) => `<option value="${esc(k)}">${esc(v.label)}</option>`).join('');

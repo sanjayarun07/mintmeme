@@ -31,7 +31,8 @@
     "server:merge": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/merge-namespaces.ts",
     "privy:evm-policy": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/privy-evm-policy.ts",
     "setup:check": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings scripts/setup-check.ts",
-    "test:pg": "PG_TEST_URL=${PG_TEST_URL:-postgres://memedesk:memedesk-local-pw@127.0.0.1:55433/memedesk_test} npm test"
+    "test:pg": "PG_TEST_URL=${PG_TEST_URL:-postgres://memedesk:memedesk-local-pw@127.0.0.1:55433/memedesk_test} npm test",
+    "stocks:rfq": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/rfqregistry.ts"
   },
   "engines": {
     "node": ">=22.18"

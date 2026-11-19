@@ -13,7 +13,7 @@ const TSLAX = 'XsDoVfqeBukxuZHWhdvWHBhgEHjGNst4MLodqsJHzoB', WSOL = 'So111111111
 const mem = () => { const m = new Map<string, string>(); return (n: string) => ({ read: () => m.get(n), write: (d: string) => { m.set(n, d); }, describe: () => n }); };
 
 /** The world: SOL at $100, TSLA at $400 a share. `perSol` raw TSLAx (8 decimals) per 1 SOL: 25_000_000 is the fair 0.25 share. */
-function world(o: { perSol?: bigint; multiplier?: string; paused?: boolean; held?: bigint; stockPrice?: number | null } = {}) {
+function world(o: { perSol?: bigint; multiplier?: string; paused?: boolean; held?: bigint; stockPrice?: number | null; /** JupiterZ makers' raw TSLAx per SOL (absent: no maker quotes) */ makerPerSol?: bigint } = {}) {
   const mint = { owner: T22, lamports: 1, data: { program: 'spl-token-2022', parsed: { type: 'mint', info: { decimals: 8, supply: '1000000000000', mintAuthority: 'MintAuth111', freezeAuthority: XSTOCKS_KEYS.freezeAuthority, isInitialized: true, extensions: [
     { extension: 'permanentDelegate', state: { delegate: XSTOCKS_KEYS.permanentDelegate } }, { extension: 'defaultAccountState', state: { accountState: 'initialized' } },
     { extension: 'scaledUiAmountConfig', state: { multiplier: o.multiplier ?? '1', newMultiplier: o.multiplier ?? '1', newMultiplierEffectiveTimestamp: 0 } },
@@ -32,16 +32,19 @@ function world(o: { perSol?: bigint; multiplier?: string; paused?: boolean; held
     return { inputMint: i, outputMint: out, inAmount: String(amt), outAmount: String(outAmount), otherAmountThreshold: String(outAmount * 99n / 100n), swapMode: 'ExactIn', slippageBps: 50, priceImpactPct: '0', contextSlot: 100, routePlan: [] }; };
   const fetchFn = (async (url: any, init?: any) => { const u = new URL(String(url));
     if (u.pathname.endsWith('/quote')) return new Response(JSON.stringify(quote(u)), { status: 200 });
+    if (u.pathname.endsWith('/swap/v2/order')) { if (!o.makerPerSol || u.searchParams.get('excludeRouters') !== 'metis,dflow,okx' || u.searchParams.has('taker')) return new Response(JSON.stringify({ error: 'no quote' }), { status: 200 });
+      const i = u.searchParams.get('inputMint')!, amt = BigInt(u.searchParams.get('amount')!), out = i === WSOL ? amt * o.makerPerSol / 1_000_000_000n : amt * 1_000_000_000n / o.makerPerSol;
+      return new Response(JSON.stringify({ router: 'jupiterz', inputMint: i, outputMint: u.searchParams.get('outputMint'), inAmount: String(amt), outAmount: String(out) }), { status: 200 }); }
     if (init?.method === 'POST') { const b = JSON.parse(init.body); return new Response(JSON.stringify({ jsonrpc: '2.0', id: b.id, result: rpc(b.method, b.params ?? []) }), { status: 200 }); }
     throw new Error(`unscripted fetch ${u}`); }) as typeof fetch;
   const prices = new JupiterStockPrices({ fetchFn: (async () => new Response(JSON.stringify(o.stockPrice === null ? {} : { [TSLAX]: { usdPrice: 400, stockData: { price: o.stockPrice ?? 400 } } }))) as any });
   return { fetchFn, prices };
 }
 
-async function account(w: ReturnType<typeof world>, enabled: boolean) {
+async function account(w: ReturnType<typeof world>, enabled: boolean, extra: Partial<Parameters<typeof solanaAccounts>[0]> = {}) {
   const seed = randomBytes(32), addr = new DevSolSigner().add(seed), fp = fakePrivy({ seed });
   const real = globalThis.fetch; globalThis.fetch = w.fetchFn;   // the RPC client and Jupiter quotes inside createSolanaTrader use the global fetch
-  const acc = solanaAccounts({ rpcUrl: 'http://rpc.test', privy: { ...fp.cfg, fetchFn: fp.fetchFn }, solUsd: async () => ({ price: 100, at: Date.now() }), stocks: { enabled, prices: w.prices } });
+  const acc = solanaAccounts({ rpcUrl: 'http://rpc.test', privy: { ...fp.cfg, fetchFn: fp.fetchFn }, solUsd: async () => ({ price: 100, at: Date.now() }), stocks: { enabled, prices: w.prices }, ...extra });
   const state = mem(); state('solwallet').write(JSON.stringify({ address: addr, walletId: 'wallet-1', linkedAt: 1 }));
   const a = await acc.make('alice', state);
   return { acc, a, addr, restore: () => { globalThis.fetch = real; } };
@@ -68,6 +71,28 @@ test('stocks: a buy whose route fills near the share price passes; one far above
   try { assert.equal((await cheap.a.prepare({ token: 'TSLAx', sol: '0.1' }, '/v1/trades/buy')).token, TSLAX); await assert.rejects(cheap.a.prepare({ token: 'TSLAx', amount: '1000000' }, '/v1/trades/sell'), code('bad_price')); } finally { cheap.restore(); }
   const blind = await account(world({ stockPrice: null }), true);
   try { await assert.rejects(blind.a.prepare({ token: 'TSLAx', sol: '0.1' }, '/v1/trades/buy'), code('no_reference_price')); } finally { blind.restore(); }
+});
+
+test('stocks: a thin pool route (the Ondo case) is accepted at JupiterZ sizes when makers quote near the share price; below the threshold, or an unfair maker, it is refused', async () => {
+  const big = { caps: { maxTradeLamports: 50_000_000_000n, dailyCapLamports: 100_000_000_000n }, jupiterz: { minLamports: 13_000_000_000n, marginBps: 20 } };
+  // pool pays $1,250 a share, makers $400: a 20 SOL buy passes, a 1 SOL buy (below 13 SOL) is refused
+  const fair = await account(world({ perSol: 8_000_000n, makerPerSol: 25_000_000n }), true, big);
+  try {
+    assert.equal((await fair.a.prepare({ token: 'TSLAx', sol: '20' }, '/v1/trades/buy')).token, TSLAX);
+    await assert.rejects(fair.a.prepare({ token: 'TSLAx', sol: '1' }, '/v1/trades/buy'), code('bad_price'));
+  } finally { fair.restore(); }
+  // JupiterZ off: the same 20 SOL buy is refused on the pool route
+  const off = await account(world({ perSol: 8_000_000n, makerPerSol: 25_000_000n }), true, { caps: big.caps });
+  try { await assert.rejects(off.a.prepare({ token: 'TSLAx', sol: '20' }, '/v1/trades/buy'), code('bad_price')); } finally { off.restore(); }
+  // makers quote as badly as the pool: refused
+  const unfair = await account(world({ perSol: 8_000_000n, makerPerSol: 8_000_000n }), true, big);
+  try { await assert.rejects(unfair.a.prepare({ token: 'TSLAx', sol: '20' }, '/v1/trades/buy'), code('bad_price')); } finally { unfair.restore(); }
+  // a sell: the pool pays $125 a share, makers $400 for 5 shares (20 SOL): passes; 0.25 share (1 SOL from makers, below 13 SOL) is refused
+  const sell = await account(world({ perSol: 80_000_000n, makerPerSol: 25_000_000n }), true, big);
+  try {
+    assert.equal((await sell.a.prepare({ token: 'TSLAx', amount: '500000000' }, '/v1/trades/sell')).token, TSLAX);
+    await assert.rejects(sell.a.prepare({ token: 'TSLAx', amount: '25000000' }, '/v1/trades/sell'), code('bad_price'));
+  } finally { sell.restore(); }
 });
 
 test('stocks: perShare takes shares and USD per share, converted with the multiplier (one token = 1.25 shares here)', async () => {
