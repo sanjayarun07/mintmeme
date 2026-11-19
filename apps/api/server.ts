@@ -93,9 +93,10 @@ export function openapi(rs: Route[]) {
 
 export function createApi(o: ApiOptions) {
   const now = o.now ?? Date.now, rate = o.rate ?? { perSecond: 20, burst: 40 };
-  const keys = o.keys.map(k => {
+  const compile = (list: ApiKey[]) => list.map(k => {
     if (k.keyHash !== undefined) { if (!/^[0-9a-f]{64}$/i.test(k.keyHash)) throw new Error('keyHash must be 64 hex characters (SHA-256)'); return { h: Buffer.from(k.keyHash, 'hex'), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; }
     if (!k.key || k.key.length < 16) throw new Error('API keys must be at least 16 characters'); return { h: sha(k.key), userId: k.userId, scope: k.scope ?? 'trade' as const, label: k.label }; });
+  let keys = compile(o.keys);
   const rs = [...routes(o), ...(o.extraRoutes ?? [])], compiled = rs.map(r => ({ r, re: new RegExp('^' + r.path.replace(/:(\w+)/g, '(?<$1>[^/]+)') + '$') }));
   const buckets = o.buckets ?? new Map<string, { tokens: number; at: number }>(); const streams = new Map<string, Set<http.ServerResponse>>(); const wired = new WeakSet<Trader>();   // per Trader: a user re-created on this node gets its new Trader wired
   const send = (res: http.ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) => { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', ...extra }); res.end(typeof body === 'string' ? body : toJson(body)); };
@@ -150,5 +151,7 @@ export function createApi(o: ApiOptions) {
   });
   /** End a user's open event streams (their account moved to another node or stopped here); clients reconnect and reach the new owner. */
   const endStreams = (userId: string) => { for (const r of streams.get(userId) ?? []) r.end(); streams.delete(userId); };
-  return { server, routes: rs, userOf: (req: http.IncomingMessage) => { const k = keyOf(req); if (!k) return undefined; const p = who(req, k); return 'error' in p ? undefined : p.userId; }, endStreams, listen: (port = 0, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))), close: () => { for (const s of streams.values()) for (const r of s) r.end(); return new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); }); } };
+  /** Replace the keys (a reloaded keys file): new keys work on the next request, removed ones get 401. Open event streams of a removed key end. Throws on a bad key, keeping the old set. */
+  const setKeys = (list: ApiKey[]) => { const next = compile(list), gone = keys.filter(k => !next.some(n => timingSafeEqual(n.h, k.h))); keys = next; for (const k of gone) if (!keys.some(n => n.userId === k.userId)) for (const u of [...streams.keys()]) if (u === k.userId || u.startsWith(k.userId + ':')) endStreams(u); return keys.length; };
+  return { server, routes: rs, setKeys, userOf: (req: http.IncomingMessage) => { const k = keyOf(req); if (!k) return undefined; const p = who(req, k); return 'error' in p ? undefined : p.userId; }, endStreams, listen: (port = 0, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))), close: () => { for (const s of streams.values()) for (const r of s) r.end(); return new Promise<void>(ok => { server.close(() => ok()); server.closeAllConnections?.(); }); } };
 }

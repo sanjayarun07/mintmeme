@@ -143,7 +143,7 @@ rules, with that chain's router). Not yet traded on either mainnet.
 - **Failover.** A node renews its leases every `LEASE_TTL_MS / 3`. A node that dies stops renewing; after the TTL another node takes the user over and **resumes from Redis**:
   same order ids, same idempotency keys, so nothing trades twice.
 - **Graceful shutdown.** On SIGTERM a node stops claiming, stops its `Trader`s and **releases** its leases, so other nodes take over at once.
-- **Keys.** The server holds only SHA-256 hashes of API keys (`API_KEYS_FILE`). Make keys with `npm run server:key -- <user> [trade|read]`: the secret is printed once.
+- **Keys.** The server holds only SHA-256 hashes of API keys (`API_KEYS_FILE`). Make and revoke keys in the key dashboard (`npm run keys`, [API_KEYS.md](API_KEYS.md)) or with `npm run server:key -- <user> [trade|read]`: the secret is shown once. Each node re-reads the file within about 2 seconds; no restart.
 
 ## Measured (this machine, 2026-11-17)
 
@@ -194,7 +194,7 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 |---|---|---|
 | `REDIS_URL` | required | `redis://[:password@]host:6379`. No TLS client: keep Redis on a private network. |
 | `NODE_PUBLIC_URL` | required | How the other nodes reach this one. Must be routable between nodes. |
-| `API_KEYS_FILE` | required | Lines of `sha256hex:userId[:read\|trade]`. Plain keys are refused. |
+| `API_KEYS_FILE` | required | Lines of `sha256hex:userId[:read\|trade\|app]`. Plain keys are refused. Re-read within ~2 s when it changes ([API_KEYS.md](API_KEYS.md)). |
 | `PORT`, `HOST` | 3500, 127.0.0.1 | `HOST=0.0.0.0` in a container. |
 | `NAMESPACE` | memedesk | Redis key prefix. One namespace per environment. |
 | `LEASE_TTL_MS` | 15000 | Worst-case takeover time after a crash. Lower = faster failover, more renewals. |
@@ -271,7 +271,7 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 - **Webhooks are best effort:** retried in memory (2 s, 10 s, 60 s) by the node that runs the end user; lost if that node stops before delivery. Every registered end user is
   claimed by the sweep like any user, so many idle end users cost node capacity (MAX_USERS_PER_NODE) even without orders.
 - **Redis calls are synchronous** (they block the node's event loop for each call: sub-millisecond on a LAN). Very large user counts per node need measuring.
-- **Key rotation** means editing `API_KEYS_FILE` on every node and rolling them. No key management API.
+- **Key rotation** means changing `API_KEYS_FILE` on every node (the key dashboard writes one file; nodes re-read it within 2 s, no roll needed). There is no key management HTTP API on the nodes themselves.
 - **TLS** is the load balancer's job; the nodes speak plain HTTP on the private network.
 - **Practice balances** are not durable: a user's simulated world is rebuilt with fresh fake funds on the node that takes it over. Orders and the trade journal are durable.
 - Load-tested on one machine with a local Redis only (throughput section above); nothing above 300 users per node or with a networked Redis has been measured.

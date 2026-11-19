@@ -21,7 +21,7 @@ Environment (read at start; put them in the client config below, or in `.env` wh
 | Variable | Meaning | Default |
 |---|---|---|
 | `MEME_API_URL` | The execution server | `http://127.0.0.1:3501` |
-| `MEME_API_KEY` | An API key for it (`apps/server/keys.ts`; a `read` key is enough for the read-only tools) | none: keyed tools refuse |
+| `MEME_API_KEY` | An API key for it: make one in the key dashboard (`npm run keys`, [API_KEYS.md](API_KEYS.md)), which also gives you the config below filled in. A `read` key is enough for the read-only tools | none: keyed tools refuse |
 | `MEME_USER_ID` | With an app key: the end user (sent as `X-User-Id`) | none |
 | `MEME_PRACTICE_URL`, `MEME_PRACTICE_API_KEY` | A separate practice server (`npm run api`). Without them `practice` goes to `/v1/practice/` on `MEME_API_URL` | none |
 | `RFQ_DESK_URL` | The RFQ desk | `http://127.0.0.1:3700` |

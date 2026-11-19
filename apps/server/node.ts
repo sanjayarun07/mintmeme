@@ -305,6 +305,8 @@ export async function createNode(o: NodeOptions) {
 
   return {
     server, owned, metrics: m, sweep, claim, chains: [...chainIds], defaultChain,
+    /** Swap in a reloaded keys file on every chain's API (main.ts watches API_KEYS_FILE). Throws on a bad key and keeps the old set. */
+    setKeys(keys: ApiKey[]) { for (const a of apis.values()) a.setKeys(keys); for (const u of new Set(keys.map(k => k.userId))) r.cmd('SADD', usersKey(o.namespace), u); return keys.length; },
     listen: (port: number, host = '127.0.0.1') => new Promise<number>(ok => server.listen(port, host, () => ok((server.address() as any).port))),
     /** Graceful shutdown: stop claiming (after claims in progress settle), stop every Trader, release every lease (others take over at once), close HTTP and Redis. */
     async drain() { await stopServing(); hooks.stop(); clearInterval(beat); try { r.cmd('DEL', nodeKey(o.namespace, o.publicUrl)); } catch { /* going away anyway */ } await history?.stop().catch(() => {}); for (const u of [...owned.keys()]) drop(u, 'released'); await closeHttp(); for (const x of apis.values()) await x.close().catch(() => {}); r.close(); log('drained'); },

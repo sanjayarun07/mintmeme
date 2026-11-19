@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Meme API keys</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Fira+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  color-scheme:light;
+  --bg:#F5F6FB; --card:#FFFFFF; --sunk:#F8F9FD; --fg:#182137; --muted:#59677F; --border:#E2E6F0; --border-strong:#C8D0E0;
+  --accent:#5948D6; --accent-bg:#EEEAFE; --pos:#167A50; --pos-bg:#E9F7EF; --neg:#BC3648; --neg-bg:#FCECEF; --warn:#8A5A00; --warn-bg:#FFF5DB; --ring:#5948D6;
+  --btn:#5948D6; --btn-fg:#FFFFFF;
+  --r:6px; --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px;
+  --sans:'Fira Sans',system-ui,sans-serif; --mono:'Fira Code',ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){ :root:not([data-theme=light]){
+  color-scheme:dark;
+  --bg:#0B1020; --card:#151C2E; --sunk:#101729; --fg:#F1F3FF; --muted:#A7B1CB; --border:#293550; --border-strong:#3A4867;
+  --accent:#A79BFF; --accent-bg:#29264C; --pos:#5DD3A0; --pos-bg:#15382D; --neg:#FF8793; --neg-bg:#41232D; --warn:#FFCF6B; --warn-bg:#3A2E12; --ring:#C0B9FF;
+  --btn:#A79BFF; --btn-fg:#141626;
+}}
+:root[data-theme=dark]{
+  color-scheme:dark;
+  --bg:#0B1020; --card:#151C2E; --sunk:#101729; --fg:#F1F3FF; --muted:#A7B1CB; --border:#293550; --border-strong:#3A4867;
+  --accent:#A79BFF; --accent-bg:#29264C; --pos:#5DD3A0; --pos-bg:#15382D; --neg:#FF8793; --neg-bg:#41232D; --warn:#FFCF6B; --warn-bg:#3A2E12; --ring:#C0B9FF;
+  --btn:#A79BFF; --btn-fg:#141626;
+}
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--fg);font:14px/20px var(--sans);font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
+body{margin:0;min-height:100vh;background:var(--bg)}
+button,input,select,textarea{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.mono{font-family:var(--mono);font-size:12px}
+.muted{color:var(--muted)}
+[hidden]{display:none!important}
+
+.top{height:48px;border-bottom:1px solid var(--border);background:var(--card);position:sticky;top:0;z-index:2}
+.top-in,.page{max-width:1040px;margin:0 auto;padding:0 var(--s5)}
+.top-in{height:100%;display:flex;align-items:center;gap:var(--s4)}
+.brand{font-weight:700;font-size:16px;white-space:nowrap}
+.brand span{color:var(--muted);font-weight:500}
+.grow{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:12px;font-size:12px;font-weight:500;background:var(--sunk);border:1px solid var(--border);color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:60vw}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.pill.ok .dot{background:var(--pos)} .pill.bad .dot{background:var(--neg)}
+.icon-btn{height:32px;width:32px;display:grid;place-items:center;border-radius:var(--r);border:1px solid var(--border);background:var(--card)}
+
+.page{padding-top:var(--s5);padding-bottom:var(--s6);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s5)}
+.page>*,.reveal>*{min-width:0}
+h1{font-size:22px;line-height:28px;margin:0 0 var(--s1)}
+h2{font-size:15px;line-height:20px;margin:0}
+.lede{margin:0;color:var(--muted);max-width:720px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px}
+.card-h{display:flex;align-items:center;gap:var(--s3);padding:var(--s4) var(--s5);border-bottom:1px solid var(--border)}
+.card-b{padding:var(--s5)}
+
+.form{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:var(--s4) var(--s5)}
+.field{display:grid;gap:6px;min-width:0}
+.field label,.legend{font-weight:600;font-size:13px}
+.hint{font-size:12px;line-height:16px;color:var(--muted)}
+input[type=text],input[type=password]{height:36px;padding:0 var(--s3);border:1px solid var(--border-strong);border-radius:var(--r);background:var(--card);width:100%}
+input[aria-invalid=true]{border-color:var(--neg)}
+.scopes{grid-column:1/-1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s3);border:0;padding:0;margin:0}
+.scope{position:relative;display:grid;gap:4px;padding:var(--s3) var(--s4);border:1px solid var(--border-strong);border-radius:8px;background:var(--card);cursor:pointer}
+.scope input{position:absolute;opacity:0;pointer-events:none}
+.scope b{font-size:14px}
+.scope:has(input:checked){border-color:var(--accent);background:var(--accent-bg);box-shadow:inset 0 0 0 1px var(--accent)}
+.scope:has(input:focus-visible){outline:2px solid var(--ring);outline-offset:2px}
+.actions{grid-column:1/-1;display:flex;align-items:center;gap:var(--s3);flex-wrap:wrap}
+.btn{height:36px;padding:0 var(--s4);border-radius:var(--r);border:1px solid transparent;background:var(--btn);color:var(--btn-fg);font-weight:600}
+.btn:disabled{opacity:.6;cursor:default}
+.btn.ghost{background:var(--card);color:var(--fg);border-color:var(--border-strong)}
+.btn.sm{height:28px;padding:0 var(--s3);font-size:13px}
+.btn.danger{background:var(--neg);color:var(--card)}
+.err{color:var(--neg);font-size:13px}
+
+.reveal{border:1px solid var(--warn);background:var(--warn-bg);border-radius:8px;padding:var(--s4) var(--s5);display:grid;grid-template-columns:minmax(0,1fr);gap:var(--s3)}
+.reveal h2{color:var(--warn)}
+.secret{display:flex;gap:var(--s2);align-items:stretch}
+.secret code{flex:1;min-width:0;display:flex;align-items:center;padding:0 var(--s3);height:40px;background:var(--card);border:1px solid var(--border-strong);border-radius:var(--r);font:500 13px var(--mono);overflow-x:auto;white-space:nowrap}
+.tabs{display:flex;gap:var(--s1);border-bottom:1px solid var(--border);overflow-x:auto}
+.tabs button{border:0;background:none;padding:var(--s2) var(--s3);color:var(--muted);font-weight:500;border-bottom:2px solid transparent;white-space:nowrap}
+.tabs button[aria-selected=true]{color:var(--fg);border-bottom-color:var(--fg)}
+.snip{position:relative}
+.snip pre{margin:0;padding:var(--s3) var(--s4);padding-right:84px;background:var(--card);border:1px solid var(--border);border-radius:var(--r);font:12px/18px var(--mono);overflow-x:auto;white-space:pre}
+.snip .btn{position:absolute;top:var(--s2);right:var(--s2)}
+
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:0 var(--s4);height:44px;border-bottom:1px solid var(--border);white-space:nowrap}
+th{height:36px;font-size:12px;font-weight:600;color:var(--muted);background:var(--sunk)}
+tr:last-child td{border-bottom:0}
+td.act{text-align:right}
+.badge{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:11px;font-size:12px;font-weight:600}
+.badge.read{background:var(--sunk);color:var(--muted);border:1px solid var(--border)}
+.badge.trade{background:var(--neg-bg);color:var(--neg)}
+.badge.app{background:var(--accent-bg);color:var(--accent)}
+.empty{padding:var(--s6) var(--s5);text-align:center;color:var(--muted)}
+.foot{font-size:12px;color:var(--muted);display:grid;gap:4px}
+.table-wrap{overflow-x:auto}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:8px 14px;border-radius:var(--r);font-size:13px;font-weight:500}
+
+@media (max-width:720px){
+  .top-in,.page{padding:0 var(--s4)}
+  .page{padding-top:var(--s4)}
+  .form,.scopes{grid-template-columns:1fr}
+  .card-b{padding:var(--s4)}
+  .hide-sm{display:none}
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in">
+  <div class="brand">Meme <span>API keys</span></div>
+  <div class="grow"></div>
+  <span class="pill" id="status"><span class="dot"></span><span id="status-t">Checking the server…</span></span>
+  <button class="icon-btn" id="theme" type="button" aria-label="Switch light or dark theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg></button>
+</div></header>
+
+<main class="page">
+  <div>
+    <h1>API keys</h1>
+    <p class="lede">One key works for apps calling the HTTP API and for the MCP server that lets Claude trade and read the RFQ desk. The server picks up a new or revoked key within about 2 seconds.</p>
+  </div>
+
+  <section class="card" id="token-card" hidden>
+    <div class="card-h"><h2>Admin token</h2></div>
+    <div class="card-b"><form id="token-form" class="form">
+      <div class="field"><label for="token">KEYS_ADMIN_TOKEN</label><input id="token" type="password" autocomplete="off" required><span class="hint">Kept in this tab only.</span></div>
+      <div class="actions"><button class="btn" type="submit">Unlock</button><span class="err" id="token-err" role="alert"></span></div>
+    </form></div>
+  </section>
+
+  <section class="reveal" id="reveal" hidden aria-live="polite">
+    <h2>Copy this key now. It is not shown again.</h2>
+    <div class="secret"><code id="secret"></code><button class="btn" type="button" data-copy="secret">Copy key</button></div>
+    <div class="tabs" role="tablist" id="snip-tabs"></div>
+    <div class="snip"><pre id="snip"></pre><button class="btn sm ghost" type="button" data-copy="snip">Copy</button></div>
+    <div class="hint" id="snip-hint"></div>
+    <div><button class="btn ghost" type="button" id="done">I saved it</button></div>
+  </section>
+
+  <section class="card" id="new-card" hidden>
+    <div class="card-h"><h2>New key</h2></div>
+    <div class="card-b">
+      <form id="new" class="form" novalidate>
+        <div class="field"><label for="user">User id</label><input id="user" type="text" autocomplete="off" spellcheck="false" maxlength="64" placeholder="alice" required aria-describedby="user-h"><span class="hint" id="user-h">The account the key acts for. Letters, digits, dots, dashes, underscores. Keys of one user share its wallets and orders.</span></div>
+        <div class="field"><label for="label">Label <span class="muted">(optional)</span></label><input id="label" type="text" autocomplete="off" maxlength="60" placeholder="Claude Desktop on my laptop"><span class="hint">So you know which key to revoke later.</span></div>
+        <fieldset class="scopes">
+          <legend class="legend" style="margin-bottom:6px">Scope</legend>
+          <label class="scope"><input type="radio" name="scope" value="read" checked><b>Read</b><span class="hint">Prices, positions, orders, history. With MCP: the read-only tools.</span></label>
+          <label class="scope"><input type="radio" name="scope" value="trade"><b>Trade</b><span class="hint">Read, plus trades and orders with real funds. MCP still asks for confirmation, and needs MCP_ALLOW_TRADES=1.</span></label>
+          <label class="scope"><input type="radio" name="scope" value="app"><b>App</b><span class="hint">One key for an app's many end users, named per call in X-User-Id (MEME_USER_ID for MCP).</span></label>
+        </fieldset>
+        <div class="actions"><button class="btn" type="submit" id="create">Create key</button><span class="err" id="new-err" role="alert"></span></div>
+      </form>
+    </div>
+  </section>
+
+  <section class="card" id="list-card" hidden>
+    <div class="card-h"><h2>Keys</h2><span class="muted" id="count"></span></div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Label</th><th>User</th><th>Scope</th><th class="hide-sm">Created</th><th class="hide-sm">Key id</th><th class="act"><span class="sr" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Actions</span></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+    <div class="empty" id="empty" hidden>No keys yet. Create one above.</div>
+  </section>
+
+  <div class="foot" id="foot"></div>
+</main>
+<div class="toast" id="toast" hidden role="status"></div>
+<script src="/app.js"></script>
+</body>
+</html>

@@ -3,7 +3,7 @@
  *  Environment (see docs/PRODUCTION_SERVER.md):
  *    REDIS_URL           redis://[:password@]host:6379   (required; run Redis with appendonly yes)
  *    NODE_PUBLIC_URL     how the OTHER nodes reach this one, e.g. http://10.0.3.7:3500   (required)
- *    API_KEYS_FILE       file of "sha256hex:userId[:read|trade]" lines (make lines with apps/server/keys.ts)   (required)
+ *    API_KEYS_FILE       file of "sha256hex:userId[:read|trade]" lines (make lines with apps/server/keys.ts or the key dashboard, npm run keys; re-read live within ~2 s)   (required)
  *    PORT=3500  HOST=127.0.0.1 (0.0.0.0 in a container)  NAMESPACE=memedesk  MODE=practice
  *    LEASE_TTL_MS=15000  MAX_USERS_PER_NODE=300  SWEEP_MS=2000  RATE_PER_SECOND=20  RATE_BURST=40  REDIS_REQUIRE_AOF=true
  *    SOLANA_SAMPLE_URL   optional, e.g. http://127.0.0.1:3000: serve the /solana test page (and its /api/sol/* calls) from that running terminal, to THIS machine only
@@ -38,17 +38,8 @@ const env = process.env, fail = (m: string): never => { console.error(m); proces
 const need = (k: string) => env[k] || fail(`${k} is not set. See the header of apps/server/main.ts or docs/PRODUCTION_SERVER.md.`);
 const int = (k: string, d: number, min: number, max: number) => { const v = env[k] === undefined ? d : Number(env[k]); if (!Number.isInteger(v) || v < min || v > max) fail(`${k} must be a whole number from ${min} to ${max}`); return v; };
 
-export function parseKeyFile(text: string): ApiKey[] {
-  const out: ApiKey[] = [];
-  text.split(/\r?\n/).forEach((line, i) => {
-    const s = line.trim(); if (!s || s.startsWith('#')) return;
-    const [keyHash, userId, scope = 'trade'] = s.split(':');
-    if (!/^[0-9a-f]{64}$/i.test(keyHash ?? '') || !userId || (scope !== 'trade' && scope !== 'read' && scope !== 'app')) throw new Error(`API_KEYS_FILE line ${i + 1}: expected "sha256hex:userId[:read|trade|app]" (plain keys are not accepted here)`);
-    out.push({ keyHash, userId, scope });
-  });
-  if (!out.length) throw new Error('API_KEYS_FILE has no keys');
-  return out;
-}
+import { parseKeyFile, watchKeyFile } from './keyfile.ts';
+export { parseKeyFile, watchKeyFile };
 
 /** JupiterZ RFQ fills (docs/JUPITERZ.md), off unless JUPITERZ=on. JUPITERZ_MIN_SOL (default 100): the smallest SOL side that asks market makers; JUPITERZ_MARGIN_BPS
  *  (default 20): how much better than the normal route the firm quote must be. Trades that carry a platform fee never use RFQ (the fee is paid in SOL inside the
@@ -159,6 +150,7 @@ if (import.meta.main) {
     solanaSampleUrl: env.SOLANA_SAMPLE_URL || undefined, pgUrl: env.PG_URL || undefined, statusChecks: real.statusChecks,
     maxUsersPerApp: int('MAX_USERS_PER_APP', 10_000, 1, 10_000_000), maxAppFeeBps: int('APP_FEE_MAX_BPS', 100, 0, 500), webhooks: { allowHttp: env.WEBHOOKS_ALLOW_HTTP === 'true' },
   }).catch(e => fail((e as Error).message));
+  watchKeyFile(env.API_KEYS_FILE!, k => node.setKeys(k));
   if (env.SOLANA_SAMPLE_URL) console.log(`sample page: http://127.0.0.1:${env.PORT ?? 3500}/solana -> ${env.SOLANA_SAMPLE_URL} (this machine only; 404 for remote requests)`);
   const port = await node.listen(int('PORT', 3500, 1, 65_535), env.HOST ?? '127.0.0.1');
   console.log(`execution node on ${env.HOST ?? '127.0.0.1'}:${port} as ${publicUrl} (chains ${mode}${real.chains.length > 1 ? `, default ${real.chains[0].id}: /v1/<chain>/... picks one` : ''}, ${keys.length} key(s); keys are never printed)`);
