@@ -210,6 +210,13 @@ async function quote(body: any, emit: (o: unknown) => void) {
   // after the decision, so these extra quotes never eat into the firm quote's short life
   const vs = await venueQuotes(payMint, mint, amount).catch(() => []);
   if (vs.length) emit({ stage: 'venues', venues: vs.map(v => ('out' in v && v.out ? { ...v, share: share(BigInt(v.out)) } : v)) });
+  // when the maker's quote is behind our route, find how much it fills at market and what a split would give (price-only, nothing is signed)
+  if (!('none' in rfq) && !('error' in build) && rfq.outAmount < build.outAmount) {
+    emit({ stage: 'capacity', pending: true });
+    const ourRoute = { full: build.outAmount, route: async (a: bigint) => (await jup(() => fetchBuild({ ...cfg, inputMint: payMint, outputMint: mint, amount: a, taker, slippageBps: 50 }))).outAmount };
+    const c = await makerCapacity(payMint, mint, amount, ourRoute).catch(e => ({ error: (e as Error).message }));
+    emit({ stage: 'capacity', marginBps, ...c, ...('split' in c && c.split ? { share: share(BigInt(c.split.total)) } : {}) });
+  }
   emit({ stage: 'done' });
 }
 
@@ -297,6 +304,31 @@ async function priceOnly(inputMint: string, outputMint: string, amount: bigint, 
   const u = `https://api.jup.ag/swap/v2/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&excludeRouters=${exclude}`;
   const j: any = await jup(async () => (await fetch(u, { headers: API_KEY ? { 'x-api-key': API_KEY } : {}, signal: AbortSignal.timeout(15_000) })).json()).catch(e => ({ error: (e as Error).message }));
   return j?.outAmount && (exclude !== JUPITERZ.others || j.router === 'jupiterz') ? { out: String(j.outAmount), router: String(j.router ?? '?') } : { none: String(j?.error ?? `won by ${j?.router}`) };
+}
+/** How much a JupiterZ maker fills at market for this buy, and the split it suggests. A maker that runs out of inventory keeps quoting its last few shares for any larger
+ *  input (SPCXx on 2026-11-19: about 353 shares for $100k and for $250k, at market up to about $50k), so its per-share price jumps past that size. Binary search on the
+ *  input: a size is "at market" when the maker's price-only /order pays at least what Jupiter's best other router pays for the same size. Price-only, about 14 paced
+ *  Jupiter calls; nothing is built or signed. `split`: the largest at-market size through the maker plus the rest through the router, against the router alone. */
+async function makerCapacity(inMint: string, outMint: string, amount: bigint, our?: { full: bigint; route: (a: bigint) => Promise<bigint> }) {
+  // right after the venue quotes Jupiter's per-second limit is often spent (an answer with no outAmount and no router): ask again after a pause, twice at most
+  const ask = async (a: bigint, ex: string) => { let r = await priceOnly(inMint, outMint, a, ex);
+    for (let i = 0; i < 2 && 'none' in r && /won by undefined|429|rate/i.test(r.none); i++) { await new Promise(ok => setTimeout(ok, 1500 * (i + 1))); r = await priceOnly(inMint, outMint, a, ex); } return r; };
+  let lo = 0n, hi = amount, best: { size: bigint; rfq: bigint; route: bigint } | undefined, probes = 0, lastNone: string | undefined;
+  for (let i = 0; i < 6 && (hi - lo) * 50n > amount; i++) {
+    const mid = (lo + hi) / 2n, r = await ask(mid, JUPITERZ.others), o = await ask(mid, 'jupiterz'); probes++;
+    if ('none' in r) lastNone = r.none;
+    if ('out' in r && 'out' in o && BigInt(r.out) >= BigInt(o.out)) { lo = mid; best = { size: mid, rfq: BigInt(r.out), route: BigInt(o.out) }; } else hi = mid;
+  }
+  if (!best) return { probes, none: `the maker is behind the router at every size down to ${amt(hi, inMint)}${lastNone ? ` (last answer: ${lastNone})` : ''}` };
+  // the rest goes through our own route (/build) when the caller gives one, so the split compares with the "Our route" row; else through Jupiter's best other router
+  const restIn = amount - best.size;
+  let rest: { out: string } | { none: string }, routeFull: bigint;
+  if (our) { try { rest = { out: String(restIn > 0n ? await our.route(restIn) : 0n) }; } catch (e) { rest = { none: (e as Error).message }; } routeFull = our.full; }
+  else { const full = await ask(amount, 'jupiterz'); if (!('out' in full)) return { probes, none: `no router price for the whole amount: ${full.none}` }; routeFull = BigInt(full.out); rest = restIn > 0n ? await ask(restIn, 'jupiterz') : { out: '0' }; }
+  if (!('out' in rest)) return { probes, none: `no route price for the rest (${amt(restIn, inMint)}): ${rest.none}` };
+  const total = best.rfq + BigInt(rest.out);
+  return { probes, capacity: { in: String(best.size), out: String(best.rfq), routeOut: String(best.route), edgeBps: Number((best.rfq - best.route) * 10_000n / best.route), upTo: String(hi) },
+    split: { makerIn: String(best.size), makerOut: String(best.rfq), restIn: String(restIn), restOut: rest.out, total: String(total), routeFull: String(routeFull), restVia: our ? 'our route (/build)' : 'best other router', gainBps: Number((total - routeFull) * 10_000n / routeFull) } };
 }
 /** POST /api/ladder: one rung of the benchmark, buy (pay asset in, `usd` worth) or sell (stock in, `usd` worth at the token price, pay asset out). The page walks the rungs. */
 async function ladder(body: any) {

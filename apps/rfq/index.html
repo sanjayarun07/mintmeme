@@ -472,6 +472,7 @@ function stage(m) {
   if (m.stage === 'decision') { S.decision = m; decision(m); }
   if (m.stage === 'trade') tradePanel(m);
   if (m.stage === 'venues') venueRows(m.venues);
+  if (m.stage === 'capacity') capacityRow(m);
   if (m.stage === 'error') decision({ error: m.error });
 }
 function row(k, m, path) {
@@ -507,6 +508,23 @@ function venueRows(vs) {
   const tr = v => `<tr class="is-venue"><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.none ?? v.labels?.join(', ') ?? '')}">${esc(v.none ?? v.labels?.join(', ') ?? '')}</td>
     <td class="num">${v.out ? n(tok(v.out), 4) : '–'}</td><td class="num">${v.out ? n(shr(v.out), 4) : '–'}</td><td class="num">${v.out && v.share?.perShareUsd ? usd(v.share.perShareUsd) : '–'}</td><td class="num">${v.out ? vsTxt(v.out) : '–'}</td></tr>`;
   $('#rows').insertAdjacentHTML('beforeend', `<tr class="venue-head"><td colspan="6">More venues, price only: each Jupiter router on its own (Metis, OKX, DFlow), Jupiter limited to one DEX, and Raydium's and DFlow's own APIs. Not tradable here.</td></tr>` + [...got, ...none].map(tr).join(''));
+}
+/** The maker's at-market size and the split it suggests, under "Our route": the largest size the maker fills at or above the router's price, plus the rest through the
+ *  router. Price-only; the engine does not split an order today. */
+function capacityRow(m) {
+  const at = $('#r-build'); if (!at) return; document.querySelectorAll('#r-split, #r-split-note').forEach(x => x.remove());
+  const inUsd = raw => Number(raw) / (S.pay === 'SOL' ? 1e9 : 1e6) * (S.pay === 'SOL' ? (SOLUSD ?? 0) : 1), inTxt = raw => `${n(Number(raw) / (S.pay === 'SOL' ? 1e9 : 1e6), S.pay === 'SOL' ? 1 : 0)} ${S.pay} (${usd(inUsd(raw))})`;
+  if (m.pending) { at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub">Finding how much the maker fills at market…</td>${'<td class="num"><span class="skel"></span></td>'.repeat(4)}</tr>`); return; }
+  if (m.error || m.none) { at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub" colspan="5">${esc(m.error ?? m.none)}</td></tr>`); return; }
+  const s = m.split, c = m.capacity, b = S.build?.out, bps = b ? (Number(s.total) / Number(b) - 1) * 1e4 : null, ps = m.share?.perShareUsd;
+  const path = `JupiterZ ${inTxt(s.makerIn)} for ${n(shr(s.makerOut), 2)} shares, then ${s.restVia === 'our route (/build)' ? 'our route' : 'the best other router'} ${inTxt(s.restIn)} for ${n(shr(s.restOut), 2)}`;
+  const clears = c.edgeBps >= m.marginBps;
+  at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub" title="${esc(path)}">${esc(path)}</td>
+    <td class="num">${n(tok(s.total), 4)}</td><td class="num">${n(shr(s.total), 4)}</td><td class="num">${ps ? usd(ps) : '–'}</td>
+    <td class="num">${bps === null ? '–' : `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`}</td></tr>
+    <tr id="r-split-note" class="venue-head"><td colspan="6" class="wrap" style="line-height:18px">The maker fills at market up to about ${usd(inUsd(c.in))} (${n(shr(c.out), 2)} shares, ${bpsTxt(c.edgeBps)} against the router at that size).
+    Above about ${usd(inUsd(c.upTo))} it stops at its inventory, so a larger quote pays far more per share. ${clears ? `That part clears the engine's ${m.marginBps} bps margin.` : `That part does not clear the engine's ${m.marginBps} bps margin, so the engine would still use our route for it.`}
+    The engine does not split an order today; this row is what a split would pay. Price-only, ${m.probes} probes.</td></tr>`);
 }
 function delta(k) {
   const el = $('#d-' + k), x = S[k], b = S.build?.out; if (!el || !x?.out) return;
