@@ -127,6 +127,7 @@ td.wrap{white-space:normal}
 tbody tr:last-child td{border-bottom:0}
 td.sub{color:var(--muted);font-size:12px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
 tr.is-rfq td:first-child{box-shadow:inset 2px 0 0 var(--rfq)}
+#rows td.sub{max-width:170px} #rows td.name{white-space:normal;min-width:110px;max-width:150px;line-height:16px}
 tr.venue-head td{font-size:12px;color:var(--muted,#6b7280);padding-top:14px;border-top:1px solid currentColor}
 tr.is-venue td{opacity:.85}
 .pos{color:var(--pos)} .neg{color:var(--neg)}
@@ -262,7 +263,7 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
 <header class="top"><div class="top-in">
   <span class="brand">RFQ Desk</span>
   <nav class="tabs" aria-label="Views">
-    <a href="#quote" data-v="quote">Quote</a><a href="#ladder" data-v="ladder">Size ladder</a><a href="#lab" data-v="lab">Gate lab</a><a href="#base" data-v="base">Base</a><a href="#how" data-v="how">How it works</a>
+    <a href="#quote" data-v="quote">Quote</a><a href="#ladder" data-v="ladder">Size ladder</a><a href="#lab" data-v="lab">Gate lab</a><a href="#base" data-v="base">EVM chains</a><a href="#how" data-v="how">How it works</a>
   </nav>
   <div class="meta"><span class="on hide-s" id="st-node">Node</span><span class="hide-s" id="st-jup">Jupiter</span><span class="hide-s" id="st-sol"></span><button class="theme-toggle" id="theme-toggle" type="button" aria-label="Switch to light theme"><span aria-hidden="true" id="theme-icon">☀</span><span id="theme-label">Light</span></button><div class="wal"><button class="btn sm ghost" id="connect" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="wallet-pop">Connect wallet</button><div class="wal-pop" id="wallet-pop" role="dialog" aria-label="Connect a wallet" hidden><div id="wallet-choices"></div><div id="privy-box" hidden></div></div></div><span class="badge" id="mode-badge" title="The desk never signs. With a wallet connected, you can sign a checked quote in your wallet.">Read-only</span></div>
 </div></header>
@@ -280,7 +281,9 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
         <div class="ph"><h2>New request</h2><div class="seg" role="group" aria-label="Pay with" style="width:132px;height:28px"><button type="button" data-pay="SOL" aria-pressed="true">SOL</button><button type="button" data-pay="USDC" aria-pressed="false">USDC</button></div></div>
         <div class="pb">
           <div class="field"><label for="mint">Stock</label><select class="ctl" id="mint"></select></div>
-          <div class="field"><label for="sol">Amount</label>
+          <div class="field"><span class="lbl" id="qside-l">Side</span>
+            <div class="seg" role="group" aria-labelledby="qside-l"><button type="button" data-qside="buy" aria-pressed="true">Buy</button><button type="button" data-qside="sell" aria-pressed="false">Sell</button></div></div>
+          <div class="field"><label for="sol" id="amt-l">Amount</label>
             <div class="affix"><input class="ctl" id="sol" inputmode="decimal" value="1343.8"><span id="pay-unit">SOL</span></div>
             <div class="help" id="usd"></div></div>
           <div class="field"><span class="lbl" id="size-l">Size</span>
@@ -313,7 +316,7 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
         <div class="ph"><h2>Firm quote</h2><div class="r"><span class="muted" id="firm-meta"></span><span class="badge" id="firm-badge">None</span></div></div>
         <div class="expiry" id="expiry" aria-hidden="true"><i style="width:0"></i></div>
         <div class="stats">
-          <div class="stat"><div class="lbl">Shares</div><div class="v" id="q-shares">–</div><div class="s" id="q-tokens">&nbsp;</div></div>
+          <div class="stat"><div class="lbl" id="q-shares-l">Shares</div><div class="v" id="q-shares">–</div><div class="s" id="q-tokens">&nbsp;</div></div>
           <div class="stat"><div class="lbl">Per share</div><div class="v" id="q-per">–</div><div class="s" id="q-ref">&nbsp;</div></div>
           <div class="stat"><div class="lbl">Against our route</div><div class="v" id="q-delta">–</div><div class="s" id="q-best">&nbsp;</div></div>
           <div class="stat"><div class="lbl">Market maker</div><div class="v mono" id="q-maker">–</div><div class="s" id="q-fee">&nbsp;</div></div>
@@ -323,10 +326,12 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
       <div class="panel">
         <div class="ph"><h2>Routes</h2><span class="muted">Same size, same moment</span></div>
         <div class="tw"><table>
-          <thead><tr><th>Route</th><th>Path</th><th class="num">Receive</th><th class="num">Shares</th><th class="num">Per share</th><th class="num">vs our route</th></tr></thead>
-          <tbody id="rows"><tr><td colspan="6" class="muted">No quotes yet.</td></tr></tbody>
+          <thead><tr><th>Route</th><th>Path</th><th class="num" title="The public pools of the DEXes on this route, summed (DexScreener). Prop AMMs keep no public pool.">Pool liquidity</th><th class="num" title="The router's or Jupiter's fee on top of the route. The pools' own trading fees are already inside each route's output.">Fee</th><th class="num" title="Expected price impact at this size, and the slippage tolerance the transaction would carry (the most it may fill below the quote). A firm RFQ quote fills at exactly its price.">Impact · slippage</th><th class="num" id="recv-h">Receive</th><th class="num" id="shares-h">Shares</th><th class="num">Per share</th><th class="num">vs our route</th></tr></thead>
+          <tbody id="rows"><tr><td colspan="9" class="muted">No quotes yet.</td></tr></tbody>
         </table></div>
       </div>
+
+      <div class="panel" id="liq-q"><div class="ph"><h2>Liquidity</h2><span class="muted">Public pools holding this stock</span></div><div class="empty">Request quotes to see where this stock's liquidity is.</div></div>
 
       <div class="pair">
         <div class="panel" id="tx-panel"><div class="ph"><h2>Transaction</h2><span class="muted">What your wallet would sign</span></div><div class="empty">The market maker's transaction appears here, decoded.</div></div>
@@ -350,20 +355,23 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
 </section>
 
 <!-- BASE -->
-<section class="view" id="v-base" aria-label="Base stocks" hidden>
+<section class="view" id="v-base" aria-label="EVM stocks" hidden>
   <div class="panel">
-    <div class="ph"><h2>Coinbase stocks on Base <span class="muted" id="base-meta" style="font-weight:400"></span></h2></div>
+    <div class="ph"><h2>Stock tokens on EVM chains <span class="muted" id="base-meta" style="font-weight:400"></span></h2></div>
     <form class="pb" id="base-f" style="display:flex;gap:12px;flex-wrap:wrap;align-items:end">
-      <div class="field" style="min-width:160px"><label for="base-sym">Stock</label><select class="ctl" id="base-sym"></select></div>
-      <div class="field" style="width:140px"><label for="base-eth">Pay (ETH)</label><input class="ctl" id="base-eth" inputmode="decimal" value="0.5"></div>
+      <div class="field" style="min-width:150px"><label for="base-chain">Chain</label><select class="ctl" id="base-chain"></select></div>
+      <div class="field"><span class="lbl" id="base-side-l">Side</span><div class="seg" role="group" aria-labelledby="base-side-l" style="width:132px"><button type="button" data-eside="buy" aria-pressed="true">Buy</button><button type="button" data-eside="sell" aria-pressed="false">Sell</button></div></div>
+      <div class="field" style="min-width:150px"><label for="base-sym">Stock</label><select class="ctl" id="base-sym"></select></div>
+      <div class="field" style="width:150px"><label for="base-eth" id="base-amt-l">Pay (ETH)</label><input class="ctl" id="base-eth" inputmode="decimal" value="0.5"></div>
       <button class="btn" id="base-go" type="submit">Compare</button>
     </form>
     <div class="tw"><table>
-      <thead><tr><th>Venue</th><th>Path</th><th class="num">Receive</th><th class="num">Per token</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
-      <tbody id="base-rows"><tr><td colspan="6" class="muted">Pick a stock and an amount, then Compare.</td></tr></tbody>
+      <thead><tr><th>Venue</th><th>Path</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
+      <tbody id="base-rows"><tr><td colspan="6" class="muted">Pick a chain, a stock and an amount, then Compare.</td></tr></tbody>
     </table></div>
   </div>
-  <p class="foot">Buying with ETH on Base, quote-only: nothing is signed or sent. The execution server trades through Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap (each transaction gated and simulated before signing). LI.FI and OpenOcean are price references only. Nothing is tradable on this page. The share price is Jupiter's for the same stock (NVDAc is compared with NVDA).</p>
+  <div class="panel" id="liq-e" style="margin-top:16px"><div class="ph"><h2>Liquidity</h2><span class="muted">Public pools holding this stock</span></div><div class="empty">Compare to see where this stock's liquidity is.</div></div>
+  <p class="foot" id="base-foot">Quote-only: nothing is signed or sent, and nothing is tradable on this page. Base: Coinbase stocks; the execution server trades them through Relay, or KyberSwap with BASE_AGGREGATOR=kyberswap. BNB Chain: bStocks (the five on an official list); the execution server does not trade them. Robinhood Chain: Robinhood's 203 stock tokens; the execution server trades them through KyberSwap. The share price is Jupiter's for the same ticker (NVDAc, NVDAB and Robinhood NVDA are all compared with NVDA); one token counts as uiMultiplier() shares, read on chain.</p>
 </section>
 
 <!-- GATE LAB -->
@@ -409,6 +417,10 @@ const bpsTxt = b => (b >= 0 ? '+' : '−') + (Math.abs(b) >= 1000 ? `${n(Math.ab
 let CFG, SOLUSD = null, S = {}, timer;
 const stockOf = m => CFG.stocks.find(s => s.mint === m);
 const tok = raw => Number(raw) / 10 ** (S.dec ?? 8), shr = raw => tok(raw) * Number(S.mult ?? 1);
+/* buy: the outputs are stock tokens. sell: the input is the stock (S.amount) and the outputs are SOL or USDC. These two read an output either way. */
+const payDec = () => (S.pay === 'USDC' ? 6 : 9);
+const recvOf = raw => (S.side === 'sell' ? Number(raw) / 10 ** payDec() : tok(raw)), sharesOf = raw => (S.side === 'sell' ? shr(S.amount) : shr(raw));
+const recvTxt = raw => (S.side === 'sell' ? `${n(recvOf(raw), S.pay === 'USDC' ? 2 : 4)}` : n(tok(raw), 4));
 
 /* tabs, deep-linkable */
 function route() {
@@ -424,38 +436,58 @@ async function boot() {
   $('#st-node').textContent = CFG.rpc; $('#st-jup').textContent = CFG.keyed ? 'Jupiter API key' : 'Jupiter keyless';
   $('#mint').innerHTML = CFG.stocks.map(s => `<option value="${s.mint}">${esc(s.symbol)} · ${esc(s.issuer)}</option>`).join('');
   const t = CFG.stocks.find(s => s.symbol === 'TSLAx'); if (t) $('#mint').value = t.mint;
-  $('#base-sym').innerHTML = (CFG.baseStocks ?? []).map(s => `<option>${esc(s)}</option>`).join('');
+  const EV = CFG.evmStocks ?? { base: { label: 'Base', native: 'ETH', symbols: CFG.baseStocks ?? [] } };
+  $('#base-chain').innerHTML = Object.entries(EV).map(([k, v]) => `<option value="${esc(k)}">${esc(v.label)}</option>`).join('');
+  const evmFill = () => { const v = EV[$('#base-chain').value]; $('#base-sym').innerHTML = v.symbols.map(s => `<option>${esc(s)}</option>`).join(''); evmLabels(); };
+  $('#base-chain').onchange = evmFill; evmFill();
   SOLUSD = CFG.solUsd ?? null; solMeta(); setUsd();
   $('#cases').innerHTML = CFG.tamper.map(c => `<li><button type="button" data-t="${c.id}" aria-pressed="false"><span>${esc(c.label)}</span>${icon('chev')}</button></li>`).join('');
   ladderRows(); route();
 }
 const solMeta = () => { $('#st-sol').textContent = SOLUSD ? `SOL ${usd(SOLUSD)}` : ''; };
 /* the pay asset: SOL or USDC (market makers quote stocks closest against USDC). USDC is taken at $1. */
-let PAY = 'SOL';
+let PAY = 'SOL', QSIDE = 'buy', TOKUSD = null;
 const payUsd = () => (PAY === 'SOL' ? SOLUSD : 1);
-function setUsd() { const v = Number($('#sol').value.replace(/,/g, '')); $('#usd').textContent = PAY === 'SOL' && SOLUSD && v > 0 ? `≈ ${usd(v * SOLUSD)}` : ''; }
-document.querySelectorAll('[data-usd]').forEach(b => b.onclick = () => { document.querySelectorAll('[data-usd]').forEach(x => x.setAttribute('aria-pressed', x === b)); if (payUsd()) { $('#sol').value = (Number(b.dataset.usd) / payUsd()).toFixed(PAY === 'SOL' ? 1 : 0); setUsd(); } });
+/* what one unit of the amount field is worth: the pay asset for a buy, one stock token for a sell */
+const unitUsd = () => (QSIDE === 'sell' ? TOKUSD : payUsd());
+const qsym = () => stockOf($('#mint').value)?.symbol ?? 'tokens';
+function setUsd() {
+  const v = Number($('#sol').value.replace(/,/g, '')), u = unitUsd();
+  $('#usd').textContent = v > 0 && u && !(QSIDE === 'buy' && PAY === 'USDC') ? `≈ ${usd(v * u)}${QSIDE === 'sell' ? `, paid out in ${PAY}` : ''}` : QSIDE === 'sell' ? `Paid out in ${PAY}` : '';
+}
+async function loadTokUsd() { TOKUSD = null; try { TOKUSD = (await (await fetch('/api/token-price?mint=' + encodeURIComponent($('#mint').value))).json()).usd ?? null; } catch { TOKUSD = null; } setUsd(); }
+function qsideLabels() { $('#pay-unit').textContent = QSIDE === 'sell' ? qsym() : PAY; $('#amt-l').textContent = QSIDE === 'sell' ? 'Sell' : 'Amount'; $('.ph [aria-label="Pay with"], .ph [aria-label="Receive"]')?.setAttribute('aria-label', QSIDE === 'sell' ? 'Receive' : 'Pay with'); setUsd(); }
+document.querySelectorAll('[data-qside]').forEach(b => b.onclick = async () => {
+  if (b.dataset.qside === QSIDE) return; QSIDE = b.dataset.qside; document.querySelectorAll('[data-qside]').forEach(x => x.setAttribute('aria-pressed', x.dataset.qside === QSIDE));
+  qsideLabels(); if (QSIDE === 'sell') await loadTokUsd();
+  const on = [...document.querySelectorAll('[data-usd]')].find(x => x.getAttribute('aria-pressed') === 'true'); if (on) on.click();
+});
+document.querySelectorAll('[data-usd]').forEach(b => b.onclick = () => { document.querySelectorAll('[data-usd]').forEach(x => x.setAttribute('aria-pressed', x === b)); const u = unitUsd(); if (u) { $('#sol').value = (Number(b.dataset.usd) / u).toFixed(QSIDE === 'sell' ? 4 : PAY === 'SOL' ? 1 : 0); setUsd(); } });
 document.querySelectorAll('[data-pay]').forEach(b => b.onclick = () => {
   if (b.dataset.pay === PAY) return;
   const v = Number($('#sol').value.replace(/,/g, '')), was = payUsd(); PAY = b.dataset.pay;
   document.querySelectorAll('[data-pay]').forEach(x => x.setAttribute('aria-pressed', x.dataset.pay === PAY)); document.querySelectorAll('[data-pay-l]').forEach(x => x.setAttribute('aria-pressed', x.dataset.payL === PAY));
+  if (QSIDE === 'sell') { qsideLabels(); return; }
   $('#pay-unit').textContent = PAY; if (v > 0 && was && payUsd()) $('#sol').value = (v * was / payUsd()).toFixed(PAY === 'SOL' ? 1 : 0); setUsd();
 });
 $('#sol').oninput = () => { document.querySelectorAll('[data-usd]').forEach(x => x.setAttribute('aria-pressed', 'false')); setUsd(); };
-$('#mint').onchange = route;
+$('#mint').onchange = () => { route(); qsideLabels(); if (QSIDE === 'sell') loadTokUsd().then(() => { const on = [...document.querySelectorAll('[data-usd]')].find(x => x.getAttribute('aria-pressed') === 'true'); if (on) on.click(); }); };
 
 /* ---------- quote ---------- */
 $('#f').onsubmit = async e => {
   e.preventDefault(); const v = Number($('#sol').value.replace(/,/g, ''));
   if (!(v > 0)) { $('#usd').innerHTML = '<span class="err">Enter an amount above zero</span>'; $('#sol').focus(); return; }
-  S = { mint: $('#mint').value, pay: PAY, amount: String(BigInt(Math.round(v * (PAY === 'SOL' ? 1e9 : 1e6)))), sym: stockOf($('#mint').value)?.symbol };
+  const dec = QSIDE === 'sell' ? (stockOf($('#mint').value)?.decimals ?? 8) : PAY === 'SOL' ? 9 : 6;
+  S = { mint: $('#mint').value, pay: PAY, side: QSIDE, amount: String(BigInt(Math.round(v * 1e6)) * 10n ** BigInt(dec) / 1_000_000n), sym: stockOf($('#mint').value)?.symbol, dec: stockOf($('#mint').value)?.decimals };
   $('#go').disabled = true; $('#go').textContent = 'Requesting…'; clearInterval(timer);
+  $('#q-shares-l').textContent = S.side === 'sell' ? 'Receive' : 'Shares'; $('#recv-h').textContent = S.side === 'sell' ? `Receive (${S.pay})` : 'Receive'; $('#shares-h').textContent = S.side === 'sell' ? 'Shares sold' : 'Shares';
   firmReset('Waiting'); decision({ pending: true });
-  $('#rows').innerHTML = [['rfq', 'JupiterZ'], ['other', 'Best other'], ['build', 'Our route']].map(([k, nm]) => `<tr id="r-${k}" class="${k === 'rfq' ? 'is-rfq' : ''}"><td class="name">${nm}</td>${'<td class="num"><span class="skel"></span></td>'.repeat(5)}</tr>`).join('');
+  $('#rows').innerHTML = [['rfq', 'JupiterZ'], ['other', 'Best other'], ['build', 'Our route']].map(([k, nm]) => `<tr id="r-${k}" class="${k === 'rfq' ? 'is-rfq' : ''}"><td class="name">${nm}</td>${'<td class="num"><span class="skel"></span></td>'.repeat(8)}</tr>`).join('');
   $('#tx-panel').innerHTML = `<div class="ph"><h2>Transaction</h2><span class="muted">What your wallet would sign</span></div><div class="empty">Decoding when the quote arrives…</div>`;
+  LIQ = null; CAP = null; liqPanel($('#liq-q'), 'solana', S.mint, S.sym ?? '');
   $('#gate-panel').innerHTML = `<div class="ph"><h2>Gate</h2><span class="muted">Checked before signing</span></div><div class="empty">Waiting for the transaction…</div>`;
   try {
-    const res = await fetch('/api/quote', { method: 'POST', body: JSON.stringify({ mint: S.mint, pay: S.pay, amount: S.amount, taker: WALLET ? WALLET.address : $('#taker').value.trim(), forWallet: !!WALLET, minUsd: Number($('#minsol').value), marginBps: Number($('#margin').value) }) });
+    const res = await fetch('/api/quote', { method: 'POST', body: JSON.stringify({ mint: S.mint, pay: S.pay, side: S.side, amount: S.amount, taker: WALLET ? WALLET.address : $('#taker').value.trim(), forWallet: !!WALLET, minUsd: Number($('#minsol').value), marginBps: Number($('#margin').value) }) });
     const rd = res.body.getReader(), dec = new TextDecoder(); let buf = '';
     for (;;) { const { done, value } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true }); let i; while ((i = buf.indexOf('\n')) >= 0) { const line = buf.slice(0, i); buf = buf.slice(i + 1); if (line) stage(JSON.parse(line)); } }
   } catch (err) { decision({ error: `The desk server did not answer: ${err.message}` }); }
@@ -478,51 +510,114 @@ function stage(m) {
 function row(k, m, path) {
   const tr = $('#r-' + k); if (!tr) return; const o = m.out, ps = m.share?.perShareUsd, txt = m.none ?? m.error ?? path ?? '';
   tr.innerHTML = `<td class="name">${{ rfq: 'JupiterZ', other: 'Best other', build: 'Our route' }[k]}</td>
-    <td class="sub" title="${esc(txt)}">${esc(txt)}</td>
-    <td class="num">${o ? n(tok(o), 4) : '–'}</td><td class="num">${o ? n(shr(o), 4) : '–'}</td>
+    <td class="sub" title="${esc(txt)}">${esc(txt)}</td><td class="num" data-liq="${k === 'rfq' ? 'maker' : esc(JSON.stringify(m.labels ?? []))}">–</td>${o ? costCells(m, k === 'rfq') : '<td class="num">–</td><td class="num">–</td>'}
+    <td class="num">${o ? recvTxt(o) : '–'}</td><td class="num">${o ? n(sharesOf(o), 4) : '–'}</td>
     <td class="num">${o && ps ? usd(ps) : '–'}</td><td class="num" id="d-${k}">${o ? '<span class="skel"></span>' : '–'}</td>`;
+  fillLiq();
 }
-/* ---------- Base: Coinbase stocks across EVM aggregators (quote-only) ---------- */
+/* ---------- EVM chains: stock tokens across EVM aggregators (quote-only), buy or sell ---------- */
+let ESIDE = 'buy';
+function evmLabels() {
+  const v = (CFG.evmStocks ?? {})[$('#base-chain').value] ?? { native: 'ETH' };
+  $('#base-amt-l').textContent = ESIDE === 'buy' ? `Pay (${v.native})` : `Sell (${$('#base-sym').value || 'tokens'})`;
+  $('#base-recv-h').textContent = ESIDE === 'buy' ? 'Receive (tokens)' : `Receive (${v.native})`;
+}
+document.querySelectorAll('[data-eside]').forEach(b => b.onclick = () => {
+  if (b.dataset.eside === ESIDE) return; ESIDE = b.dataset.eside; document.querySelectorAll('[data-eside]').forEach(x => x.setAttribute('aria-pressed', x.dataset.eside === ESIDE));
+  $('#base-eth').value = ESIDE === 'buy' ? '0.5' : '1'; evmLabels();
+});
+$('#base-sym').onchange = evmLabels;
 $('#base-f').onsubmit = async e => {
-  e.preventDefault(); const eth = Number($('#base-eth').value.replace(/,/g, '')), body = $('#base-rows');
-  if (!(eth > 0)) { body.innerHTML = '<tr><td colspan="6" class="err">Enter an ETH amount above zero</td></tr>'; return; }
+  e.preventDefault(); const amount = Number($('#base-eth').value.replace(/,/g, '')), body = $('#base-rows');
+  if (!(amount > 0)) { body.innerHTML = '<tr><td colspan="6" class="err">Enter an amount above zero</td></tr>'; return; }
   $('#base-go').disabled = true; $('#base-go').textContent = 'Asking…'; body.innerHTML = '<tr><td colspan="6"><span class="skel"></span></td></tr>';
   try {
-    const r = await (await fetch('/api/base/quote', { method: 'POST', body: JSON.stringify({ symbol: $('#base-sym').value, eth }) })).json();
+    const r = await (await fetch('/api/evm/quote', { method: 'POST', body: JSON.stringify({ chain: $('#base-chain').value, symbol: $('#base-sym').value, side: ESIDE, amount }) })).json();
     if (r.error) throw new Error(r.error);
+    liqPanel($('#liq-e'), r.chain, r.token, r.symbol);
+    const buy = r.side === 'buy', mult = Number(r.multiplier), outDec = buy ? r.decimals : 18;
     const got = r.venues.filter(v => v.out), best = got.reduce((m, v) => (BigInt(v.out) > m ? BigInt(v.out) : m), 0n), sorted = [...got.sort((a, b) => (BigInt(b.out) > BigInt(a.out) ? 1 : -1)), ...r.venues.filter(v => !v.out)];
-    $('#base-meta').textContent = `${n(eth, 4)} ETH ≈ ${r.ethUsd ? usd(eth * r.ethUsd) : '?'} · share price ${r.refUsd ? usd(r.refUsd) : 'unknown'} · node ${r.rpc}`;
+    const inUsd = buy && r.nativeUsd ? amount * r.nativeUsd : null;
+    $('#base-meta').textContent = `${r.label}: ${buy ? `pay ${n(amount, 4)} ${r.native}${inUsd ? ` ≈ ${usd(inUsd)}` : ''}` : `sell ${n(amount, 4)} ${r.symbol}`} · share price ${r.refUsd ? usd(r.refUsd) : 'unknown'}${mult !== 1 ? ` · ${n(mult, 6)} shares per token` : ''} · server route: ${r.serverRoute}`;
     body.innerHTML = sorted.map(v => {
       if (!v.out) return `<tr><td class="name">${esc(v.name)}</td><td class="sub" colspan="5">${esc(v.none ?? 'no quote')}</td></tr>`;
-      const toks = Number(v.out) / 10 ** r.decimals, per = r.ethUsd ? eth * r.ethUsd / toks : null, vsRef = per && r.refUsd ? (per / r.refUsd - 1) * 1e4 : null, vsBest = (Number(v.out) / Number(best) - 1) * 1e4;
-      return `<tr><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td><td class="num">${n(toks, 4)}</td><td class="num">${per ? usd(per) : '–'}</td>
-        <td class="num">${vsRef === null ? '–' : `<span class="${vsRef <= 0 ? 'pos' : 'neg'}">${bpsTxt(vsRef)}</span>`}</td><td class="num">${vsBest === 0 ? '<span class="muted">Best</span>' : `<span class="neg">${bpsTxt(vsBest)}</span>`}</td></tr>`;
+      const out = Number(v.out) / 10 ** outDec, shares = (buy ? out : amount) * mult, dollars = r.nativeUsd ? (buy ? amount : out) * r.nativeUsd : null;
+      const per = dollars && shares ? dollars / shares : null, vsRef = per && r.refUsd ? (per / r.refUsd - 1) * 1e4 : null, worse = vsRef === null ? null : buy ? vsRef > 0 : vsRef < 0, vsBest = (Number(v.out) / Number(best) - 1) * 1e4;
+      return `<tr><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.path)}">${esc(v.path)}</td><td class="num">${n(out, buy ? 4 : 6)}</td><td class="num">${per ? usd(per) : '–'}</td>
+        <td class="num">${vsRef === null ? '–' : `<span class="${worse ? 'neg' : 'pos'}">${bpsTxt(vsRef)}</span>`}</td><td class="num">${vsBest === 0 ? '<span class="muted">Best</span>' : `<span class="neg">${bpsTxt(vsBest)}</span>`}</td></tr>`;
     }).join('');
   } catch (err) { body.innerHTML = `<tr><td colspan="6" class="err">${esc(err.message)}</td></tr>`; }
   $('#base-go').disabled = false; $('#base-go').textContent = 'Compare';
 };
+/** Where a token's liquidity is: every public pool DexScreener lists for it, grouped by DEX, and the largest pools. */
+/** The Fee and Impact · slippage cells of a route row. Impact is shown as a size (Jupiter reports it negative, Raydium positive); slippage is the tolerance the transaction
+ *  would carry, or "firm" for an RFQ quote. Network fees (signature, priority, rent) are added when the venue reports them. */
+function costCells(m, firm = false) {
+  const fee = m.feeBps === undefined ? '–' : m.feeBps === 0 ? 'none' : `${n(m.feeBps, 0)} bps`;
+  const net = m.networkLamports ? ` + ${n(m.networkLamports / 1e9, 6)} SOL network` : firm ? ' · maker pays gas' : '';
+  const imp = firm ? 'firm' : m.impactPct === undefined ? '–' : `${n(Math.abs(m.impactPct) * 100, 2)}%`;
+  const slip = firm ? ' · 0' : m.slippageBps === undefined ? '' : m.slippageBps === 0 ? ' · auto' : ` · ≤${n(m.slippageBps / 100, 2)}%`;
+  const why = firm ? 'A firm quote fills at exactly its price: no impact beyond it, no slippage.' : `Price impact ${imp}${m.slippageBps === undefined ? '' : m.slippageBps === 0 ? '; slippage tolerance set by the router at fill time' : `; the transaction may fill up to ${n(m.slippageBps / 100, 2)}% below the quote`}`;
+  return `<td class="num" title="${esc(fee + net)}">${esc(fee)}${net ? '<span class="muted"> +</span>' : ''}</td><td class="num" title="${esc(why)}">${esc(imp)}<span class="muted">${esc(slip)}</span></td>`;
+}
+/* Pool liquidity per route: Jupiter's route labels matched to DexScreener's DEX names (dexId plus its labels, lower case). A label with no match is a venue with no
+ *  public pool (a prop AMM such as HumidiFi, ZeroFi, GoonFi, or the Manifest order book). The JupiterZ row shows the maker's at-market size once it is found. */
+let LIQ = null, CAP = null;
+const JUP_DS = { 'raydium clmm': 'raydium clmm', 'raydium cp': 'raydium cpmm', 'raydium cpmm': 'raydium cpmm', 'raydium': 'raydium', 'whirlpool': 'orca wp', 'orca v2': 'orca', 'orca': 'orca',
+  'whirlpools': 'orca wp', 'meteora dlmm': 'meteora dlmm', 'meteora damm v2': 'meteora dammv2', 'meteora': 'meteora', 'pumpswap': 'pumpswap', 'pump.fun amm': 'pumpswap' };
+function fillLiq() {
+  const by = new Map((LIQ?.byDex ?? []).map(d => [d.dex.toLowerCase(), d.usd]));
+  document.querySelectorAll('#rows td[data-liq]').forEach(td => {
+    if (td.dataset.liq === 'maker') { td.innerHTML = CAP ? `<span title="The maker's at-market size, found by the capacity search">≈${usd(S.side === 'sell' ? tok(CAP.in) * (TOKUSD ?? 0) : Number(CAP.in) / 10 ** payDec() * (S.pay === 'SOL' ? (SOLUSD ?? 0) : 1))} at market</span>` : '<span class="muted">market maker</span>'; return; }
+    if (!LIQ) { td.textContent = '…'; return; }
+    let labels = []; try { labels = JSON.parse(td.dataset.liq); } catch {}
+    if (!labels.length) { td.textContent = '–'; return; }
+    const pub = new Set(), priv = new Set();
+    for (const l of new Set(labels)) { const k = JUP_DS[String(l).toLowerCase()]; if (k && by.has(k)) pub.add(k); else priv.add(l); }
+    const sum = [...pub].reduce((a, k) => a + by.get(k), 0);
+    td.title = `${pub.size ? `Public pools: ${[...pub].join(', ')}` : 'No public pool'}${priv.size ? `. No public pool: ${[...priv].join(', ')}` : ''}`;
+    td.innerHTML = pub.size ? `${usd(sum)}${priv.size ? '<span class="muted"> +</span>' : ''}` : '<span class="muted">no public pool</span>';
+  });
+}
+async function liqPanel(el, chain, token, symbol) {
+  const head = `<div class="ph"><h2>Liquidity</h2><span class="muted">${esc(symbol)}: public pools, DexScreener</span></div>`;
+  el.innerHTML = head + '<div class="pb"><span class="skel"></span></div>';
+  let r; try { r = await (await fetch(`/api/liquidity?chain=${encodeURIComponent(chain)}&token=${encodeURIComponent(token)}`)).json(); if (r.error) throw new Error(r.error); }
+  catch (err) { el.innerHTML = head + `<div class="pb err">${esc(err.message)}</div>`; return; }
+  if (el.id === 'liq-q') { LIQ = r; fillLiq(); }
+  if (!r.count) { el.innerHTML = head + '<div class="pb muted">No public pool holds this token.</div>'; return; }
+  const pct = v => (r.total ? `${n(v / r.total * 100, 1)}%` : '–');
+  el.innerHTML = head + `<div class="pb" style="padding-bottom:0"><b>${usd(r.total)}</b> <span class="muted">in ${r.count} pool${r.count === 1 ? '' : 's'}${r.capped ? ' (the 30 largest; there may be more)' : ''}</span></div>
+    <div class="tw"><table><thead><tr><th>DEX</th><th class="num">Pools</th><th class="num">Liquidity</th><th class="num">Share</th></tr></thead><tbody>
+    ${r.byDex.map(d => `<tr><td class="name">${esc(d.dex)}</td><td class="num">${d.pools}</td><td class="num">${usd(d.usd)}</td><td class="num">${pct(d.usd)}</td></tr>`).join('')}</tbody></table></div>
+    <div class="tw"><table><thead><tr><th>Largest pools</th><th>Pair</th><th class="num">Liquidity</th><th class="num">Share</th></tr></thead><tbody>
+    ${r.pools.map(p => `<tr><td class="name">${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.dex)}</a>` : esc(p.dex)}</td><td class="sub">${esc(p.pair)}</td><td class="num">${usd(p.usd)}</td><td class="num">${pct(p.usd)}</td></tr>`).join('')}</tbody></table></div>
+    <p class="note" style="margin:12px 16px">Each pool's whole value (both sides), as DexScreener reports it. Market makers (JupiterZ) and prop AMMs with no public pool are not in it: the maker row in Routes and the Size ladder show those.</p>`;
+}
 /** More venues, quote-only: each Jupiter router alone and Jupiter limited to one DEX. Prices to compare, not routes the desk can trade. Best first, then the ones without a quote. */
 function venueRows(vs) {
   const b = S.build?.out, got = vs.filter(v => v.out).sort((x, y) => (BigInt(y.out) > BigInt(x.out) ? 1 : -1)), none = vs.filter(v => !v.out);
   const vsTxt = o => { if (!b) return '–'; const bps = (Number(o) / Number(b) - 1) * 1e4; return `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`; };
-  const tr = v => `<tr class="is-venue"><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.none ?? v.labels?.join(', ') ?? '')}">${esc(v.none ?? v.labels?.join(', ') ?? '')}</td>
-    <td class="num">${v.out ? n(tok(v.out), 4) : '–'}</td><td class="num">${v.out ? n(shr(v.out), 4) : '–'}</td><td class="num">${v.out && v.share?.perShareUsd ? usd(v.share.perShareUsd) : '–'}</td><td class="num">${v.out ? vsTxt(v.out) : '–'}</td></tr>`;
-  $('#rows').insertAdjacentHTML('beforeend', `<tr class="venue-head"><td colspan="6">More venues, price only: each Jupiter router on its own (Metis, OKX, DFlow), Jupiter limited to one DEX, and Raydium's and DFlow's own APIs. Not tradable here.</td></tr>` + [...got, ...none].map(tr).join(''));
+  const tr = v => `<tr class="is-venue"><td class="name">${esc(v.name)}</td><td class="sub" title="${esc(v.none ?? v.labels?.join(', ') ?? '')}">${esc(v.none ?? v.labels?.join(', ') ?? '')}</td><td class="num" data-liq="${esc(JSON.stringify(v.out ? (v.kind === 'dex' ? [v.name.replace(/ only$/, '')] : v.id === 'raydium-api' ? ['Raydium CLMM', 'Raydium CPMM', 'Raydium'] : v.labels ?? []) : []))}">–</td>${v.out ? costCells(v) : '<td class="num">–</td><td class="num">–</td>'}
+    <td class="num">${v.out ? recvTxt(v.out) : '–'}</td><td class="num">${v.out ? n(sharesOf(v.out), 4) : '–'}</td><td class="num">${v.out && v.share?.perShareUsd ? usd(v.share.perShareUsd) : '–'}</td><td class="num">${v.out ? vsTxt(v.out) : '–'}</td></tr>`;
+  $('#rows').insertAdjacentHTML('beforeend', `<tr class="venue-head"><td colspan="9">More venues, price only: each Jupiter router on its own (Metis, OKX, DFlow), Jupiter limited to one DEX, and Raydium's and DFlow's own APIs. Not tradable here.</td></tr>` + [...got, ...none].map(tr).join('')); fillLiq();
 }
 /** The maker's at-market size and the split it suggests, under "Our route": the largest size the maker fills at or above the router's price, plus the rest through the
  *  router. Price-only; the engine does not split an order today. */
 function capacityRow(m) {
   const at = $('#r-build'); if (!at) return; document.querySelectorAll('#r-split, #r-split-note').forEach(x => x.remove());
-  const inUsd = raw => Number(raw) / (S.pay === 'SOL' ? 1e9 : 1e6) * (S.pay === 'SOL' ? (SOLUSD ?? 0) : 1), inTxt = raw => `${n(Number(raw) / (S.pay === 'SOL' ? 1e9 : 1e6), S.pay === 'SOL' ? 1 : 0)} ${S.pay} (${usd(inUsd(raw))})`;
-  if (m.pending) { at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub">Finding how much the maker fills at market…</td>${'<td class="num"><span class="skel"></span></td>'.repeat(4)}</tr>`); return; }
-  if (m.error || m.none) { at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub" colspan="5">${esc(m.error ?? m.none)}</td></tr>`); return; }
+  const sell = S.side === 'sell', inUnits = raw => (sell ? tok(raw) : Number(raw) / 10 ** payDec()), inUsd = raw => inUnits(raw) * (sell ? (TOKUSD ?? 0) : S.pay === 'SOL' ? (SOLUSD ?? 0) : 1);
+  const inTxt = raw => `${n(inUnits(raw), sell ? 2 : S.pay === 'SOL' ? 1 : 0)} ${sell ? S.sym ?? '' : S.pay} (${usd(inUsd(raw))})`, outTxt = raw => (sell ? `${recvTxt(raw)} ${S.pay}` : `${n(shr(raw), 2)} shares`);
+  if (m.pending) { at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub">Finding how much the maker fills at market…</td>${'<td class="num"><span class="skel"></span></td>'.repeat(7)}</tr>`); return; }
+  if (m.error || m.none) { at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub" colspan="8">${esc(m.error ?? m.none)}</td></tr>`); return; }
+  CAP = m.capacity; fillLiq();
   const s = m.split, c = m.capacity, b = S.build?.out, bps = b ? (Number(s.total) / Number(b) - 1) * 1e4 : null, ps = m.share?.perShareUsd;
-  const path = `JupiterZ ${inTxt(s.makerIn)} for ${n(shr(s.makerOut), 2)} shares, then ${s.restVia === 'our route (/build)' ? 'our route' : 'the best other router'} ${inTxt(s.restIn)} for ${n(shr(s.restOut), 2)}`;
+  const path = `JupiterZ ${inTxt(s.makerIn)} for ${outTxt(s.makerOut)}, then ${s.restVia === 'our route (/build)' ? 'our route' : 'the best other router'} ${inTxt(s.restIn)} for ${outTxt(s.restOut)}`;
   const clears = c.edgeBps >= m.marginBps;
-  at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub" title="${esc(path)}">${esc(path)}</td>
-    <td class="num">${n(tok(s.total), 4)}</td><td class="num">${n(shr(s.total), 4)}</td><td class="num">${ps ? usd(ps) : '–'}</td>
+  at.insertAdjacentHTML('afterend', `<tr id="r-split"><td class="name">Maker + our route</td><td class="sub" title="${esc(path)}">${esc(path)}</td><td class="num muted">–</td><td class="num muted" title="Jupiter's RFQ fee on the maker's part; none on our route's part">${S.rfq?.feeBps ?? '–'} bps*</td><td class="num muted" title="Firm on the maker's part; our route's impact and slippage on the rest">mixed</td>
+    <td class="num">${recvTxt(s.total)}</td><td class="num">${n(sharesOf(s.total), 4)}</td><td class="num">${ps ? usd(ps) : '–'}</td>
     <td class="num">${bps === null ? '–' : `<span class="${bps >= 0 ? 'pos' : 'neg'}">${bpsTxt(bps)}</span>`}</td></tr>
-    <tr id="r-split-note" class="venue-head"><td colspan="6" class="wrap" style="line-height:18px">The maker fills at market up to about ${usd(inUsd(c.in))} (${n(shr(c.out), 2)} shares, ${bpsTxt(c.edgeBps)} against the router at that size).
+    <tr id="r-split-note" class="venue-head"><td colspan="9" class="wrap" style="line-height:18px">The maker fills at market up to about ${usd(inUsd(c.in))} (${sell ? `${n(shr(c.in), 2)} shares sold` : `${n(shr(c.out), 2)} shares`}, ${bpsTxt(c.edgeBps)} against the router at that size).
     Above about ${usd(inUsd(c.upTo))} it stops at its inventory, so a larger quote pays far more per share. ${clears ? `That part clears the engine's ${m.marginBps} bps margin.` : `That part does not clear the engine's ${m.marginBps} bps margin, so the engine would still use our route for it.`}
     The engine does not split an order today; this row is what a split would pay. Price-only, ${m.probes} probes.</td></tr>`);
 }
@@ -541,7 +636,8 @@ function firm(m) {
   clearInterval(timer);
   if (m.none) { firmReset('No quote'); $('#firm-meta').textContent = m.none; $('#firm-meta').title = m.none; return; }
   const ps = m.share?.perShareUsd;
-  $('#q-shares').textContent = n(shr(m.out), 2); $('#q-tokens').textContent = `${n(tok(m.out), 4)} ${S.sym ?? ''}`;
+  if (S.side === 'sell') { $('#q-shares').textContent = `${recvTxt(m.out)} ${S.pay}`; $('#q-tokens').textContent = `for ${n(shr(S.amount), 2)} shares (${n(tok(S.amount), 4)} ${S.sym ?? ''})`; }
+  else { $('#q-shares').textContent = n(shr(m.out), 2); $('#q-tokens').textContent = `${n(tok(m.out), 4)} ${S.sym ?? ''}`; }
   $('#q-per').textContent = ps ? usd(ps) : '–'; $('#q-ref').textContent = S.share ? `Share ${usd(S.share)}, ${m.share.deviationPct >= 0 ? '+' : ''}${n(m.share.deviationPct, 2)}%` : 'No share price';
   $('#q-maker').textContent = short(m.maker); $('#q-maker').title = m.maker; $('#q-fee').textContent = `Fee ${m.feeBps} bps, maker pays gas`;
   const total = Math.max(55, m.expireAt - Math.floor(Date.now() / 1000));
@@ -580,7 +676,9 @@ function xray(x, txEl, gateEl) {
 function sim(s, gateEl) {
   const el = gateEl.querySelector('[data-sim]'); if (!el) return;
   const lg = (s.log ?? []).join(' '), short_ = /(11111111111111111111111111111111|TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA) failed: custom program error: 0x1(?![0-9a-f])/.test(lg), frozen = /failed: custom program error: 0x11(?![0-9a-f])/.test(lg);
-  el.innerHTML = s.ok ? `<b>Simulated on mainnet</b><br><span class="muted">Spends ${s.paid !== undefined ? `${n(Number(s.paid) / 1e6, 2)} USDC and ${n(Number(s.solSpent) / 1e9, 4)} SOL rent` : `${n(Number(s.solSpent) / 1e9, 4)} SOL`}, receives ${n(tok(s.tokensReceived), 4)} ${esc(S.sym ?? '')}${s.units ? `, ${Number(s.units).toLocaleString('en-US')} compute units` : ''}.</span>`
+  const cu = s.units ? `, ${Number(s.units).toLocaleString('en-US')} compute units` : '';
+  const sellTxt = () => { const solIn = -Number(s.solSpent) / 1e9; return `Spends ${n(tok(s.paid ?? 0), 4)} ${esc(S.sym ?? '')}, receives ${S.pay === 'USDC' ? `${n(Number(s.tokensReceived) / 1e6, 2)} USDC${solIn < 0 ? ` and pays ${n(-solIn, 4)} SOL rent` : ''}` : `${n(solIn, 4)} SOL`}${cu}.`; };
+  el.innerHTML = s.ok ? `<b>Simulated on mainnet</b><br><span class="muted">${S.side === 'sell' ? sellTxt() : `Spends ${s.paid !== undefined ? `${n(Number(s.paid) / 1e6, 2)} USDC and ${n(Number(s.solSpent) / 1e9, 4)} SOL rent` : `${n(Number(s.solSpent) / 1e9, 4)} SOL`}, receives ${n(tok(s.tokensReceived), 4)} ${esc(S.sym ?? '')}${cu}.`}</span>`
     : `<b class="err">Simulation failed</b><br><span class="muted">${frozen ? 'A token account in this fill is frozen by its issuer, so it cannot move.' : short_ ? `The quote wallet holds ${esc(S.held ?? '')}, less than this trade.` : esc(s.error)}</span>`;
 }
 

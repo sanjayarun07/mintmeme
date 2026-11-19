@@ -130,6 +130,19 @@ Found on the way: the default quote wallet's USDC account is **frozen by the iss
 
 A standalone app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:3700) on top of the same code the engine uses. The desk never signs. It is read-only until you connect a wallet; then it forwards a quote your wallet signed to Jupiter, under RFQ_DESK_MAX_USD (default $1,500). A quote is offered for signing only when the gate accepts it, the simulation passes and the fill passes the share-price check (the same check the engine applies through `checkFill`); otherwise the desk says which one failed. It shows:
 - **Quote.** A firm JupiterZ ticket that counts down to its expiry, the best other route, and our `/build` route. Each comes with the per-share price against the real share price (the `checkFillPrice` figures). The engine's decision is listed with every reason, exactly as `tryRfq` takes it.
+  - **Buy or sell (2026-11-19).** A sell pays out in SOL or USDC. The amount is entered in stock tokens, and the size buttons convert dollars at the token's price. The engine already takes RFQ quotes on both sides (`tryRfq` accepts SOL or a quote asset on either side). For a sell quote, the desk picks a public wallet among the token's largest holders that holds the amount, is not frozen and has some SOL. Checked on mainnet: $10k of TSLAx for SOL, maker −38 bps against `/build` (refused), gate accepted, simulation passed.
+  - **Columns per route:**
+    - **Pool liquidity:** the public pools of the DEXes on that route, summed from DexScreener. A "+" means the route also uses venues with no public pool (prop AMMs such as HumidiFi, ZeroFi, GoonFi). The JupiterZ row shows the maker's at-market size.
+    - **Fee:** the router's fee (10 bps on `/order` routers and RFQ, none on `/build` and single-DEX quotes). Network fees are in the tooltip. The pools' own trading fees are already inside each route's output.
+    - **Impact · slippage:** expected price impact, and the slippage tolerance the transaction would carry. "auto" means the router sets it at fill time. RFQ is a firm price with no slippage.
+  - **Liquidity panel:** every public pool holding the stock (DexScreener, keyless, at most 30 pools), grouped by DEX and listed largest first. It counts each pool's whole value (both sides). Market makers and prop AMMs are not in it.
+  - **Firm quotes on HTTP 429** (Jupiter's per-second limit) are asked again after a pause, twice at most.
+- **EVM chains (2026-11-19, was "Base").** Price-only comparison of Relay, KyberSwap, LI.FI and OpenOcean for stock tokens, buy or sell against the native coin, with the same liquidity panel:
+  - **Base:** Coinbase stocks.
+  - **BNB Chain:** the five bStocks on an official list (`packages/evm/src/bnbstocks.ts`).
+  - **Robinhood Chain:** Robinhood's 203 tokens.
+
+  All four aggregators answered on all three chains, except Relay on Robinhood Chain ("Unsupported currency"). Per-share prices use `uiMultiplier()`, read on chain. Coinbase's B20 tokens have one too: NVDAc 1.000537, NVDAB 1.000778, Robinhood NVDA 1.000775. The execution server's Base price check now reads it as well, instead of assuming 1.
 - **Maker + our route (built 2026-11-19).** This row appears when the maker's quote is behind our route. A maker that runs out of inventory keeps quoting its last shares for any larger input, so its per-share price jumps past that size. On 2026-11-19 an SPCXx maker gave about 353 shares for both $100k and $250k, and was at market only up to about $40–50k.
   - **How:** the desk does a binary search (6 probes, price-only) for the largest size where the maker pays at least Jupiter's best other router. It then prices the rest through our own `/build` route and shows the total against "Our route".
   - **The note under the row** gives the maker's at-market size and the size where its inventory runs out, and says whether the maker's part clears the engine's margin.

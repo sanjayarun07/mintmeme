@@ -15,7 +15,9 @@ import { base58 } from '../../packages/sol/src/tx.ts';
 import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
 import { RelayClient } from '../../packages/evm/src/relay.ts';
 import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
-import { EvmJsonRpc, baseEthUsd } from '../../packages/sdk/src/base.ts';
+import { BNB_STOCKS } from '../../packages/evm/src/bnbstocks.ts';
+import { ROBINHOOD_STOCKS } from '../../packages/evm/src/robinhoodstocks.ts';
+import { EvmJsonRpc, baseEthUsd, EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
 import { NATIVE } from '../../packages/core/src/index.ts';
 
 const WSOL = 'So11111111111111111111111111111111111111112', USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -74,11 +76,16 @@ async function solPrice() { if (!solUsd || Date.now() - solUsd.at > 30_000) { co
 const programs = new Map<string, string>([[WSOL, PROGRAMS.token]]);
 async function tokenProgram(mints: string[]) { const need = mints.filter(m => !programs.has(m)); if (need.length) { const r: any = await rpc.call('getMultipleAccounts', [need, { encoding: 'base64' }]); need.forEach((m, i) => { const o = r.value[i]?.owner; if (o) programs.set(m, o); }); } return (m: string) => programs.get(m) ?? PROGRAMS.token; }
 
+/** What a route costs besides the pools' own fees (those are already inside its output): the router's fee, the expected price impact (as a fraction, negative is worse),
+ *  the slippage tolerance it would sign with, and the network fees /order reports (lamports). Fields a venue does not report are left out. */
+const costs = (j: any) => { const num = (x: any) => (x === undefined || x === null || x === '' || !Number.isFinite(Number(x)) ? undefined : Number(x));
+  const net = ['signatureFeeLamports', 'prioritizationFeeLamports', 'rentFeeLamports'].map(k => num(j?.[k])).filter((x): x is number => x !== undefined);
+  return { feeBps: num(j?.feeBps ?? j?.platformFee?.feeBps), impactPct: num(j?.priceImpactPct), slippageBps: num(j?.slippageBps), networkLamports: net.length ? net.reduce((a, b) => a + b, 0) : undefined }; };
 async function bestOther(inputMint: string, outputMint: string, amount: bigint) {
   const u = `https://api.jup.ag/swap/v2/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&excludeRouters=jupiterz`;
   const j: any = await jup(async () => (await fetch(u, { headers: API_KEY ? { 'x-api-key': API_KEY } : {}, signal: AbortSignal.timeout(15_000) })).json());
   if (!j?.outAmount) throw new Error(j?.error ?? 'no route');
-  return { out: BigInt(j.outAmount), router: String(j.router ?? '?'), feeBps: Number(j.feeBps ?? 0), labels: (j.routePlan ?? []).map((r: any) => String(r?.swapInfo?.label ?? '?')) };
+  return { out: BigInt(j.outAmount), router: String(j.router ?? '?'), feeBps: Number(j.feeBps ?? 0), labels: (j.routePlan ?? []).map((r: any) => String(r?.swapInfo?.label ?? '?')), ...costs(j) };
 }
 
 const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`;
@@ -145,76 +152,105 @@ async function perShare(mint: string, sol: number) {
     check: (lamports: bigint, raw: bigint) => checkFillPrice({ side: 'buy', solLamports: lamports, tokensRaw: raw, decimals: st?.decimals ?? 8, multiplier: st?.multiplier ?? '1', solUsd: sol, referenceUsd: ref, maxDeviationPct: 3 }) };
 }
 
+/** A public holder of `mint` for a sell quote: makers build a transaction only for a wallet that holds what it sells. Among the token's largest accounts, the first
+ *  that holds at least `amount`, is not frozen, and belongs to a plain wallet (System-owned, no data) with 0.01 SOL. Nothing is ever signed for it. */
+async function pickHolder(mint: string, amount: bigint): Promise<{ taker: string; lamports: bigint; held: bigint; enough: boolean }> {
+  const big: any = await rpc.call('getTokenLargestAccounts', [mint]), accts: string[] = (big?.value ?? []).map((x: any) => x.address).slice(0, 20);
+  const ta: any = await rpc.call('getMultipleAccounts', [accts, { encoding: 'jsonParsed' }]);
+  const rows = accts.map((a, i) => { const info = ta?.value?.[i]?.data?.parsed?.info; return info ? { owner: String(info.owner), held: BigInt(info.tokenAmount?.amount ?? 0), frozen: info.state === 'frozen' } : undefined; })
+    .filter((x): x is { owner: string; held: bigint; frozen: boolean } => !!x && !x.frozen);
+  const own: any = rows.length ? await rpc.call('getMultipleAccounts', [rows.map(r => r.owner), { encoding: 'base64' }]) : { value: [] };
+  const ok = rows.map((r, i) => { const o = own?.value?.[i]; return o && o.owner === PROGRAMS.system && (o.space ?? 0) === 0 ? { taker: r.owner, lamports: BigInt(o.lamports), held: r.held, enough: r.held >= amount && BigInt(o.lamports) >= 10_000_000n } : undefined; })
+    .filter((x): x is NonNullable<typeof x> => !!x);
+  return ok.find(x => x.enough) ?? ok.sort((x, y) => (y.held > x.held ? 1 : -1))[0] ?? { taker: DEFAULT_TAKER, lamports: 0n, held: 0n, enough: false };
+}
+/** The token's dollar price, to size a sell in dollars and to say how big it is: Jupiter's usdPrice, or the share price times the multiplier. */
+async function tokenUsd(mint: string, sol: number) { const ps = await perShare(mint, sol); return (await prices.get([mint]).catch(() => new Map())).get(mint)?.usdPrice ?? (ps.ref ? ps.ref * Number(ps.multiplier) : null); }
+
 /** POST /api/quote: NDJSON, one line per stage as it arrives, so the desk fills in while Jupiter's rate limit paces the calls.
- *  Body: mint (the stock), pay ('SOL' or 'USDC'), amount (raw units of the pay asset; `lamports` is still accepted), minUsd (RFQ threshold), marginBps, taker (optional). */
+ *  Body: mint (the stock), pay ('SOL' or 'USDC': the quote asset), side ('buy', default, or 'sell'), amount (raw units of the input: the pay asset for a buy, the stock
+ *  for a sell; `lamports` is still accepted), minUsd (RFQ threshold), marginBps, taker (optional). The engine takes RFQ quotes on both sides (SolanaChain.tryRfq). */
 async function quote(body: any, emit: (o: unknown) => void) {
-  const mint = String(body.mint), payMint = body.pay === 'USDC' ? USDC : WSOL, amount = BigInt(body.amount ?? body.lamports), given = String(body.taker ?? '').trim();
-  const marginBps = Number(body.marginBps ?? 20), minUsd = Number(body.minUsd ?? 7500), paySym = sym(payMint), payDec = decOf(payMint), forWallet = body.forWallet === true && !!given;
-  if (!(amount > 0n)) throw new Error(`enter an amount of ${paySym} above zero`);
-  const sol = await solPrice(), usd = payMint === WSOL ? Number(amount) / 1e9 * sol : Number(amount) / 1e6;
+  const mint = String(body.mint), payMint = body.pay === 'USDC' ? USDC : WSOL, side: 'buy' | 'sell' = body.side === 'sell' ? 'sell' : 'buy', amount = BigInt(body.amount ?? body.lamports), given = String(body.taker ?? '').trim();
+  const [inMint, outMint] = side === 'buy' ? [payMint, mint] : [mint, payMint];
+  const marginBps = Number(body.marginBps ?? 20), minUsd = Number(body.minUsd ?? 7500), paySym = sym(payMint), inSym = sym(inMint), inDec = decOf(inMint), forWallet = body.forWallet === true && !!given;
+  if (!(amount > 0n)) throw new Error(`enter an amount of ${inSym} above zero`);
+  const sol = await solPrice(), perToken = side === 'sell' ? await tokenUsd(mint, sol) : null;
+  const usd = side === 'buy' ? (payMint === WSOL ? Number(amount) / 1e9 * sol : Number(amount) / 1e6) : Number(amount) / 10 ** inDec * (perToken ?? 0);
   let taker: string, held: bigint, lamports: bigint, auto = !given;
   if (given) {
     taker = given; lamports = BigInt((await rpc.call<any>('getBalance', [taker]).catch(() => ({ value: 0 }))).value ?? 0);
-    held = payMint === WSOL ? lamports : await rpc.call<any>('getTokenAccountBalance', [ataAddress(taker, payMint)]).then(r => BigInt(r?.value?.amount ?? 0)).catch(() => 0n);
-  } else { const p = await pickQuoteWallet(payMint, amount).catch(() => ({ taker: DEFAULT_TAKER, lamports: 0n, held: 0n, enough: false })); taker = p.taker; held = p.held; lamports = p.lamports; }
-  const heldTxt = `${(Number(held) / 10 ** payDec).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${paySym}`;
-  emit({ stage: 'context', solUsd: sol, usd, pay: paySym, taker, takerSol: Number(lamports) / 1e9, held: heldTxt, auto, rpc: rpcKind, keyed: !!API_KEY });
+    const tp = await tokenProgram([inMint]);
+    held = inMint === WSOL ? lamports : await rpc.call<any>('getTokenAccountBalance', [ataAddress(taker, inMint, tp(inMint))]).then(r => BigInt(r?.value?.amount ?? 0)).catch(() => 0n);
+  } else {
+    const p = await (side === 'buy' ? pickQuoteWallet(payMint, amount) : pickHolder(mint, amount)).catch(() => ({ taker: DEFAULT_TAKER, lamports: 0n, held: 0n, enough: false }));
+    taker = p.taker; held = p.held; lamports = p.lamports;
+  }
+  const heldTxt = `${(Number(held) / 10 ** inDec).toLocaleString('en-US', { maximumFractionDigits: 2 })} ${inSym}`;
+  emit({ stage: 'context', side, solUsd: sol, usd, pay: paySym, taker, takerSol: Number(lamports) / 1e9, held: heldTxt, auto, rpc: rpcKind, keyed: !!API_KEY });
   const stock = stockByMint(mint), ps = stock ? await perShare(mint, sol) : undefined;
   if (stock && ps) emit({ stage: 'stock', symbol: stock.symbol, issuer: stock.issuer, decimals: ps.decimals, multiplier: ps.multiplier, paused: ps.paused, sharePrice: ps.ref });
-  // per-share price: the dollars paid over the shares received (USDC is taken at $1; checkFillPrice works in lamports and a SOL price, so USDC is passed as 1e9 units of $1)
-  const share = (raw: bigint) => ps ? (payMint === WSOL ? ps.check(amount, raw) : ps.checkUsd(amount * 1000n, raw)) : undefined;
-  const rfq = await jup(() => fetchRfqOrder({ ...cfg, inputMint: payMint, outputMint: mint, amount, taker })).catch(e => ({ none: (e as Error).message }));
+  // per-share price: the dollars paid (a buy) or received (a sell) over the shares. USDC is taken at $1; checkFillPrice works in lamports and a SOL price, so USDC
+  // amounts are passed as 1e9 units of $1 (raw USDC x 1000)
+  const share = (out: bigint) => {
+    if (!ps) return undefined;
+    const [payRaw, tokens] = side === 'buy' ? [amount, out] : [out, amount], lam = payMint === WSOL ? payRaw : payRaw * 1000n;
+    return checkFillPrice({ side, solLamports: lam, tokensRaw: tokens, decimals: ps.decimals, multiplier: ps.multiplier, solUsd: payMint === WSOL ? sol : 1, referenceUsd: ps.ref, maxDeviationPct: 3 });
+  };
+  // the firm quote: asked again after a pause when Jupiter's per-second limit answers 429 (the ARM screenshot of 2026-11-19), twice at most
+  let rfq: Awaited<ReturnType<typeof fetchRfqOrder>> | { none: string } = { none: '' };
+  for (let i = 0; i < 3; i++) { rfq = await jup(() => fetchRfqOrder({ ...cfg, inputMint: inMint, outputMint: outMint, amount, taker })).catch(e => ({ none: (e as Error).message })); if (!('none' in rfq) || !/\b429\b/.test(rfq.none)) break; await new Promise(ok => setTimeout(ok, 1500 * (i + 1))); }
   if ('none' in rfq) emit({ stage: 'rfq', none: rfq.none });
-  else emit({ stage: 'rfq', out: String(rfq.outAmount), maker: rfq.maker, expireAt: rfq.expireAt, feeBps: rfq.feeBps, requestId: rfq.requestId, share: share(rfq.outAmount) });
-  const other = await bestOther(payMint, mint, amount).catch(e => ({ error: (e as Error).message }));
-  emit({ stage: 'other', ...('error' in other ? other : { out: String(other.out), router: other.router, feeBps: other.feeBps, labels: other.labels, share: share(other.out) }) });
-  const build = await jup(() => fetchBuild({ ...cfg, inputMint: payMint, outputMint: mint, amount, taker, slippageBps: 50 })).catch(e => ({ error: (e as Error).message }));
-  emit({ stage: 'build', ...('error' in build ? build : { out: String(build.outAmount), minOut: String(build.minOut), labels: build.routeLabels, share: share(build.outAmount) }) });
+  else emit({ stage: 'rfq', out: String(rfq.outAmount), maker: rfq.maker, expireAt: rfq.expireAt, feeBps: rfq.feeBps, slippageBps: 0, requestId: rfq.requestId, share: share(rfq.outAmount) });
+  const other = await bestOther(inMint, outMint, amount).catch(e => ({ error: (e as Error).message }));
+  emit({ stage: 'other', ...('error' in other ? other : { out: String(other.out), router: other.router, feeBps: other.feeBps, impactPct: other.impactPct, slippageBps: other.slippageBps, networkLamports: other.networkLamports, labels: other.labels, share: share(other.out) }) });
+  const build = await jup(() => fetchBuild({ ...cfg, inputMint: inMint, outputMint: outMint, amount, taker, slippageBps: 50 })).catch(e => ({ error: (e as Error).message }));
+  emit({ stage: 'build', ...('error' in build ? build : { out: String(build.outAmount), minOut: String(build.minOut), labels: build.routeLabels, impactPct: build.priceImpactPct, slippageBps: build.slippageBps, feeBps: 0, share: share(build.outAmount) }) });
   if (!('none' in rfq)) {
     const minOut = 'error' in build ? undefined : build.minOut;
     let x: Awaited<ReturnType<typeof xray>>;
-    try { x = await xray(rfq.tx, { wallet: taker, maker: rfq.maker, inMint: payMint, outMint: mint, amountIn: amount, minOut }); }
+    try { x = await xray(rfq.tx, { wallet: taker, maker: rfq.maker, inMint, outMint, amountIn: amount, minOut }); }
     catch (e) { emit({ stage: 'decision', useRfq: false, reasons: [{ ok: false, text: `The transaction could not be checked (the node did not answer: ${(e as Error).message}), so it would not be signed` }] }); emit({ stage: 'done' }); return; }
     // Jupiter's gasless mode: when the wallet cannot pay the rent of its new token account, Jupiter adds its own payer as a third signer to fund it. The gate still
     // refuses any signer but the maker and the wallet; this only says why, in terms of what the wallet holds (mainnet 2026-11-18: 30 SOL asked of a wallet with 0.03 SOL)
     const gasPayer = x.verdict.ok ? undefined : x.signers.find(s => s.who === 'Unknown' && x.instructions.some(i => i.program === PROGRAMS.ata && i.accounts[0]?.key === s.key))?.key;
-    const gasNote = gasPayer ? `Jupiter added its own payer (${short(gasPayer)}) to fund your new ${sym(mint)} account, which it does when the wallet cannot pay for it. The wallet holds ${heldTxt}${payMint === WSOL ? '' : ` and ${(Number(lamports) / 1e9).toLocaleString('en-US', { maximumFractionDigits: 4 })} SOL`}; this trade needs ${amt(amount, payMint)}. Only the maker and your wallet may sign, so this quote is refused: try a size the wallet can pay.` : undefined;
+    const gasNote = gasPayer ? `Jupiter added its own payer (${short(gasPayer)}) to fund your new ${sym(outMint)} account, which it does when the wallet cannot pay for it. The wallet holds ${heldTxt}${inMint === WSOL ? '' : ` and ${(Number(lamports) / 1e9).toLocaleString('en-US', { maximumFractionDigits: 4 })} SOL`}; this trade needs ${amt(amount, inMint)}. Only the maker and your wallet may sign, so this quote is refused: try a size the wallet can pay.` : undefined;
     if (gasNote) x.verdict.reason = `${x.verdict.reason}. ${gasNote}`;
     emit({ stage: 'xray', ...x });
-    const sim = await simulate(rfq.tx, taker, payMint, mint).catch(e => ({ ok: false, error: (e as Error).message, log: [] as string[] }));
+    const sim = await simulate(rfq.tx, taker, inMint, outMint).catch(e => ({ ok: false, error: (e as Error).message, log: [] as string[] }));
     emit({ stage: 'sim', ...sim });
     // the engine's decision, exactly as SolanaChain.tryRfq takes it (the threshold is in USD here; the engine takes it per quote asset)
     const reasons: { ok: boolean; text: string }[] = [], fmt$ = (v: number) => '$' + v.toLocaleString('en-US', { maximumFractionDigits: 0 });
-    reasons.push({ ok: usd >= minUsd, text: `Size ${fmt$(usd)} in ${paySym} ${usd >= minUsd ? 'meets' : 'is below'} the ${fmt$(minUsd)} threshold` });
+    reasons.push({ ok: usd >= minUsd, text: side === 'buy' ? `Size ${fmt$(usd)} in ${paySym} ${usd >= minUsd ? 'meets' : 'is below'} the ${fmt$(minUsd)} threshold` : `Size ${fmt$(usd)} of ${inSym} for ${paySym} ${usd >= minUsd ? 'meets' : 'is below'} the ${fmt$(minUsd)} threshold` });
     if (!('error' in build)) { const need = build.outAmount * BigInt(10_000 + marginBps) / 10_000n; const bps = Number((rfq.outAmount - build.outAmount) * 10_000n / build.outAmount); reasons.push({ ok: rfq.outAmount >= need, text: `RFQ pays ${bps >= 0 ? '+' : ''}${bps} bps against the /build route; the margin is ${marginBps} bps` }); reasons.push({ ok: rfq.outAmount >= build.minOut, text: `RFQ output ${rfq.outAmount >= build.minOut ? 'reaches' : 'is below'} the engine minimum` }); }
     else reasons.push({ ok: false, text: `No /build route to compare with: ${build.error}` });
     reasons.push({ ok: x.verdict.ok, text: x.verdict.ok ? 'The gate accepts the transaction' : `The gate refuses: ${x.verdict.reason}` });
     const sh = share(rfq.outAmount); if (sh) reasons.push({ ok: sh.ok, text: sh.referenceUsd ? `Share price check: $${sh.perShareUsd.toFixed(2)} per share against $${sh.referenceUsd.toFixed(2)}${sh.ok ? '' : ` (${sh.why})`}` : 'No reference share price right now, so the check is skipped' });
     if (sim.ok === false) {
       // System error 0x1 (not enough lamports) or Token error 0x1 (insufficient funds): the quote wallet cannot pay this size
-      const log = (sim.log ?? []).join(' '), short_ = /(11111111111111111111111111111111|TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA) failed: custom program error: 0x1(?![0-9a-f])/.test(log);
+      const log = (sim.log ?? []).join(' '), short_ = /(11111111111111111111111111111111|TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA|TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb) failed: custom program error: 0x1(?![0-9a-f])/.test(log);
       const frozen = /Tokenkeg\w+ failed: custom program error: 0x11(?![0-9a-f])|TokenzQd\w+ failed: custom program error: 0x11(?![0-9a-f])/.test(log);
-      reasons.push({ ok: false, text: frozen ? `Simulation: a token account in this fill is frozen by its issuer (Token error 17), so it cannot move.${given ? ' If it is the quote wallet\'s, enter another wallet, or leave it empty to pick one automatically' : ''}` : short_ ? `Simulation: the quote wallet holds ${heldTxt}, less than this trade. ${auto ? `No public wallet on the list holds that much ${paySym} right now: enter a wallet that does, under Engine rules, or try a smaller size` : `Enter a wallet that holds the ${paySym}, under Engine rules, or leave it empty to pick one automatically`}` : `Simulation failed: ${sim.error}` });
-    } else reasons.push({ ok: true, text: `Simulation: the wallet pays the ${paySym} amount and receives at least the minimum` });
+      reasons.push({ ok: false, text: frozen ? `Simulation: a token account in this fill is frozen by its issuer (Token error 17), so it cannot move.${given ? ' If it is the quote wallet\'s, enter another wallet, or leave it empty to pick one automatically' : ''}` : short_ ? `Simulation: the quote wallet holds ${heldTxt}, less than this trade. ${auto ? `No public wallet ${side === 'buy' ? 'on the list' : 'among its largest holders'} holds that much ${inSym} right now: enter a wallet that does, under Engine rules, or try a smaller size` : `Enter a wallet that holds the ${inSym}, under Engine rules, or leave it empty to pick one automatically`}` : `Simulation failed: ${sim.error}` });
+    } else reasons.push({ ok: true, text: `Simulation: the wallet pays the ${inSym} amount and receives at least the minimum` });
     emit({ stage: 'decision', useRfq: reasons.every(r => r.ok), reasons });
     // a connected wallet may sign and execute THIS order: only if the gate accepted it and the simulation passed, and under the desk's size cap
     if (forWallet) {
-      // the share-price check binds here as it does in the engine (rfqFillCheck): a fill priced far above the underlying share is never offered for signing
-      const priceOk = sh?.ok !== false, tradable = x.verdict.ok && sim.ok === true && priceOk && usd <= MAX_USD, outSym = sym(mint), outDec = decOf(mint);
-      const summary = `Pay ${(Number(amount) / 10 ** payDec).toLocaleString('en-US', { maximumFractionDigits: payDec === 9 ? 4 : 2 })} ${paySym}, receive ${(Number(rfq.outAmount) / 10 ** outDec).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${outSym} from maker ${rfq.maker.slice(0, 4)}…${rfq.maker.slice(-4)}`;
+      // the share-price check binds here as it does in the engine (rfqFillCheck): a fill priced far from the underlying share is never offered for signing
+      const priceOk = sh?.ok !== false, tradable = x.verdict.ok && sim.ok === true && priceOk && usd <= MAX_USD, outDec = decOf(outMint);
+      const summary = `${side === 'buy' ? 'Pay' : 'Sell'} ${(Number(amount) / 10 ** inDec).toLocaleString('en-US', { maximumFractionDigits: inDec === 9 ? 4 : 4 })} ${inSym}, receive ${(Number(rfq.outAmount) / 10 ** outDec).toLocaleString('en-US', { maximumFractionDigits: 4 })} ${sym(outMint)} from maker ${rfq.maker.slice(0, 4)}…${rfq.maker.slice(-4)}`;
       if (tradable) { prune(); PENDING.set(rfq.requestId, { message: Uint8Array.from(rfq.message), wallet: taker, expireAt: rfq.expireAt, usd, summary }); }
       emit({ stage: 'trade', tradable, summary, requestId: rfq.requestId, expireAt: rfq.expireAt, transaction: tradable ? Buffer.from(rfq.tx).toString('base64') : undefined,
         why: tradable ? undefined : !x.verdict.ok ? (gasNote ? `The gate refused this transaction. ${gasNote}` : 'The gate refused this transaction') : sim.ok !== true ? 'The simulation did not pass' : !priceOk ? `The fill fails the share-price check (${sh!.why})` : `This desk executes at most $${MAX_USD.toLocaleString('en-US')} per trade (RFQ_DESK_MAX_USD)` });
     }
   } else emit({ stage: 'decision', useRfq: false, reasons: [{ ok: false, text: `No RFQ quote: ${rfq.none}` }] });
   // after the decision, so these extra quotes never eat into the firm quote's short life
-  const vs = await venueQuotes(payMint, mint, amount).catch(() => []);
+  const vs = await venueQuotes(inMint, outMint, amount).catch(() => []);
   if (vs.length) emit({ stage: 'venues', venues: vs.map(v => ('out' in v && v.out ? { ...v, share: share(BigInt(v.out)) } : v)) });
   // when the maker's quote is behind our route, find how much it fills at market and what a split would give (price-only, nothing is signed)
   if (!('none' in rfq) && !('error' in build) && rfq.outAmount < build.outAmount) {
     emit({ stage: 'capacity', pending: true });
-    const ourRoute = { full: build.outAmount, route: async (a: bigint) => (await jup(() => fetchBuild({ ...cfg, inputMint: payMint, outputMint: mint, amount: a, taker, slippageBps: 50 }))).outAmount };
-    const c = await makerCapacity(payMint, mint, amount, ourRoute).catch(e => ({ error: (e as Error).message }));
+    const ourRoute = { full: build.outAmount, route: async (a: bigint) => (await jup(() => fetchBuild({ ...cfg, inputMint: inMint, outputMint: outMint, amount: a, taker, slippageBps: 50 }))).outAmount };
+    const c = await makerCapacity(inMint, outMint, amount, ourRoute).catch(e => ({ error: (e as Error).message }));
     emit({ stage: 'capacity', marginBps, ...c, ...('split' in c && c.split ? { share: share(BigInt(c.split.total)) } : {}) });
   }
   emit({ stage: 'done' });
@@ -232,13 +268,13 @@ async function venueQuotes(inputMint: string, outputMint: string, amount: bigint
     if (x.status !== 429 || a >= 2) return x; await new Promise(r => setTimeout(r, 1200 * (a + 1))); } };
   const viaRouter = ROUTERS.map(async r => {
     const { status, j } = await get(`https://api.jup.ag/swap/v2/order?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amount}&excludeRouters=${all.filter(x => x !== r.id).join(',')}`);
-    return j?.outAmount && j.router === r.id ? { id: r.id, name: r.name, kind: 'router', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.swapInfo?.label ?? '?')) }
+    return j?.outAmount && j.router === r.id ? { id: r.id, name: r.name, kind: 'router', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.swapInfo?.label ?? '?')), ...costs(j) }
       : { id: r.id, name: r.name, kind: 'router', none: j?.error ? String(j.error).slice(0, 80) : j?.router ? `answered by ${j.router}` : `no quote (HTTP ${status})` };
   });
   const viaDex = DEXES.map(async d => {
     const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount), slippageBps: '50', dexes: d, restrictIntermediateTokens: 'true' });
     const { status, j } = await get(`${API_KEY ? 'https://api.jup.ag' : 'https://lite-api.jup.ag'}/swap/v1/quote?${q}`);
-    return j?.outAmount ? { id: 'dex-' + d.toLowerCase().replace(/\W+/g, '-'), name: `${d} only`, kind: 'dex', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.swapInfo?.label ?? '?')) }
+    return j?.outAmount ? { id: 'dex-' + d.toLowerCase().replace(/\W+/g, '-'), name: `${d} only`, kind: 'dex', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.swapInfo?.label ?? '?')), ...costs({ ...j, feeBps: j.platformFee?.feeBps ?? 0 }) }
       : { id: 'dex-' + d.toLowerCase().replace(/\W+/g, '-'), name: `${d} only`, kind: 'dex', none: j?.error ? String(j.error).slice(0, 80) : `no route (HTTP ${status})` };
   });
   // venues asked directly, not through Jupiter: Raydium's own Trade API (keyless; GET transaction-v1.raydium.io/compute/swap-base-in, answered 2026-11-18).
@@ -247,7 +283,7 @@ async function venueQuotes(inputMint: string, outputMint: string, amount: bigint
     const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount), slippageBps: '50', txVersion: 'V0' });
     try { const r = await fetch(`https://transaction-v1.raydium.io/compute/swap-base-in?${q}`, { signal: AbortSignal.timeout(15_000) }); const j: any = await r.json().catch(() => ({}));
       const d = j?.data; return j?.success && d?.outputAmount && d.inputMint === inputMint && d.outputMint === outputMint && String(d.inputAmount) === String(amount)
-        ? { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', out: String(d.outputAmount), labels: [`${(d.routePlan ?? []).length || 1} Raydium pool${(d.routePlan ?? []).length > 1 ? 's' : ''}`] }
+        ? { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', out: String(d.outputAmount), labels: [`${(d.routePlan ?? []).length || 1} Raydium pool${(d.routePlan ?? []).length > 1 ? 's' : ''}`], ...costs({ priceImpactPct: d.priceImpactPct === undefined ? undefined : Number(d.priceImpactPct) / 100, slippageBps: d.slippageBps, feeBps: 0 }) }
         : { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', none: String(j?.msg ?? `no route (HTTP ${r.status})`).slice(0, 80) }; }
     catch (e) { return { id: 'raydium-api', name: 'Raydium (own API)', kind: 'direct', none: (e as Error).message.slice(0, 80) }; }
   })();
@@ -258,45 +294,86 @@ async function venueQuotes(inputMint: string, outputMint: string, amount: bigint
     const q = new URLSearchParams({ inputMint, outputMint, amount: String(amount), slippageBps: '50' });
     try { const r = await fetch(`${host}/order?${q}`, { headers: k ? { 'x-api-key': k } : {}, signal: AbortSignal.timeout(12_000) }); const j: any = await r.json().catch(() => ({}));
       return r.ok && /^\d+$/.test(String(j?.outAmount ?? '')) && j.inputMint === inputMint && j.outputMint === outputMint && String(j.inAmount) === String(amount)
-        ? { id: 'dflow-api', name, kind: 'direct', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.venue ?? p?.label ?? '?')).slice(0, 6) }
+        ? { id: 'dflow-api', name, kind: 'direct', out: String(j.outAmount), labels: (j.routePlan ?? []).map((p: any) => String(p?.venue ?? p?.label ?? '?')).slice(0, 6), ...costs({ priceImpactPct: j.priceImpactPct, slippageBps: j.slippageBps, feeBps: j.platformFee?.feeBps ?? 0 }) }
         : { id: 'dflow-api', name, kind: 'direct', none: String(j?.msg ?? j?.error ?? `no quote (HTTP ${r.status})`).slice(0, 80) }; }
     catch (e) { return { id: 'dflow-api', name, kind: 'direct', none: (e as Error).name === 'TimeoutError' ? 'no answer within 12 s' : (e as Error).message.slice(0, 80) }; }
   })();
   return Promise.all([...viaRouter, ...viaDex, raydium, dflow]);
 }
 
-/* ---------------- Base: Coinbase stocks, price-only comparison of EVM aggregators ---------------- */
-// Read-only quotes for buying a Coinbase stock with ETH on Base. Relay is what the execution server trades through (gated and simulated there); KyberSwap, LI.FI and
-// OpenOcean are price references only. All four answered keyless on 2026-11-18 (docs/XSTOCKS.md, "Aggregators (EVM)"); their answers are checked for the same token
-// and amount before they are shown. Relay and LI.FI need a sender for a quote: a busy public Base wallet is used (nothing is signed or sent).
-const BASE_RPC = process.env.BASE_RPC_URL?.trim() || (process.env.ALCHEMY_API_KEY ? `https://base-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : 'https://mainnet.base.org');
-const baseRpc = new EvmJsonRpc(BASE_RPC), ethUsd = baseEthUsd(baseRpc), relay = new RelayClient({ chainId: 8453, apiKey: process.env.RELAY_API_KEY?.trim(), retries429: 1 });
-const BASE_TAKER = '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85', EEE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', ZERO = '0x0000000000000000000000000000000000000000';
-const baseDecimals = new Map<string, number>();
-async function baseQuote(body: any) {
-  const symbol = String(body.symbol ?? ''), token = BASE_STOCKS[symbol]; if (!token) throw new Error(`unknown Base stock ${symbol}`);
-  const eth = Number(body.eth); if (!(eth > 0 && eth <= 1000)) throw new Error('eth must be above 0 and at most 1000');
-  const amount = BigInt(Math.round(eth * 1e9)) * 1_000_000_000n, t = token.toLowerCase();
-  if (!baseDecimals.has(t)) baseDecimals.set(t, Number(BigInt(await baseRpc.call<string>('eth_call', [{ to: token, data: '0x313ce567' }, 'latest']))));
-  const decimals = baseDecimals.get(t)!, usd = await ethUsd().then(x => x?.price ?? null).catch(() => null);
+/* ---------------- EVM chains: tokenized stocks, price-only comparison of EVM aggregators ---------------- */
+// Read-only quotes for buying a stock token with the native coin, or selling it for the native coin, on Base (Coinbase stocks), BNB Chain (bStocks) and Robinhood Chain
+// (Robinhood stock tokens). Relay, KyberSwap, LI.FI and OpenOcean all answered keyless on 2026-11-19 on these chains, except Relay on Robinhood Chain ("Unsupported
+// currency" for its stock tokens). Each answer is checked for the same token and amount before it is shown. Relay and LI.FI need a sender for a quote: a busy public
+// wallet on that chain is used (nothing is signed or sent). The execution server trades through Relay (Base) or KyberSwap (BASE_AGGREGATOR, Robinhood's default);
+// BNB stocks are not wired there (docs/XSTOCKS.md). The share multiplier is read on chain (uiMultiplier(); 1 where the token has none, as Coinbase's B20 tokens).
+const alchemy = (net: string) => (process.env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : undefined);
+const EVM_DESK: Record<string, { label: string; chainId: number; native: string; rpc: string; kyber: string; taker: string; stocks: Record<string, string>; ticker: (s: string) => string; net: string; serverRoute: string }> = {
+  base: { label: 'Base', chainId: 8453, native: 'ETH', rpc: process.env.BASE_RPC_URL?.trim() || alchemy('base-mainnet') || 'https://mainnet.base.org', kyber: 'base', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
+    stocks: BASE_STOCKS, ticker: s => s.replace(/c$/, ''), net: 'base', serverRoute: 'Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap' },
+  bnb: { label: 'BNB Chain', chainId: 56, native: 'BNB', rpc: process.env.BNB_RPC_URL?.trim() || alchemy('bnb-mainnet') || 'https://bsc-dataseed.bnbchain.org', kyber: 'bsc', taker: '0xF977814e90dA44bFA03b6295A0616a897441aceC',
+    stocks: BNB_STOCKS, ticker: s => s.replace(/B$/, ''), net: 'bnb', serverRoute: 'not wired: the server trades BNB tokens only through their PancakeSwap V2 pool, which is thin for these' },
+  robinhood: { label: 'Robinhood Chain', chainId: 4663, native: 'ETH', rpc: process.env.ROBINHOOD_RPC_URL?.trim() || alchemy('robinhood-mainnet') || 'https://rpc.mainnet.chain.robinhood.com', kyber: 'robinhood', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
+    stocks: ROBINHOOD_STOCKS, ticker: s => s, net: 'robinhood', serverRoute: 'KyberSwap (ROBINHOOD_AGGREGATOR default)' },
+};
+const EEE = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE', ZERO = '0x0000000000000000000000000000000000000000', UI_MULT = '0xa60bf13d';
+const evmRt = new Map<string, { rpc: EvmJsonRpc; usd: () => Promise<{ price: number } | null>; relay: RelayClient }>(), tokenInfo = new Map<string, { decimals: number; mult: { v: string; at: number } }>();
+const rt = (id: string) => { let r = evmRt.get(id); if (!r) { const c = EVM_DESK[id], rpc = new EvmJsonRpc(c.rpc); r = { rpc, usd: baseEthUsd(rpc, 30_000, EVM_NETWORKS[c.net]), relay: new RelayClient({ chainId: c.chainId, apiKey: process.env.RELAY_API_KEY?.trim(), retries429: 1 }) }; evmRt.set(id, r); } return r; };
+async function evmToken(id: string, token: string) {
+  const k = `${id}:${token}`, hit = tokenInfo.get(k); if (hit && Date.now() - hit.mult.at < 60_000) return hit;
+  const { rpc } = rt(id), decimals = hit?.decimals ?? Number(BigInt(await rpc.call<string>('eth_call', [{ to: token, data: '0x313ce567' }, 'latest'])));
+  const m = await rpc.call<string>('eth_call', [{ to: token, data: UI_MULT }, 'latest']).then(x => BigInt(x)).catch(() => 0n);
+  const v = m > 0n ? `${m / 10n ** 18n}.${(m % 10n ** 18n).toString().padStart(18, '0')}` : '1', info = { decimals, mult: { v, at: Date.now() } }; tokenInfo.set(k, info); return info;
+}
+/** POST /api/evm/quote {chain, symbol, side: 'buy'|'sell', amount}: amount is in the native coin for a buy, in stock tokens for a sell (whole units). */
+async function evmQuote(body: any) {
+  const id = String(body.chain ?? 'base'), c = EVM_DESK[id]; if (!c) throw new Error(`unknown chain ${id}: one of ${Object.keys(EVM_DESK).join(', ')}`);
+  const symbol = String(body.symbol ?? ''), token = c.stocks[symbol]; if (!token) throw new Error(`unknown ${c.label} stock ${symbol}`);
+  const side = body.side === 'sell' ? 'sell' : 'buy', units = Number(body.amount ?? body.eth); if (!(units > 0 && units <= 1e7)) throw new Error('enter an amount above zero');
+  const t = token.toLowerCase(), info = await evmToken(id, token), { relay, usd } = rt(id);
+  const decIn = side === 'buy' ? 18 : info.decimals, amount = BigInt(Math.round(units * 1e9)) * 10n ** BigInt(decIn) / 1_000_000_000n;
+  const [tin, tout] = side === 'buy' ? [EEE, token] : [token, EEE], nativeUsd = await usd().then(x => x?.price ?? null).catch(() => null);
   const json = async (u: string, init?: RequestInit) => { const r = await fetch(u, { ...init, signal: AbortSignal.timeout(20_000) }); return { status: r.status, j: (await r.json().catch(() => ({}))) as any }; };
   const row = (name: string, f: () => Promise<{ out: string; path: string }>) => f().then(x => ({ name, ...x }), e => ({ name, none: String((e as Error).message).slice(0, 100) }));
+  // the stock side of each answer must be this token, and the input this amount
+  const stockOk = (a?: string, b?: string) => String(side === 'buy' ? b : a).toLowerCase() === t;
   const venues = await Promise.all([
-    row('Relay (the server default)', async () => { const q = await relay.quote(BASE_TAKER, NATIVE, t, amount); return { out: String(q.amountOut), path: 'Relay same-chain swap' }; }),
-    row('KyberSwap (BASE_AGGREGATOR=kyberswap)', async () => { const { status, j } = await json(`https://aggregator-api.kyberswap.com/base/api/v1/routes?tokenIn=${EEE}&tokenOut=${token}&amountIn=${amount}`, { headers: { 'x-client-id': 'memedesk' } });
-      const r = j?.data?.routeSummary; if (!r || String(r.tokenOut).toLowerCase() !== t || String(r.amountIn) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
+    row('Relay', async () => { const q = await relay.quote(c.taker, side === 'buy' ? NATIVE : t, side === 'buy' ? t : NATIVE, amount); return { out: String(q.amountOut), path: 'Relay same-chain swap' }; }),
+    row('KyberSwap', async () => { const { status, j } = await json(`https://aggregator-api.kyberswap.com/${c.kyber}/api/v1/routes?tokenIn=${tin}&tokenOut=${tout}&amountIn=${amount}`, { headers: { 'x-client-id': 'memedesk' } });
+      const r = j?.data?.routeSummary; if (!r || !stockOk(r.tokenIn, r.tokenOut) || String(r.amountIn) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
       return { out: String(r.amountOut), path: [...new Set((r.route ?? []).flat().map((x: any) => String(x?.exchange ?? '?')))].join(', ') }; }),
-    row('LI.FI', async () => { const { status, j } = await json(`https://li.quest/v1/quote?fromChain=8453&toChain=8453&fromToken=${ZERO}&toToken=${token}&fromAmount=${amount}&fromAddress=${BASE_TAKER}`);
-      if (!j?.estimate?.toAmount || String(j.action?.toToken?.address).toLowerCase() !== t || String(j.action?.fromAmount) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
+    row('LI.FI', async () => { const { status, j } = await json(`https://li.quest/v1/quote?fromChain=${c.chainId}&toChain=${c.chainId}&fromToken=${side === 'buy' ? ZERO : token}&toToken=${side === 'buy' ? token : ZERO}&fromAmount=${amount}&fromAddress=${c.taker}`);
+      if (!j?.estimate?.toAmount || !stockOk(j.action?.fromToken?.address, j.action?.toToken?.address) || String(j.action?.fromAmount) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
       return { out: String(j.estimate.toAmount), path: (j.includedSteps ?? []).map((s: any) => String(s?.toolDetails?.name ?? s?.tool ?? '?')).join(', ') || String(j.tool ?? '') }; }),
-    row('OpenOcean', async () => { const { status, j } = await json(`https://open-api.openocean.finance/v4/8453/quote?inTokenAddress=${EEE}&outTokenAddress=${token}&amountDecimals=${amount}&gasPriceDecimals=10000000`);
-      const d = j?.data; if (!d?.outAmount || String(d.outToken?.address).toLowerCase() !== t || String(d.inAmount) !== String(amount)) throw new Error(j?.message ?? j?.error ?? `no route (HTTP ${status})`);
+    row('OpenOcean', async () => { const { status, j } = await json(`https://open-api.openocean.finance/v4/${c.chainId}/quote?inTokenAddress=${tin}&outTokenAddress=${tout}&amountDecimals=${amount}&gasPriceDecimals=1000000000`);
+      const d = j?.data; if (!d?.outAmount || !stockOk(d.inToken?.address, d.outToken?.address) || String(d.inAmount) !== String(amount)) throw new Error(j?.message ?? j?.error ?? `no route (HTTP ${status})`);
       return { out: String(d.outAmount), path: (d.dexes ?? []).filter((x: any) => x?.swapAmount && x.swapAmount !== '0').map((x: any) => String(x.dexCode)).slice(0, 4).join(', ') }; }),
   ]);
-  // reference share price: Jupiter's stockData.price for a Solana stock of the same underlying (NVDAc -> NVDA -> NVDAx). One Coinbase token tracked one share on
-  // 2026-11-18 (0.5 ETH of NVDAc came to about $152 per token with NVDA at $151.8), so the per-token price is compared with it directly.
-  const sol = STOCKS.find(s => s.underlying === symbol.replace(/c$/, '')), refUsd = sol ? (await prices.get([sol.mint]).catch(() => new Map())).get(sol.mint)?.stockPrice ?? null : null;
-  return { symbol, token, decimals, eth, amount: String(amount), ethUsd: usd, refUsd, rpc: BASE_RPC.includes('alchemy') ? 'Alchemy' : BASE_RPC.includes('mainnet.base.org') ? 'mainnet.base.org' : 'BASE_RPC_URL', venues };
+  // reference share price: Jupiter's stockData.price for a Solana stock of the same ticker (NVDAc, NVDAB and Robinhood NVDA -> NVDA -> NVDAx)
+  const ticker = c.ticker(symbol), sol = STOCKS.find(s => s.underlying === ticker), refUsd = sol ? (await prices.get([sol.mint]).catch(() => new Map())).get(sol.mint)?.stockPrice ?? null : null;
+  return { chain: id, label: c.label, native: c.native, side, symbol, ticker, token, decimals: info.decimals, multiplier: info.mult.v, units, amount: String(amount), nativeUsd, refUsd, serverRoute: c.serverRoute,
+    rpc: c.rpc.includes('alchemy') ? 'Alchemy' : 'public RPC', venues };
+}
+
+/* ---------------- Liquidity: every public pool that holds the token, on any of the four chains ---------------- */
+// DexScreener's keyless GET /token-pairs/v1/{chain}/{token} (checked 2026-11-19 on solana, base, bsc and robinhood): each pool with its DEX, pair and USD liquidity.
+// Its liquidity is the whole pool's value (both sides), for at most 30 pools. Market makers (JupiterZ) and prop AMMs that keep no public pool are not in it; the
+// desk's maker-capacity search and the size ladder show those.
+const DS_CHAIN: Record<string, string> = { solana: 'solana', base: 'base', bnb: 'bsc', robinhood: 'robinhood' };
+const liqCache = new Map<string, { at: number; v: unknown }>();
+async function liquidity(chain: string, token: string) {
+  const c = DS_CHAIN[chain]; if (!c) throw new Error(`unknown chain ${chain}: one of ${Object.keys(DS_CHAIN).join(', ')}`);
+  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$|^0x[0-9a-fA-F]{40}$/.test(token)) throw new Error('not a token address');
+  const k = `${c}:${token.toLowerCase()}`, hit = liqCache.get(k); if (hit && Date.now() - hit.at < 60_000) return hit.v;
+  const r = await fetch(`https://api.dexscreener.com/token-pairs/v1/${c}/${token}`, { signal: AbortSignal.timeout(15_000) }), j: any = await r.json().catch(() => null);
+  if (!Array.isArray(j)) throw new Error(`DexScreener answered HTTP ${r.status}`);
+  const lc = token.toLowerCase(), pools = j.filter((p: any) => String(p?.baseToken?.address).toLowerCase() === lc || String(p?.quoteToken?.address).toLowerCase() === lc)
+    .map((p: any) => ({ dex: [String(p.dexId ?? '?'), ...(p.labels ?? [])].join(' '), pair: `${p.baseToken?.symbol ?? '?'} / ${p.quoteToken?.symbol ?? '?'}`, usd: Number(p.liquidity?.usd ?? 0), address: String(p.pairAddress ?? ''), url: String(p.url ?? '') }))
+    .sort((a: any, b: any) => b.usd - a.usd);
+  const byDex = new Map<string, { dex: string; usd: number; pools: number }>();
+  for (const p of pools) { const d = byDex.get(p.dex) ?? { dex: p.dex, usd: 0, pools: 0 }; d.usd += p.usd; d.pools++; byDex.set(p.dex, d); }
+  const v = { chain, token, source: 'DexScreener', total: pools.reduce((a: number, p: any) => a + p.usd, 0), count: pools.length, capped: j.length >= 30, byDex: [...byDex.values()].sort((a, b) => b.usd - a.usd), pools: pools.slice(0, 12) };
+  liqCache.set(k, { at: Date.now(), v }); return v;
 }
 
 /** A quote-only /order (no taker: price only, no transaction), for the size ladder. `routers` excludes the others. */
@@ -391,7 +468,7 @@ async function status(sig: string) {
   return v ? { found: true, confirmation: v.confirmationStatus ?? null, err: v.err ?? null, slot: v.slot } : { found: false };
 }
 
-const STOCKS = STOCKS_SOLANA.filter(a => a.market.tradable).sort((a, b) => (b.market.liquidityUsd ?? 0) - (a.market.liquidityUsd ?? 0)).map(a => ({ symbol: a.symbol, mint: a.mint, issuer: a.issuer, underlying: (a as any).underlying ?? a.symbol, liquidityUsd: a.market.liquidityUsd }));
+const STOCKS = STOCKS_SOLANA.filter(a => a.market.tradable).sort((a, b) => (b.market.liquidityUsd ?? 0) - (a.market.liquidityUsd ?? 0)).map(a => ({ symbol: a.symbol, mint: a.mint, issuer: a.issuer, underlying: (a as any).underlying ?? a.symbol, liquidityUsd: a.market.liquidityUsd, decimals: a.decimals }));
 const json = (res: http.ServerResponse, code: number, o: unknown) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? String(v) : v))); };
 const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, bad) => { let s = ''; req.on('data', c => { s += c; if (s.length > 200_000) bad(new Error('body too large')); }); req.on('end', () => { try { ok(s ? JSON.parse(s) : {}); } catch { bad(new Error('the request body is not JSON')); } }); });
 
@@ -408,13 +485,15 @@ http.createServer(async (req, res) => {
       catch { json(res, 502, { jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } }); }
       return;
     }
-    if (req.method === 'GET' && u.pathname === '/api/config') return json(res, 200, { privyAppId: PRIVY_APP_ID, privyBundle: existsSync(PRIVY_BUNDLE), maxUsd: MAX_USD, solUsd: await solPrice().catch(() => null), rpc: rpcKind, keyed: !!API_KEY, defaultTaker: DEFAULT_TAKER, orderEngine: JUPITERZ.orderEngine, stocks: STOCKS, baseStocks: Object.keys(BASE_STOCKS), tamper: Object.entries(TAMPER).map(([id, t]) => ({ id, label: t.label })) });
+    if (req.method === 'GET' && u.pathname === '/api/config') return json(res, 200, { privyAppId: PRIVY_APP_ID, privyBundle: existsSync(PRIVY_BUNDLE), maxUsd: MAX_USD, solUsd: await solPrice().catch(() => null), rpc: rpcKind, keyed: !!API_KEY, defaultTaker: DEFAULT_TAKER, orderEngine: JUPITERZ.orderEngine, stocks: STOCKS, baseStocks: Object.keys(BASE_STOCKS), evmStocks: Object.fromEntries(Object.entries(EVM_DESK).map(([k, v]) => [k, { label: v.label, native: v.native, symbols: Object.keys(v.stocks) }])), tamper: Object.entries(TAMPER).map(([id, t]) => ({ id, label: t.label })) });
     if (req.method === 'POST' && u.pathname === '/api/quote') {
       const body = await readBody(req); res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store' });
       const emit = (o: unknown) => res.write(JSON.stringify(o, (_, v) => (typeof v === 'bigint' ? String(v) : v)) + '\n');
       try { await quote(body, emit); } catch (e) { emit({ stage: 'error', error: (e as Error).message }); } res.end(); return;
     }
-    if (req.method === 'POST' && u.pathname === '/api/base/quote') return json(res, 200, await baseQuote(await readBody(req)));
+    if (req.method === 'POST' && (u.pathname === '/api/evm/quote' || u.pathname === '/api/base/quote')) return json(res, 200, await evmQuote(await readBody(req)));
+    if (req.method === 'GET' && u.pathname === '/api/liquidity') return json(res, 200, await liquidity(String(u.searchParams.get('chain') ?? ''), String(u.searchParams.get('token') ?? '')));
+    if (req.method === 'GET' && u.pathname === '/api/token-price') return json(res, 200, { usd: await tokenUsd(String(u.searchParams.get('mint') ?? ''), await solPrice()).catch(() => null) });
     if (req.method === 'POST' && u.pathname === '/api/ladder') return json(res, 200, await ladder(await readBody(req)));
     if (req.method === 'POST' && u.pathname === '/api/gate') return json(res, 200, await gate(await readBody(req)));
     if (req.method === 'POST' && u.pathname === '/api/execute') return json(res, 200, await execute(await readBody(req)));

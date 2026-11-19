@@ -8,6 +8,8 @@ import { JupiterStockPrices, STOCKS_SOLANA, underlying } from '../../packages/so
 import { BASE } from '../../packages/sdk/src/index.ts';
 import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
 import { fakePrivyEvm } from '../../packages/evm/test/fakeprivyevm.ts';
+import { JsonRpcError } from '../../packages/evm/src/index.ts';
+import { UI_MULTIPLIER_SELECTOR as UIM } from '../../packages/evm/src/robinhoodstocks.ts';
 import { baseAccounts, findBaseStock } from './baseaccount.ts';
 
 const TSLAC = BASE_STOCKS.TSLAc.toLowerCase(), TSLA_SOL = STOCKS_SOLANA.find(a => underlying(a) === 'TSLA')!.mint;
@@ -15,12 +17,13 @@ const mem = () => { const m = new Map<string, string>(); return (n: string) => (
 const w = (n: bigint) => n.toString(16).padStart(64, '0');
 
 /** The world: ETH at $2,000, TSLA at $400 a share. `perEth`: raw TSLAc (8 decimals) per 1 ETH; 500_000_000 is the fair 5 shares. */
-function world(o: { perEth?: bigint; stockPrice?: number | null; enabled?: boolean } = {}) {
+function world(o: { perEth?: bigint; stockPrice?: number | null; enabled?: boolean; mult?: bigint | 'down' } = {}) {
   const perEth = o.perEth ?? 500_000_000n, p = fakePrivyEvm();
   const rpc = { call: async (m: string, a: any[] = []): Promise<any> => {
     if (m === 'eth_getBlockByNumber') return { number: '0x64', timestamp: '0x' + Math.floor(Date.now() / 1000).toString(16) };
     if (m === 'eth_call' && a[0].to === BASE.factory) return '0x' + '0'.repeat(64);                        // getPair(WETH, token): no V2 pool
     if (m === 'eth_call' && a[0].data === '0x313ce567') return '0x' + w(8n);                                // decimals()
+    if (m === 'eth_call' && a[0].data === UIM) { if (o.mult === 'down') throw new Error('fetch failed'); if (o.mult) return '0x' + w(o.mult); throw new JsonRpcError('execution reverted'); }   // uiMultiplier(): none by default
     if (m === 'eth_call' && a[0].to === BASE.wethUsdcPair) return '0x' + w(1000n * 10n ** 18n) + w(2_000_000n * 10n ** 6n) + w(0n);   // getReserves: WETH (token0), USDC
     throw new Error(`unscripted ${m}`); } };
   const relay = { client: { quote: async (_w: string, tin: string, _t: string, amt: bigint) => ({ amountOut: tin === NATIVE ? amt * perEth / 10n ** 18n : amt * 10n ** 18n / perEth, minimumOut: 0n, relayerFeeWei: 0n, requestId: 'r', steps: [] }) } as any };
@@ -57,6 +60,13 @@ test('Base stocks: a route far from the share price is refused (bad_price) unles
   await assert.rejects(cheapSell.prepare({ token: 'TSLAc', amount: '50000000' }, '/v1/trades/sell'), code('bad_price'));
   const noRef = await world({ stockPrice: null }).make();
   await assert.rejects(noRef.prepare({ token: 'TSLAc', eth: '0.1' }, '/v1/trades/buy'), code('no_reference_price'));
+});
+
+test('Base stocks: a B20 token with uiMultiplier is priced per share; a token without one counts 1; an unreachable node refuses', async () => {
+  // 1.25 shares per token: 5 tokens per ETH is $400 per token, $320 a share against $400, so a sell receives far less than the shares are worth
+  await assert.rejects((await world({ mult: 125n * 10n ** 16n }).make()).prepare({ token: 'TSLAc', amount: '50000000' }, '/v1/trades/sell'), (e: any) => e?.code === 'bad_price' && /\$320 per share/.test(e.message));
+  assert.equal((await (await world({ mult: 125n * 10n ** 16n, perEth: 400_000_000n }).make()).prepare({ token: 'TSLAc', eth: '0.1' }, '/v1/trades/buy')).token, TSLAC, '4 tokens of 1.25 shares per ETH is fair');
+  await assert.rejects((await world({ mult: 'down' }).make()).prepare({ token: 'TSLAc', eth: '0.1' }, '/v1/trades/buy'), code('no_reference_price'));
 });
 
 test('Base stocks: an ordinary token is not touched by any of this', async () => {

@@ -5,11 +5,12 @@
  *  Linking: POST /v1/wallet/link/start {address} -> a one-time message; the wallet signs it with personal_sign; POST /v1/wallet/link/finish {address, signature (0x, 65
  *  bytes)}: the signer is recovered from the signature (proves this API user controls the wallet), then Privy is asked whether the wallet carries this server's signer
  *  with the Base policy. Only then is {address, walletId} saved under the user. GET /v1/wallet shows the link; DELETE /v1/wallet removes it. */
+import { stocksEnabled } from './chains.ts';
 import { randomBytes } from 'node:crypto';
 import type { Backend } from '../../packages/core/src/index.ts';
 import { PrivyApi } from '../../packages/sol/src/index.ts';
 import type { PrivyConfig } from '../../packages/sol/src/index.ts';
-import { isAddress, personalSigner } from '../../packages/evm/src/index.ts';
+import { isAddress, personalSigner, JsonRpcError } from '../../packages/evm/src/index.ts';
 import type { RpcLike } from '../../packages/evm/src/index.ts';
 import { createBaseTrader, baseEthUsd, EvmJsonRpc, EVM_NETWORKS } from '../../packages/sdk/src/base.ts';
 import { SdkError } from '../../packages/sdk/src/wire.ts';
@@ -36,9 +37,8 @@ export function findRobinhoodStock(t: string): EvmStock | undefined {
 export const STOCK_FINDERS: Record<string, (t: string) => EvmStock | undefined> = { base: findBaseStock, robinhood: findRobinhoodStock };
 const isBuy = (path: string, b: any) => path === '/v1/trades/buy' || path === '/v1/orders/limit-buy' || path === '/v1/bulk/buy' || (path === '/v1/twap' && b?.side === 'buy');
 const isSell = (path: string) => path === '/v1/trades/sell' || path === '/v1/bulk/sell';
-/** The reference share price: Jupiter's stockData.price for a Solana stock of the same underlying (NVDAc -> NVDA -> NVDAx; Robinhood TSLA -> TSLAx). One Coinbase token
- *  tracked one share on 2026-11-18 (0.5 ETH of NVDAc came to about $152 per token with NVDA at $151.8; TSLAc $383 with TSLA $381.90), so its multiplier is 1; a Robinhood
- *  token is uiMultiplier()/1e18 shares, read on chain. 198 of the 203 Robinhood tickers have a Solana reference (not ABCL, CLOV, NAVN, RUN, XNDU: those refuse
+/** The reference share price: Jupiter's stockData.price for a Solana stock of the same underlying (NVDAc -> NVDA -> NVDAx; Robinhood TSLA -> TSLAx). A token is
+ *  uiMultiplier()/1e18 shares, read on chain, on both chains: Coinbase's B20 tokens have it too (NVDAc 1.000537 on 2026-11-19; it was first taken as 1). 198 of the 203 Robinhood tickers have a Solana reference (not ABCL, CLOV, NAVN, RUN, XNDU: those refuse
  *  with no_reference_price unless allowRiskyToken). */
 const refMint = (ticker: string) => STOCKS_SOLANA.find(a => underlying(a) === ticker)?.mint;
 
@@ -64,20 +64,21 @@ export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { m
   stocks?: { enabled?: boolean; maxDeviationPct?: number; prices?: JupiterStockPrices; jupiterApiKey?: string } }) {
   const net = EVM_NETWORKS[c.network ?? 'base']; if (!net) throw new Error(`unknown EVM network ${c.network}: one of ${Object.keys(EVM_NETWORKS).join(', ')}`);
   const privy = new PrivyApi({ ...c.privy, chainType: 'ethereum' }), rpc = c.rpc ?? new EvmJsonRpc(c.rpcUrl), ethUsd = baseEthUsd(rpc, 30_000, net), status = new Map<string, Status>();
-  const findStock = STOCK_FINDERS[net.id], stocksHere = !!findStock, stocksOn = c.stocks?.enabled ?? process.env.STOCKS_ENABLED === '1', maxDev = c.stocks?.maxDeviationPct ?? 3;
+  const findStock = STOCK_FINDERS[net.id], stocksHere = !!findStock, stocksOn = c.stocks?.enabled ?? stocksEnabled(net.id), maxDev = c.stocks?.maxDeviationPct ?? 3;
   const prices = c.stocks?.prices ?? new JupiterStockPrices({ apiKey: c.stocks?.jupiterApiKey ?? process.env.JUPITER_API_KEY?.trim() });
   const stocksOff = () => new SdkError('stocks_disabled', 'buying tokenized stocks is not enabled on this server', 'The operator enables it (STOCKS_ENABLED=1) after checking that its users may hold them: no issuer offers them to US persons.', 403);
   /** A stock trade must fill near the share price: the best venue's quote at this size (wei in for a buy, raw tokens in for a sell) against the underlying share price. */
-  /** Shares per token as a decimal string: '1' on Base; on Robinhood Chain uiMultiplier()/1e18, read on chain and kept a minute. null when it cannot be read. */
+  /** Shares per token as a decimal string: uiMultiplier()/1e18, read on chain and kept a minute. Robinhood's tokens all have it; so do Coinbase's B20 tokens on Base
+   *  (NVDAc 1.000537 on 2026-11-19, not 1 as first assumed). A Base token that reverts the call (the node answered: it has no multiplier) counts 1; any other failure,
+   *  and any failure on Robinhood Chain, is null (no price check possible). */
   const mults = new Map<string, { v: string; at: number }>();
   const multiplier = async (stock: EvmStock): Promise<string | null> => {
-    if (net.id !== 'robinhood') return '1';
     const hit = mults.get(stock.address); if (hit && Date.now() - hit.at < 60_000) return hit.v;
     try {
       const r = await rpc.call<string>('eth_call', [{ to: stock.address, data: UI_MULTIPLIER_SELECTOR }, 'latest']), m = BigInt(r);
       if (m <= 0n || m > 10n ** 24n) return null;   // zero, or above a million shares per token: not a value to price with
       const v = `${m / 10n ** 18n}.${(m % 10n ** 18n).toString().padStart(18, '0')}`; mults.set(stock.address, { v, at: Date.now() }); return v;
-    } catch { return null; }
+    } catch (e) { return net.id !== 'robinhood' && (e instanceof JsonRpcError || /revert/i.test((e as Error).message)) ? '1' : null; }
   };
   const stockPriceCheck = async (s: Awaited<ReturnType<typeof createBaseTrader>>, stock: EvmStock, side: 'buy' | 'sell', amount: bigint, decimals: number) => {
     const [tin, tout] = side === 'buy' ? [NATIVE, stock.address] : [stock.address, NATIVE];
