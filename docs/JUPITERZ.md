@@ -144,11 +144,13 @@ A standalone app (`apps/rfq/server.ts`, `apps/rfq/index.html`; http://127.0.0.1:
 
   All four aggregators answered on all three chains, except Relay on Robinhood Chain ("Unsupported currency").
 
-  **Fee and Impact · slippage** for each venue, as it reports them:
-  - **Relay:** relayer fee (about 15 bps) plus gas, `totalImpact`, and a 1% slippage tolerance.
-  - **KyberSwap:** no fee of its own, plus gas (L1 fee included). Impact is its dollar value out against in. Slippage is set when the swap is built.
-  - **LI.FI:** a fixed 0.25% fee plus gas. Impact is its dollar value out against in, fee included. Slippage about 0.5%.
-  - **OpenOcean:** no fee, its `price_impact`. Slippage is set when the swap is built.
+  **Fee and Impact · slippage** for each venue:
+  - **Relay:** relayer fee (about 15 bps) plus gas, and a 1% slippage tolerance. On Robinhood Chain the row says Relay does not quote its stock tokens, instead of showing a raw HTTP 400.
+  - **KyberSwap:** no fee of its own, plus gas (L1 fee included). Slippage is set when the swap is built.
+  - **LI.FI:** a fixed 0.25% fee plus gas. Slippage about 0.5%.
+  - **OpenOcean:** no fee. Slippage is set when the swap is built.
+
+  **How impact is measured:** the same way for every venue, as its price for this size against its own price for 1% of it. Each venue is asked twice. A venue's own figure is shown only in the tooltip, because those figures are not comparable across venues. For example, KyberSwap's dollar values on Robinhood Chain priced TSLA below its share price, so 10 ETH of TSLA showed 5.8% against OpenOcean's 0.47% for nearly the same output. Measured this way, all three showed 0.04–0.05%. When a larger size gets a better rate (fixed costs spread over more), the column says "none".
 
   Pool fees are inside every venue's output. Example, Base NVDAc for 0.5 ETH on 2026-11-19: KyberSwap was best with no fee; Relay was −15 bps (its 15 bps fee); LI.FI was −25 bps (its 25 bps fee). Per-share prices use `uiMultiplier()`, read on chain. Coinbase's B20 tokens have one too: NVDAc 1.000537, NVDAB 1.000778, Robinhood NVDA 1.000775. The execution server's Base price check now reads it as well, instead of assuming 1.
 - **Maker + our route (built 2026-11-19).** This row appears when the maker's quote is behind our route. A maker that runs out of inventory keeps quoting its last shares for any larger input, so its per-share price jumps past that size. On 2026-11-19 an SPCXx maker gave about 353 shares for both $100k and $250k, and was at market only up to about $40–50k.

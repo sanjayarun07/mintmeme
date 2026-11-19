@@ -338,36 +338,48 @@ async function evmQuote(body: any) {
   // worse; Relay's and OpenOcean's own figure, else the dollar value out against in, which includes the fee), slippageBps (the tolerance its transaction would carry;
   // undefined where it is chosen when the swap is built)
   type Costs = { feeBps?: number; feeUsd?: number; gasUsd?: number; impactPct?: number; impactFrom?: string; slippageBps?: number; slippageNote?: string };
-  const row = (name: string, f: () => Promise<{ out: string; path: string } & Costs>) => f().then(x => ({ name, ...x }), e => ({ name, none: String((e as Error).message).slice(0, 100) }));
   const num = (x: any) => (x === undefined || x === null || x === '' || !Number.isFinite(Number(x)) ? undefined : Number(x));
   const usdImpact = (inUsd: any, outUsd: any) => { const i = num(inUsd), o = num(outUsd); return i && o ? (o / i - 1) * 100 : undefined; };
   // the stock side of each answer must be this token, and the input this amount
   const stockOk = (a?: string, b?: string) => String(side === 'buy' ? b : a).toLowerCase() === t;
-  const venues = await Promise.all([
-    row('Relay', async () => {
+  // each venue as a function of the input, so it can be asked at this size and at 1% of it (see below)
+  const fns: [string, (amount: bigint) => Promise<{ out: string; path: string } & Costs>][] = [
+    ['Relay', async (amount: bigint) => {
+      // Relay serves Robinhood Chain but not its stock tokens ("Unsupported currency", checked 2026-11-19): said plainly instead of asking
+      if (id === 'robinhood') throw new Error(`Relay does not quote Robinhood Chain's stock tokens (it answers "Unsupported currency"); the server trades them through KyberSwap`);
       const key = process.env.RELAY_API_KEY?.trim(), { status, j } = await json('https://api.relay.link/quote', { method: 'POST', headers: { 'content-type': 'application/json', ...(key ? { 'x-api-key': key } : {}) },
         body: JSON.stringify({ user: c.taker, recipient: c.taker, originChainId: c.chainId, destinationChainId: c.chainId, originCurrency: side === 'buy' ? ZERO : t, destinationCurrency: side === 'buy' ? t : ZERO, amount: String(amount), tradeType: 'EXACT_INPUT' }) });
       const d = j?.details; if (!d?.currencyOut?.amount || !stockOk(d.currencyIn?.currency?.address, d.currencyOut?.currency?.address) || String(d.currencyIn?.amount) !== String(amount)) throw new Error(j?.message ? `Relay quote failed: HTTP ${status}: ${j.message}` : `no route (HTTP ${status})`);
       const inUsd = num(d.currencyIn?.amountUsd), feeUsd = num(j.fees?.relayer?.amountUsd);
       return { out: String(d.currencyOut.amount), path: 'Relay same-chain swap', feeUsd, feeBps: feeUsd !== undefined && inUsd ? feeUsd / inUsd * 1e4 : undefined, gasUsd: num(j.fees?.gas?.amountUsd),
         impactPct: num(d.totalImpact?.percent), impactFrom: 'Relay totalImpact (fees included)', slippageBps: num(d.slippageTolerance?.origin?.percent) !== undefined ? Number(d.slippageTolerance.origin.percent) * 100 : undefined };
-    }),
-    row('KyberSwap', async () => { const { status, j } = await json(`https://aggregator-api.kyberswap.com/${c.kyber}/api/v1/routes?tokenIn=${tin}&tokenOut=${tout}&amountIn=${amount}`, { headers: { 'x-client-id': 'memedesk' } });
+    }],
+    ['KyberSwap', async (amount: bigint) => { const { status, j } = await json(`https://aggregator-api.kyberswap.com/${c.kyber}/api/v1/routes?tokenIn=${tin}&tokenOut=${tout}&amountIn=${amount}`, { headers: { 'x-client-id': 'memedesk' } });
       const r = j?.data?.routeSummary; if (!r || !stockOk(r.tokenIn, r.tokenOut) || String(r.amountIn) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
       const extra = num(r.extraFee?.feeAmount);
       return { out: String(r.amountOut), path: [...new Set((r.route ?? []).flat().map((x: any) => String(x?.exchange ?? '?')))].join(', '), feeBps: extra ? undefined : 0, gasUsd: (num(r.gasUsd) ?? 0) + (num(r.l1FeeUsd) ?? 0) || undefined,
-        impactPct: usdImpact(r.amountInUsd, r.amountOutUsd), impactFrom: 'KyberSwap amountOutUsd against amountInUsd', slippageNote: 'set when the swap is built' }; }),
-    row('LI.FI', async () => { const { status, j } = await json(`https://li.quest/v1/quote?fromChain=${c.chainId}&toChain=${c.chainId}&fromToken=${side === 'buy' ? ZERO : token}&toToken=${side === 'buy' ? token : ZERO}&fromAmount=${amount}&fromAddress=${c.taker}`);
+        impactPct: usdImpact(r.amountInUsd, r.amountOutUsd), impactFrom: 'KyberSwap amountOutUsd against amountInUsd', slippageNote: 'set when the swap is built' }; }],
+    ['LI.FI', async (amount: bigint) => { const { status, j } = await json(`https://li.quest/v1/quote?fromChain=${c.chainId}&toChain=${c.chainId}&fromToken=${side === 'buy' ? ZERO : token}&toToken=${side === 'buy' ? token : ZERO}&fromAmount=${amount}&fromAddress=${c.taker}`);
       if (!j?.estimate?.toAmount || !stockOk(j.action?.fromToken?.address, j.action?.toToken?.address) || String(j.action?.fromAmount) !== String(amount)) throw new Error(j?.message ?? `no route (HTTP ${status})`);
       const e = j.estimate, fees = (e.feeCosts ?? []).filter((f: any) => f?.included !== false), pct = fees.reduce((a: number, f: any) => a + (num(f.percentage) ?? 0), 0);
       return { out: String(e.toAmount), path: (j.includedSteps ?? []).map((s: any) => String(s?.toolDetails?.name ?? s?.tool ?? '?')).join(', ') || String(j.tool ?? ''), feeBps: fees.length ? pct * 1e4 : 0,
         feeUsd: fees.length ? fees.reduce((a: number, f: any) => a + (num(f.amountUSD) ?? 0), 0) : undefined, gasUsd: (e.gasCosts ?? []).reduce((a: number, g: any) => a + (num(g.amountUSD) ?? 0), 0) || undefined,
-        impactPct: usdImpact(e.fromAmountUSD, e.toAmountUSD), impactFrom: 'LI.FI toAmountUSD against fromAmountUSD (fee included)', slippageBps: num(j.action?.slippage) !== undefined ? Number(j.action.slippage) * 1e4 : undefined }; }),
-    row('OpenOcean', async () => { const { status, j } = await json(`https://open-api.openocean.finance/v4/${c.chainId}/quote?inTokenAddress=${tin}&outTokenAddress=${tout}&amountDecimals=${amount}&gasPriceDecimals=1000000000`);
+        impactPct: usdImpact(e.fromAmountUSD, e.toAmountUSD), impactFrom: 'LI.FI toAmountUSD against fromAmountUSD (fee included)', slippageBps: num(j.action?.slippage) !== undefined ? Number(j.action.slippage) * 1e4 : undefined }; }],
+    ['OpenOcean', async (amount: bigint) => { const { status, j } = await json(`https://open-api.openocean.finance/v4/${c.chainId}/quote?inTokenAddress=${tin}&outTokenAddress=${tout}&amountDecimals=${amount}&gasPriceDecimals=1000000000`);
       const d = j?.data; if (!d?.outAmount || !stockOk(d.inToken?.address, d.outToken?.address) || String(d.inAmount) !== String(amount)) throw new Error(j?.message ?? j?.error ?? `no route (HTTP ${status})`);
       return { out: String(d.outAmount), path: (d.dexes ?? []).filter((x: any) => x?.swapAmount && x.swapAmount !== '0').map((x: any) => String(x.dexCode)).slice(0, 4).join(', '), feeBps: 0,
-        impactPct: num(String(d.price_impact ?? '').replace('%', '')), impactFrom: 'OpenOcean price_impact', slippageNote: 'set when the swap is built' }; }),
-  ]);
+        impactPct: num(String(d.price_impact ?? '').replace('%', '')), impactFrom: 'OpenOcean price_impact', slippageNote: 'set when the swap is built' }; }],
+  ];
+  // Impact is computed the same way for every venue: its price at this size against its own price at 1% of it. A venue's own figure is not comparable across venues
+  // (KyberSwap's dollar values on Robinhood Chain priced TSLA below its share price, so 10 ETH showed 5.86% "impact" against OpenOcean's 0.47% for the same output,
+  // 2026-11-19); it is kept as venueImpactPct for the tooltip. Fees that do not scale with size (a fixed relayer fee, gas) count in the small quote too.
+  const small = amount / 100n > 0n ? amount / 100n : amount;
+  const venues = await Promise.all(fns.map(async ([name, f]) => {
+    const [big, ref] = await Promise.all([f(amount).then(x => ({ ok: x }), e => ({ err: String((e as Error).message).slice(0, 140) })), f(small).catch(() => undefined)]);
+    if ('err' in big) return { name, none: big.err };
+    const v = big.ok, rate = (o: string, a: bigint) => Number(o) / Number(a), imp = ref && Number(ref.out) > 0 ? (rate(v.out, amount) / rate(ref.out, small) - 1) * 100 : undefined;
+    return { name, ...v, venueImpactPct: v.impactPct, venueImpactFrom: v.impactFrom, impactPct: imp, impactFrom: imp === undefined ? 'no quote at 1% of this size to compare with' : `its own price for this size against its price for 1% of it (${String(small)} raw in)` };
+  }));
   // reference share price: Jupiter's stockData.price for a Solana stock of the same ticker (NVDAc, NVDAB and Robinhood NVDA -> NVDA -> NVDAx)
   const ticker = c.ticker(symbol), sol = STOCKS.find(s => s.underlying === ticker), refUsd = sol ? (await prices.get([sol.mint]).catch(() => new Map())).get(sol.mint)?.stockPrice ?? null : null;
   return { chain: id, label: c.label, native: c.native, side, symbol, ticker, token, decimals: info.decimals, multiplier: info.mult.v, units, amount: String(amount), nativeUsd, refUsd, serverRoute: c.serverRoute,

@@ -366,7 +366,7 @@ body{background:radial-gradient(ellipse 50% 38% at 80% 0%,color-mix(in srgb,var(
       <button class="btn" id="base-go" type="submit">Compare</button>
     </form>
     <div class="tw"><table>
-      <thead><tr><th>Venue</th><th>Path</th><th class="num" title="The aggregator's own fee, and the network fee it estimates. The pools' trading fees are already inside each output.">Fee</th><th class="num" title="Price impact as the venue reports it (or the dollar value out against in, fee included), and the slippage tolerance its transaction would carry">Impact · slippage</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
+      <thead><tr><th>Venue</th><th>Path</th><th class="num" title="The aggregator's own fee, and the network fee it estimates. The pools' trading fees are already inside each output.">Fee</th><th class="num" title="Price impact, computed the same way for every venue: its price for this size against its own price for 1% of it. Then the slippage tolerance its transaction would carry.">Impact · slippage</th><th class="num" id="base-recv-h">Receive</th><th class="num">Per share</th><th class="num">vs share price</th><th class="num">vs best</th></tr></thead>
       <tbody id="base-rows"><tr><td colspan="8" class="muted">Pick a chain, a stock and an amount, then Compare.</td></tr></tbody>
     </table></div>
   </div>
@@ -531,9 +531,10 @@ $('#base-sym').onchange = evmLabels;
 function evmCostCells(v) {
   const fee = v.feeBps === undefined ? '–' : v.feeBps === 0 ? 'none' : `${n(v.feeBps, v.feeBps < 10 ? 1 : 0)} bps`;
   const feeTip = [v.feeBps ? `${n(v.feeBps, 1)} bps${v.feeUsd !== undefined ? ` ($${n(v.feeUsd, 4)})` : ''} to the aggregator` : 'no aggregator fee', v.gasUsd !== undefined ? `network about $${n(v.gasUsd, 4)}` : 'network fee not reported'].join('; ');
-  const imp = v.impactPct === undefined ? '–' : `${n(Math.abs(v.impactPct), 2)}%`;
+  // a venue that pays a better rate at this size than at 1% of it (fixed costs such as a relayer fee or gas spread over more) has no impact to show
+  const better = v.impactPct !== undefined && v.impactPct >= -0.005, imp = v.impactPct === undefined ? '–' : better ? 'none' : `${n(-v.impactPct, 2)}%`;
   const slip = v.slippageBps !== undefined ? ` · ≤${n(v.slippageBps / 100, 2)}%` : v.slippageNote ? ' · at build' : '';
-  const impTip = `${v.impactPct === undefined ? 'No impact figure' : `Impact ${imp}${v.impactFrom ? ` (${v.impactFrom})` : ''}`}; ${v.slippageBps !== undefined ? `may fill up to ${n(v.slippageBps / 100, 2)}% below the quote` : `slippage ${v.slippageNote ?? 'not reported'}`}`;
+  const impTip = `${v.impactPct === undefined ? 'No impact figure' : better ? `No impact: this size gets ${n(v.impactPct, 3)}% more per unit than 1% of it (fixed costs spread over more)` : `Impact ${imp}: ${v.impactFrom}`}${v.venueImpactPct !== undefined ? `. ${v.name}'s own figure: ${n(Math.abs(v.venueImpactPct), 2)}% (${v.venueImpactFrom}), not comparable across venues` : ''}; ${v.slippageBps !== undefined ? `may fill up to ${n(v.slippageBps / 100, 2)}% below the quote` : `slippage ${v.slippageNote ?? 'not reported'}`}`;
   return `<td class="num" title="${esc(feeTip)}">${esc(fee)}${v.gasUsd !== undefined ? `<span class="muted"> + $${n(v.gasUsd, v.gasUsd < 0.01 ? 4 : 2)} gas</span>` : ''}</td><td class="num" title="${esc(impTip)}">${esc(imp)}<span class="muted">${esc(slip)}</span></td>`;
 }
 $('#base-f').onsubmit = async e => {
@@ -599,8 +600,9 @@ async function liqPanel(el, chain, token, symbol) {
   el.innerHTML = head + `<div class="pb" style="padding-bottom:0"><b>${usd(r.total)}</b> <span class="muted">in ${r.count} pool${r.count === 1 ? '' : 's'}${r.capped ? ' (the 30 largest; there may be more)' : ''}</span></div>
     <div class="tw"><table><thead><tr><th>DEX</th><th class="num">Pools</th><th class="num">Liquidity</th><th class="num">Share</th></tr></thead><tbody>
     ${r.byDex.map(d => `<tr><td class="name">${esc(d.dex)}</td><td class="num">${d.pools}</td><td class="num">${usd(d.usd)}</td><td class="num">${pct(d.usd)}</td></tr>`).join('')}</tbody></table></div>
-    <div class="tw"><table><thead><tr><th>Largest pools</th><th>Pair</th><th class="num">Liquidity</th><th class="num">Share</th></tr></thead><tbody>
-    ${r.pools.map(p => `<tr><td class="name">${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.dex)}</a>` : esc(p.dex)}</td><td class="sub">${esc(p.pair)}</td><td class="num">${usd(p.usd)}</td><td class="num">${pct(p.usd)}</td></tr>`).join('')}</tbody></table></div>
+    <details class="rules pools" style="margin:var(--s3) 16px 0"><summary>Largest pools (${r.pools.length})</summary>
+    <div class="tw" style="margin:var(--s3) -16px 0"><table><thead><tr><th>Pool</th><th>Pair</th><th class="num">Liquidity</th><th class="num">Share</th></tr></thead><tbody>
+    ${r.pools.map(p => `<tr><td class="name">${p.url ? `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.dex)}</a>` : esc(p.dex)}</td><td class="sub">${esc(p.pair)}</td><td class="num">${usd(p.usd)}</td><td class="num">${pct(p.usd)}</td></tr>`).join('')}</tbody></table></div></details>
     <p class="note" style="margin:12px 16px">Each pool's whole value (both sides), as DexScreener reports it. Market makers (JupiterZ) and prop AMMs with no public pool are not in it: the maker row in Routes and the Size ladder show those.</p>`;
 }
 /** More venues, quote-only: each Jupiter router alone and Jupiter limited to one DEX. Prices to compare, not routes the desk can trade. Best first, then the ones without a quote. */
