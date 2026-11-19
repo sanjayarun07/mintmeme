@@ -4,7 +4,7 @@
 import React, { useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
-import { PrivyProvider, usePrivy, useLogin, useSigners, useWallets as useEvmWallets, useCreateWallet as useCreateEvmWallet, useSignMessage as useEvmSignMessage, useSendTransaction as useEvmSendTransaction } from '@privy-io/react-auth';
+import { PrivyProvider, usePrivy, useLogin, useSigners, useWallets as useEvmWallets, useCreateWallet as useCreateEvmWallet, useSignMessage as useEvmSignMessage, useSendTransaction as useEvmSendTransaction, useIdentityToken, getAccessToken as getCustomerAccessToken, getIdentityToken } from '@privy-io/react-auth';
 import { base } from 'viem/chains';
 import { useWallets, useCreateWallet, useSignMessage, useSignTransaction, toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 
@@ -14,7 +14,8 @@ const plog = (m) => { console.log('[privy]', m); (window.__privyLog = window.__p
 const dialogProbe = () => { const els = [...document.querySelectorAll('[id*="privy" i], [class*="privy" i], dialog, [role="dialog"], iframe')]; return els.slice(0, 8).map(e => { const r = e.getBoundingClientRect(); const cs = getComputedStyle(e); return `${e.tagName}#${e.id || ''} ${Math.round(r.width)}x${Math.round(r.height)} display=${cs.display} vis=${cs.visibility} z=${cs.zIndex}`; }).join(' | ') || 'no dialog/iframe elements found'; };
 
 function Panel({ onWallets, headless }) {
-  const { ready, authenticated, logout, user } = usePrivy();
+  const { ready, authenticated, logout, user, getAccessToken } = usePrivy();
+  const { identityToken } = useIdentityToken(), idt = useRef(null); idt.current = identityToken;
   const { login } = useLogin();
   const { createWallet } = useCreateWallet();
   const { ready: wReady, wallets } = useWallets();
@@ -114,6 +115,17 @@ function Panel({ onWallets, headless }) {
       ready, authenticated, email: (user && user.email && user.email.address) || null,
       solAddress: wallets[0] ? String(wallets[0].address) : null, evmAddress: evmWallet ? evmWallet.address.toLowerCase() : null,
       login: () => login(), logout: () => logout(),
+      // the Privy login token, for the trading server's sign-in (POST /v1/auth/privy): the server checks Privy's signature and opens a session; no API key needed.
+      // Right after a fresh login Privy can still be storing the token (seen live: null until a reload), so ask a few times, then fall back to the identity token
+      // (also ES256, signed by Privy for this app, same claims the server checks).
+      accessToken: async () => {
+        for (let i = 0; i < 6; i++) {
+          const t = (await getAccessToken().catch(() => null)) || (await getCustomerAccessToken().catch(() => null)) || idt.current || (await getIdentityToken().catch(() => null));
+          if (t) return t;
+          await new Promise(r => setTimeout(r, 400 * (i + 1)));
+        }
+        return null;
+      },
       createSol: () => createWallet(), createEvm: () => ev.current.createEvm(),
     };
     window.dispatchEvent(new Event('mintprivy'));

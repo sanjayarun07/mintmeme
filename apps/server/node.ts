@@ -24,6 +24,7 @@ import { History, auditBody } from './history.ts';
 import { recordRoutes, clusterStatus, statusHtml, nodeKey, nodesKey, nodeId } from './status.ts';
 import type { WebhookOptions } from './webhooks.ts';
 import { CHAIN_SPECS, CHAIN_ID_RE, RESERVED_SEGMENTS, defaultChainKey, stateName } from './chains.ts';
+import { AuthError, openSession, lookupSession, closeSession } from './privyauth.ts';
 
 /** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
 /** `copies` (optional): copy trading for this account (POST/GET/DELETE /v1/copies): the host builds the leader source and keeps the configs in the user's state. */
@@ -36,6 +37,8 @@ export type ExtraRoutes = (h: { state: (userId: string) => ((name: string) => Ba
 export interface ChainAccounts { id: string; label?: string; makeAccount: MakeAccount; extraRoutes?: ExtraRoutes; legacyMarks?: string[] }
 export interface NodeOptions {
   redisUrl: string; namespace: string;
+  /** Optional: sign in with Privy (privyauth.ts). POST /v1/auth/privy { token } opens a session for the account the Privy user id is mapped to; DELETE /v1/auth/session closes it. */
+  privyAuth?: { verify: (token: unknown) => Promise<{ did: string }>; users: Map<string, string>; ttlS: number };
   /** How OTHER nodes reach this one (http://, e.g. http://10.0.3.7:3500). Must be routable from the other nodes. */
   publicUrl: string;
   keys: ApiKey[];
@@ -151,7 +154,7 @@ export async function createNode(o: NodeOptions) {
     const copiesOf = (u: string) => { const cp = acctOf(u, c.id)?.copies; if (!cp) throw new SdkError('not_configured', `copy trading is not available for this account on ${c.id}`, 'Copy trading needs a leader source for this chain (Solana has one).', 501); return cp; };
     const extra = c.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? stateOf(x.lease, c.id) : undefined; }, reload: u => reload(u, c.id) });
     const audit = history ? (e: Parameters<NonNullable<Parameters<typeof createApi>[0]['onChange']>>[0]) => history.audit({ ...e, path: multi ? e.path.replace(/^\/v1\//, `/v1/${c.id}/`) : e.path, node: o.publicUrl, body: auditBody(e.body) }) : undefined;
-    return [c.id, createApi({ keys: o.keys, buckets, traderFor: u => acctOf(u, c.id)?.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: audit, prepare: (u, body, path) => acctOf(u, c.id)?.prepare?.(body, path),
+    return [c.id, createApi({ keys: o.keys, sessions: o.privyAuth ? h => lookupSession(r, o.namespace, h) : undefined, buckets, traderFor: u => acctOf(u, c.id)?.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: audit, prepare: (u, body, path) => acctOf(u, c.id)?.prepare?.(body, path),
       makeCopy: (_t, body, u) => copiesOf(u).create(body), removeCopy: (_t, id, u) => copiesOf(u).remove(id), listCopies: (t, u) => acctOf(u, c.id)?.copies?.list() ?? [...t.copies].map(([id, x]) => ({ id, lastError: x.lastError })), appRoutes: apps })] as const;
   }));
   const api = apis.get(defaultChain)!;
@@ -269,11 +272,38 @@ export async function createNode(o: NodeOptions) {
   const chainList = () => ({ default: defaultChain, chains: chains.map(c => { const sp = CHAIN_SPECS[c.id], native = sp?.evm?.nativeSymbol ?? (sp?.kind === 'solana' ? 'SOL' : null);
     return { id: c.id, label: c.label ?? sp?.label ?? c.id, kind: sp?.kind ?? 'practice', native, amountKey: native ? native.toLowerCase() : null, chainId: sp?.evm?.chainId ?? null, prefix: `/v1/${c.id}/`, default: c.id === defaultChain }; }) });
 
+  /** Privy sign-in (privyauth.ts). Rate limited per client address: 10 tries a minute. The token and the session are never logged. */
+  const authTries = new Map<string, { n: number; at: number }>();
+  const authRoute = async (req: http.IncomingMessage, res: http.ServerResponse, path: string) => {
+    const err = (status: number, code: string, message: string, fix?: string) => json(res, status, { error: { code, message, ...(fix ? { fix } : {}) } });
+    if (!o.privyAuth) return err(404, 'not_configured', 'This server does not offer Privy sign-in.', 'Use an API key, or ask the operator to set PRIVY_USERS.');
+    if (path === '/v1/auth/session') {
+      if (req.method !== 'DELETE') return err(405, 'method_not_allowed', 'Use DELETE to sign out.');
+      const m = /^Bearer (mts_[A-Za-z0-9_-]{40,60})$/.exec(String(req.headers.authorization ?? '')); if (m) closeSession(r, o.namespace, m[1]);
+      return json(res, 200, { signedOut: true });
+    }
+    if (req.method !== 'POST') return err(405, 'method_not_allowed', 'Use POST with { token }.');
+    const ip = String(req.socket.remoteAddress ?? ''), t = authTries.get(ip) ?? { n: 0, at: Date.now() };
+    if (Date.now() - t.at > 60_000) { t.n = 0; t.at = Date.now(); } t.n++; authTries.set(ip, t);
+    if (t.n > 10) return err(429, 'rate_limited', 'Too many sign-in attempts.', 'Wait a minute and try again.');
+    let body: any; try { const ch: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 16_384) return err(413, 'too_large', 'The request is too large.'); ch.push(c as Buffer); } body = JSON.parse(Buffer.concat(ch).toString() || '{}'); } catch { return err(400, 'bad_request', 'Send JSON: { "token": "<Privy access token>" }.'); }
+    try {
+      const { did } = await o.privyAuth.verify(body?.token);
+      const user = o.privyAuth.users.get(did);
+      if (!user) return err(403, 'not_mapped', `Your Privy login is valid, but it is not connected to a trading account on this server (Privy user ${did}).`, `Ask the operator to add ${did}=<account> to PRIVY_USERS.`);
+      return json(res, 200, openSession(r, o.namespace, user, did, o.privyAuth.ttlS));
+    } catch (e) {
+      if (e instanceof AuthError) return err(e.status, e.code, e.message, e.fix);
+      log(`[auth] privy sign-in failed: ${(e as Error).message}`); return err(503, 'auth_unavailable', 'Sign-in is unavailable right now.', 'Retry shortly.');
+    }
+  };
+
   const server = http.createServer(async (req, res) => {
     try {
       // origin-form targets only ("/path"): "//host/..." or "http://host/..." would make forwarding reach a host the client chose
       if (!/^\/(?!\/)/.test(req.url ?? '')) return json(res, 400, { error: { code: 'bad_request', message: 'Request target must be a path.' } });
       const path = new URL(req.url!, 'http://x').pathname;
+      if (path === '/v1/auth/privy' || path === '/v1/auth/session') return await authRoute(req, res, path);
       if (path === '/healthz') return json(res, 200, { ok: true, node: o.publicUrl, users: owned.size, chains: [...chainIds] });
       if (path === '/status.json' || path === '/status') { const s = await status(); if (path === '/status.json') return json(res, 200, s); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); return res.end(statusHtml(s)); }
       if (path === '/readyz') { let ok = !draining; try { ok = ok && r.cmd('PING') === 'PONG'; } catch { ok = false; } return json(res, ok ? 200 : 503, { ready: ok, draining }); }

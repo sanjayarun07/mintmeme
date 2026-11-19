@@ -15,6 +15,8 @@ export interface ApiKey { key?: string; keyHash?: string; userId: string; scope?
 const END_USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 export interface ApiOptions {
   keys: ApiKey[]; traderFor: (userId: string) => Trader | undefined;
+  /** Optional: sign-in sessions (the execution server's Privy sign-in). Given the SHA-256 of a bearer token that is not an API key, the account it acts for, or undefined. */
+  sessions?: (hash: Buffer) => { userId: string; scope: 'read' | 'trade' } | undefined;
   /** Rate limit per key: requests per second sustained and burst. Default 20 and 40. */
   rate?: { perSecond: number; burst: number };
   /** Optional: how the host turns a JSON request into a launch or leader source. Without these, creating snipes and copy configs answers 501 with an explanation (listing still works). */
@@ -103,7 +105,9 @@ export function createApi(o: ApiOptions) {
   const fail = (res: http.ServerResponse, e: unknown) => { if (e instanceof SdkError) return send(res, e.status || 400, { error: e.toJSON() }); send(res, 500, { error: { code: 'internal', message: 'The server could not complete this request.', fix: 'Retry; if it keeps failing, check the server log.' } }); console.error('[api] internal error:', (e as Error)?.message); };
   const readBody = (req: http.IncomingMessage) => new Promise<any>((ok, no) => { let n = 0; const ch: Buffer[] = []; req.on('data', d => { n += d.length; if (n > 256 * 1024) { no(new SdkError('too_large', 'request body is over 256 KB', undefined, 413)); req.destroy(); } else ch.push(d); }); req.on('end', () => { if (!n) return ok({}); try { const j = JSON.parse(Buffer.concat(ch).toString('utf8')); if (j === null || typeof j !== 'object' || Array.isArray(j)) throw 0; ok(j); } catch { no(new SdkError('bad_json', 'the body must be a JSON object', 'Send Content-Type: application/json with an object body.')); } }); req.on('error', no); });
   /** The key a request carries (Authorization: Bearer), or undefined. Hash comparison in constant time. */
-  const keyOf = (req: http.IncomingMessage) => { const m = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')); if (!m) return undefined; const h = sha(m[1]); return keys.find(x => timingSafeEqual(x.h, h)); };
+  const keyOf = (req: http.IncomingMessage) => { const m = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')); if (!m) return undefined; const h = sha(m[1]);
+    const k = keys.find(x => timingSafeEqual(x.h, h)); if (k || !o.sessions) return k;
+    const s = o.sessions(h); return s ? { h, userId: s.userId, scope: s.scope, label: 'session' } : undefined; };
   /** Who a request acts for. A user key: its user. An app key: the end user named in X-User-Id, as the account `<app>:<user>` (keys files cannot hold a colon in a user id,
    *  so these never collide with plain users); on /v1/app/* the app itself. Each end user is a separate account with its own state, orders and isolation. */
   const who = (req: http.IncomingMessage, k: { userId: string; scope: string }): { userId?: string; appId?: string; endUser?: string } | { error: true } => {

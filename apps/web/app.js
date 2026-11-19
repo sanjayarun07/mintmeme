@@ -22,7 +22,7 @@ const S = {
   chain: store.get('chain', 'all'), key: '', natives: {}, watch: store.get('watch', []), quick: store.get('quick', { solana: '0.05', base: '0.001', robinhood: '0.001', bnb: '0.01' }),
   wallets: {}, paused: false, served: [], cfg: null, timers: [], view: null, solWallet: null,
 };
-try { S.key = sessionStorage.getItem('mint.key') || localStorage.getItem('mint.key') || ''; } catch { /* storage blocked */ }
+try { S.key = sessionStorage.getItem('mint.key') || localStorage.getItem('mint.key') || ''; S.via = sessionStorage.getItem('mint.via') || (S.key ? 'key' : null); S.account = sessionStorage.getItem('mint.account'); } catch { /* storage blocked */ }
 
 /* ---------- formatting ---------- */
 const sub = n => String(n).split('').map(d => '₀₁₂₃₄₅₆₇₈₉'[+d]).join('');
@@ -67,13 +67,38 @@ async function page(path, body) {
   const j = await r.json().catch(() => ({})); if (!r.ok || j.ok === false) throw new Error([j.why, j.fix && j.fix !== 'Nothing was signed or sent.' ? j.fix : ''].filter(Boolean).join(' ') || 'HTTP ' + r.status); return j;
 }
 class ApiError extends Error { constructor(m, code, status) { super(m); this.code = code; this.status = status; } }
-async function v1(chain, method, path, body, headers = {}) {
-  if (!S.key) throw new ApiError('Add your API key in Account first.', 'no_key', 401);
+async function v1(chain, method, path, body, headers = {}, retried = false) {
+  if (!S.key) throw new ApiError('Sign in with Privy in Account first.', 'no_key', 401);
   // routes are written as the server documents them (/v1/wallet); on a multi-chain server they live under /v1/<chain>/wallet
   const r = await fetch(`/v1/${chain}${path.replace(/^\/v1\//, '/')}`, { method, headers: { authorization: 'Bearer ' + S.key, ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined });
   const j = await r.json().catch(() => ({}));
+  // a Privy session expired: sign in again quietly with the Privy login this tab still has, then retry once (an idempotency key makes a retried trade safe)
+  if (r.status === 401 && S.via === 'privy' && !retried && await privySignIn(true)) return v1(chain, method, path, body, headers, true);
   if (!r.ok) { const e = j.error || {}; throw new ApiError([e.message, e.fix].filter(Boolean).join(' ') || 'The server answered HTTP ' + r.status + '.', e.code, r.status); }
   return j;
+}
+/** Sign in with Privy: the server checks the Privy login (its signature, this app, not expired) and opens a session for the account that Privy user is mapped to.
+ *  No API key in the page. The session lives in this tab only (sessionStorage) and ends when the tab closes, on sign out, or after the server's session time. */
+let signing = null;
+function privySignIn(quiet) {
+  const ss = window.MintPrivy?.session; if (!ss?.authenticated) return Promise.resolve(false);
+  return signing ??= (async () => {
+    try {
+      const token = await ss.accessToken(); if (!token) throw new Error('Privy is still finishing your login. Press Try again in a moment, or reload the page.');
+      const r = await fetch('/v1/auth/privy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }), j = await r.json().catch(() => ({}));
+      if (!r.ok) { const e = j.error || {}; S.authError = [e.message, e.fix].filter(Boolean).join(' ') || `Sign-in failed (HTTP ${r.status}).`; if (!quiet) toast('err', 'Not signed in', S.authError); return false; }
+      S.key = j.session; S.via = 'privy'; S.account = j.userId; S.authError = null;
+      try { sessionStorage.setItem('mint.key', j.session); sessionStorage.setItem('mint.via', 'privy'); sessionStorage.setItem('mint.account', j.userId); } catch { /* blocked: this visit only */ }
+      await loadAccount(); startStreams(); return true;
+    } catch (e) { S.authError = e.message; return false; }
+    finally { signing = null; }
+  })();
+}
+async function signOut() {
+  if (S.via === 'privy' && S.key) await fetch('/v1/auth/session', { method: 'DELETE', headers: { authorization: 'Bearer ' + S.key } }).catch(() => {});
+  S.key = ''; S.via = null; S.account = null; S.wallets = {}; for (const c of Object.keys(streams)) { streams[c].abort(); delete streams[c]; }
+  try { for (const k of ['mint.key', 'mint.via', 'mint.account']) sessionStorage.removeItem(k); localStorage.removeItem('mint.key'); } catch { /* blocked */ }
+  renderWalletBtn(); setLive(null, 'Signed out');
 }
 const meta = {}; // `${chain}:${addr}` -> { symbol, decimals, price, icon }
 async function loadMeta(chain, tokens) {
@@ -97,7 +122,7 @@ function renderPx() {
 function setLive(ok, text) { const l = $('#live'); l.className = 'live ' + (ok === true ? 'ok' : ok === false ? 'bad' : ''); $('span', l).textContent = text; }
 function renderWalletBtn() {
   const b = $('#walletbtn'), linked = IDS.filter(c => S.wallets[c]?.linked), active = IDS.filter(c => S.wallets[c]?.active);
-  if (!S.key) { b.className = 'wallet'; b.textContent = 'Set up trading'; return; }
+  if (!S.key) { b.className = 'wallet'; b.textContent = 'Sign in'; return; }
   const addr = S.wallets.solana?.address || IDS.map(c => S.wallets[c]?.address).find(Boolean);
   b.className = 'wallet ready' + (active.length < linked.length || !linked.length ? ' warn' : '');
   b.innerHTML = `<span class="dot"></span>${linked.length ? esc(short(addr)) + ` <span class="faint">${active.length}/${IDS.length} chains</span>` : 'Link wallet'}`;
@@ -133,7 +158,7 @@ function renderPause() { const b = $('#pausebtn'); b.setAttribute('aria-pressed'
 
 /* ---------- account state ---------- */
 async function loadAccount() {
-  if (!S.key) { S.wallets = {}; renderWalletBtn(); setLive(null, 'Browsing · add your API key to trade'); return; }
+  if (!S.key) { S.wallets = {}; renderWalletBtn(); setLive(null, 'Browsing · sign in to trade'); return; }
   await Promise.all(S.served.map(async c => {
     try { S.wallets[c] = await v1(c, 'GET', '/v1/wallet'); } catch (e) { S.wallets[c] = { linked: false, active: false, why: e.message, error: e.status }; }
   }));
@@ -175,7 +200,7 @@ function onEvent(chain, data) {
 }
 
 /* ---------- trading actions ---------- */
-const needSetup = chain => { if (!S.key) return 'Add your API key in Account to trade.'; const w = S.wallets[chain]; if (!w?.linked) return `Link your wallet on ${CH[chain].label} in Account first.`; if (!w.active) return w.why || `Trading is not active on ${CH[chain].label}.`; return null; };
+const needSetup = chain => { if (!S.key) return 'Sign in with Privy in Account to trade.'; const w = S.wallets[chain]; if (!w?.linked) return `Link your wallet on ${CH[chain].label} in Account first.`; if (!w.active) return w.why || `Trading is not active on ${CH[chain].label}.`; return null; };
 async function runTrade(chain, path, body, onStep) {
   const key = 'app-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   let t = await v1(chain, 'POST', path, body, { 'idempotency-key': key });
@@ -289,7 +314,7 @@ V.discover = (main) => {
           try { const m = (await market('rows', { chain: c, tokens: ws.map(r => r.address) })).rows; ws.forEach(r => Object.assign(r, m[r.address.toLowerCase()] ?? {}, { chain: c })); } catch { /* keep what was saved */ } }));
       } else if (tab === 'stocks') {
         if (S.chain !== 'all' && S.chain !== 'solana') { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>Stocks are listed for Solana here</b>Robinhood Chain and Base stock tokens trade from their token page: search a ticker such as TSLA.</div></td></tr>`; return; }
-        if (!S.key) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>Add your API key to see stocks</b>The verified stock list comes from your trading server. <a class="btn sm" href="#/setup">Open Account</a></div></td></tr>`; return; }
+        if (!S.key) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>Sign in to see stocks</b>The verified stock list comes from your trading server. <a class="btn sm" href="#/setup">Open Account</a></div></td></tr>`; return; }
         const s = await v1('solana', 'GET', '/v1/stocks?limit=60'); const list = (s.stocks || []).filter(x => x.tradable);
         // the server's list says which stocks are verified and tradable; the market numbers (change, volume, market cap, buys and sells) come from DexScreener
         let mk = {}; try { mk = (await market('rows', { chain: 'solana', tokens: list.map(x => x.mint) })).rows; } catch { /* show the list without them */ }
@@ -390,7 +415,7 @@ V.token = (main, chain, address) => {
     } catch { /* the market data above still stands */ }
   };
   const myOrders = async el => {
-    if (!S.key) { el.innerHTML = '<div class="empty">Add your API key in Account to see your orders.</div>'; return; }
+    if (!S.key) { el.innerHTML = '<div class="empty">Sign in with Privy in Account to see your orders.</div>'; return; }
     try {
       const os = await v1(chain, 'GET', `/v1/orders?token=${encodeURIComponent(address)}&status=active`), list = Array.isArray(os) ? os : os.orders || [];
       el.innerHTML = list.length ? ordersTable(chain, list) : '<div class="empty">No open orders on this token.</div>'; wireCancel(el, () => myOrders(el));
@@ -522,7 +547,7 @@ V.portfolio = async (main) => {
     <div class="kpis" id="kpis">${['Total', ...IDS.map(c => CH[c].label)].map((l, i) => `<div class="card kpi${i ? '' : ' total'}"><small>${i ? badge(IDS[i - 1]) : ''}${esc(l)}</small><b><span class="skel" style="width:90px;height:20px"></span></b></div>`).join('')}</div>
     <div class="card"><div class="tabs" id="ptabs">${[['positions', 'Positions'], ['orders', 'Open orders'], ['history', 'History']].map(([k, l]) => `<button data-p="${k}" aria-selected="${tab === k}">${l}</button>`).join('')}</div><div id="pbody"><div class="pad"><span class="skel" style="width:60%"></span></div></div></div></div>`;
   $$('#ptabs button').forEach(b => b.onclick = () => { store.set('ptab', b.dataset.p); route(); });
-  if (!S.key) { $('#pbody').innerHTML = `<div class="empty"><b>Add your API key to see your portfolio</b><a class="btn sm" href="#/setup">Open Account</a></div>`; $('#kpis').innerHTML = ''; return; }
+  if (!S.key) { $('#pbody').innerHTML = `<div class="empty"><b>Sign in to see your portfolio</b><a class="btn sm" href="#/setup">Open Account</a></div>`; $('#kpis').innerHTML = ''; return; }
   const chains = S.served.filter(c => S.wallets[c]?.linked);
   if (!chains.length) { $('#pbody').innerHTML = `<div class="empty"><b>No wallet linked yet</b>Link your wallet on each chain in Account. <a class="btn sm" href="#/setup">Open Account</a></div>`; }
   // native balances
@@ -593,7 +618,7 @@ V.copy = async (main) => {
   let mode = 'fixed';
   $$('#csz button').forEach(b => b.onclick = () => { mode = b.dataset.z; $$('#csz button').forEach(x => x.setAttribute('aria-selected', String(x === b))); $('#cszl').textContent = mode === 'fixed' ? 'SOL per copied buy' : 'Share of what they spend'; $('#cvu').textContent = mode === 'fixed' ? 'SOL' : '%'; $('#cv').value = mode === 'fixed' ? '0.05' : '10'; });
   const list = async () => {
-    const el = $('#clist'); if (!S.key) { el.innerHTML = `<div class="empty"><b>Add your API key first</b><a class="btn sm" href="#/setup">Open Account</a></div>`; return; }
+    const el = $('#clist'); if (!S.key) { el.innerHTML = `<div class="empty"><b>Sign in first</b><a class="btn sm" href="#/setup">Open Account</a></div>`; return; }
     try {
       const cs = await v1('solana', 'GET', '/v1/copies'), arr = Array.isArray(cs) ? cs : cs.copies || [];
       el.innerHTML = arr.length ? arr.map(c => `<div class="step" style="grid-template-columns:1fr auto"><div><b>${esc((c.leaders || []).map(short).join(', '))}</b><small>${c.sizing?.fixedLamports ? fromRaw(c.sizing.fixedLamports, 9) + ' SOL each' : (c.sizing?.percent ?? '?') + '% of theirs'} · ${esc(c.exitMode || '')}${c.trackOnly ? ' · test mode' : ''}${c.lastError ? ` · <span class="down">${esc(c.lastError)}</span>` : ''}</small></div><button class="btn sm" data-stop="${esc(c.id)}">Stop</button></div>`).join('') : '<div class="empty"><b>Not copying anyone yet</b>Paste a wallet on the right.</div>';
@@ -728,24 +753,30 @@ V.alerts = (main) => {
 /* Account / setup */
 V.setup = async (main) => {
   const P = () => window.MintPrivy, s = () => P()?.session;
-  main.innerHTML = `<div class="page"><div class="ph"><div><h1>Account</h1><p>Three steps, once: connect to your trading server, log in with Privy, then allow trading and link each chain.</p></div></div>
+  main.innerHTML = `<div class="page"><div class="ph"><div><h1>Account</h1><p>Sign in with Privy, then allow trading and link each chain once. Your wallets stay in Privy; the server never holds their keys.</p></div></div>
     <div class="grid2"><div class="card"><div class="steps" id="steps"></div></div>
-    <div style="display:grid;gap:16px"><div class="card form"><h2 style="padding:0;font-size:15px">Settings</h2><div id="sets" class="muted">Add your API key to change settings.</div></div>
+    <div style="display:grid;gap:16px"><div class="card form"><h2 style="padding:0;font-size:15px">Settings</h2><div id="sets" class="muted">Sign in to change settings.</div></div>
     <div class="card form"><h2 style="padding:0;font-size:15px">Quick-buy sizes</h2>${IDS.map(c => `<label class="field"><span>${badge(c)} ${esc(CH[c].label)}</span><span class="input"><input data-q="${c}" inputmode="decimal" value="${esc(S.quick[c])}"><span class="unit">${CH[c].native}</span></span></label>`).join('')}</div></div></div></div>`;
   $$('[data-q]').forEach(i => i.onchange = () => { S.quick[i.dataset.q] = i.value.trim(); store.set('quick', S.quick); toast('ok', 'Saved'); });
   const step = (n, done, title, body, action) => `<div class="step ${done ? 'done' : ''}"><span class="n">${done ? '✓' : n}</span><div><b>${title}</b><small>${body}</small></div><div>${action || ''}</div></div>`;
   const draw = () => {
     const ss = s(), linkedAll = S.served.every(c => S.wallets[c]?.linked);
+    const refused = Object.values(S.wallets).some(w => w.error === 401), signedIn = !!S.key && !refused;
+    const who = ss?.authenticated ? `${ss.email ? esc(ss.email) : 'your Privy account'} · Solana ${esc(short(ss.solAddress) || 'none yet')} · EVM ${esc(short(ss.evmAddress) || 'none yet')}` : '';
+    const signBody = !ss ? 'Loading Privy…' : !ss.authenticated ? 'One login for your wallets and your trading account.'
+      : S.via === 'privy' && signedIn ? `Signed in as ${who}. Trading account <b>${esc(S.account || '')}</b>.`
+      : S.authError ? `${who}<br><span class="down">${esc(S.authError)}</span>` : S.via === 'key' && signedIn ? `${who}<br>Using an API key for the trading account.` : `${who}<br>Connecting to the trading server…`;
     $('#steps').innerHTML =
-      step(1, !!S.key && !Object.values(S.wallets).some(w => w.error === 401), 'Connect to your trading server', S.key ? 'API key saved in this browser.' : 'Paste the API key your server operator gave you.',
-        `<form id="kform" style="display:flex;gap:6px"><span class="input" style="min-height:34px"><input id="kin" type="password" placeholder="${S.key ? '••••••••' : 'API key'}" autocomplete="off" style="padding:6px 0;width:150px"></span><button class="btn sm">${S.key ? 'Replace' : 'Save'}</button></form><label class="check" style="margin-top:6px"><input type="checkbox" id="krem" ${(() => { try { return localStorage.getItem('mint.key') ? 'checked' : ''; } catch { return ''; } })()}> Remember on this device</label>`) +
-      step(2, !!ss?.authenticated, 'Log in with Privy', ss?.authenticated ? `Signed in${ss.email ? ' as ' + esc(ss.email) : ''}. Solana ${esc(short(ss.solAddress) || 'none yet')}, EVM ${esc(short(ss.evmAddress) || 'none yet')}.` : ss?.ready === false || !ss ? 'Loading Privy…' : 'Your wallets live in Privy; the server never holds their keys.',
-        ss?.authenticated ? `${!ss.solAddress ? '<button class="btn sm" id="pcs">Create Solana wallet</button> ' : ''}${!ss.evmAddress ? '<button class="btn sm" id="pce">Create EVM wallet</button> ' : ''}<button class="btn sm ghost" id="plo">Log out</button>` : ss ? '<button class="btn sm primary" id="pli">Log in</button>' : '') +
-      step(3, linkedAll, 'Allow trading and link each chain', 'Privy asks you to let the server sign trades inside each chain\'s limits, then you sign one message per chain to link it. Nothing moves funds.',
-        '') + `<div style="display:grid;gap:8px">${S.served.map(c => { const w = S.wallets[c] || {}; return `<div class="step ${w.active ? 'done' : ''}" style="grid-template-columns:auto 1fr auto"><span>${badge(c)}</span><div><b>${esc(CH[c].label)}</b><small>${w.linked ? esc(short(w.address)) + (w.active ? ' · trading active' : ' · ' + esc(w.why || 'not active')) : w.error ? `<span class="down">${esc(w.why || 'The server did not answer.')}</span>` : esc(w.why || 'Not linked.')}</small></div><div>${S.key && ss?.authenticated ? `<button class="btn sm" data-allow="${c}">Allow</button> <button class="btn sm primary" data-link="${c}">${w.linked ? 'Relink' : 'Link'}</button>` : ''}</div></div>`; }).join('')}</div><div id="sout"></div>`;
-    const kf = $('#kform'); kf.onsubmit = async e => { e.preventDefault(); const v = $('#kin').value.trim(); if (!v) return; S.key = v; try { sessionStorage.setItem('mint.key', v); if ($('#krem').checked) localStorage.setItem('mint.key', v); else localStorage.removeItem('mint.key'); } catch { /* blocked */ } await loadAccount(); startStreams(); draw(); sets(); toast(Object.values(S.wallets).some(w => w.error === 401) ? 'err' : 'ok', Object.values(S.wallets).some(w => w.error === 401) ? 'That key was refused' : 'Connected'); };
+      step(1, signedIn && !!ss?.authenticated, 'Sign in with Privy', signBody,
+        !ss ? '' : !ss.authenticated ? '<button class="btn sm primary" id="pli">Log in</button>'
+          : `${!ss.solAddress ? '<button class="btn sm" id="pcs">Create Solana wallet</button> ' : ''}${!ss.evmAddress ? '<button class="btn sm" id="pce">Create EVM wallet</button> ' : ''}${S.authError ? '<button class="btn sm" id="pretry">Try again</button> ' : ''}<button class="btn sm ghost" id="plo">Sign out</button>`) +
+      step(2, linkedAll, 'Allow trading and link each chain', 'Privy asks you to let the server sign trades inside each chain\'s limits, then you sign one message per chain to link it. Nothing moves funds.',
+        '') + `<div style="display:grid;gap:8px">${S.served.map(c => { const w = S.wallets[c] || {}; return `<div class="step ${w.active ? 'done' : ''}" style="grid-template-columns:auto 1fr auto"><span>${badge(c)}</span><div><b>${esc(CH[c].label)}</b><small>${w.linked ? esc(short(w.address)) + (w.active ? ' · trading active' : ' · ' + esc(w.why || 'not active')) : w.error ? `<span class="down">${esc(w.why || 'The server did not answer.')}</span>` : esc(w.why || 'Not linked.')}</small></div><div>${S.key && ss?.authenticated ? `<button class="btn sm" data-allow="${c}">Allow</button> <button class="btn sm primary" data-link="${c}">${w.linked ? 'Relink' : 'Link'}</button>` : ''}</div></div>`; }).join('')}</div><div id="sout"></div>
+      <details class="adv" style="margin-top:6px"><summary>Use an API key instead (for developers and bots)</summary><form id="kform" style="display:flex;gap:6px;flex-wrap:wrap"><span class="input" style="min-height:34px;flex:1"><input id="kin" type="password" placeholder="${S.via === 'key' && S.key ? '••••••••' : 'API key'}" autocomplete="off" style="padding:6px 0"></span><button class="btn sm">${S.via === 'key' && S.key ? 'Replace' : 'Use key'}</button></form><label class="check"><input type="checkbox" id="krem" ${(() => { try { return localStorage.getItem('mint.key') ? 'checked' : ''; } catch { return ''; } })()}> Remember the key on this device</label></details>`;
+    if ($('#pretry')) $('#pretry').onclick = async () => { S.authError = null; draw(); await privySignIn(false); draw(); sets(); };
+    const kf = $('#kform'); kf.onsubmit = async e => { e.preventDefault(); const v = $('#kin').value.trim(); if (!v) return; S.key = v; S.via = 'key'; try { sessionStorage.setItem('mint.key', v); sessionStorage.setItem('mint.via', 'key'); if ($('#krem').checked) localStorage.setItem('mint.key', v); else localStorage.removeItem('mint.key'); } catch { /* blocked */ } await loadAccount(); startStreams(); draw(); sets(); toast(Object.values(S.wallets).some(w => w.error === 401) ? 'err' : 'ok', Object.values(S.wallets).some(w => w.error === 401) ? 'That key was refused' : 'Connected'); };
     $('#krem').onchange = e => { try { if (e.target.checked && S.key) localStorage.setItem('mint.key', S.key); else localStorage.removeItem('mint.key'); } catch { /* blocked */ } };
-    if ($('#pli')) $('#pli').onclick = () => s().login(); if ($('#plo')) $('#plo').onclick = () => s().logout();
+    if ($('#pli')) $('#pli').onclick = () => s().login(); if ($('#plo')) $('#plo').onclick = async () => { await signOut(); await s().logout(); draw(); sets(); };
     if ($('#pcs')) $('#pcs').onclick = () => s().createSol().catch(e => toast('err', 'Not created', e.message)); if ($('#pce')) $('#pce').onclick = () => s().createEvm().catch(e => toast('err', 'Not created', e.message));
     $$('[data-allow]').forEach(b => b.onclick = () => allow(b.dataset.allow, b)); $$('[data-link]').forEach(b => b.onclick = () => link(b.dataset.link, b));
   };
@@ -797,9 +828,17 @@ async function boot() {
   await loadAccount(); startStreams(); if (S.view !== 'token') route();
   // Privy, headless: login state and signing for Setup, quick bridge and links
   if (S.cfg.privyAppId && S.cfg.privyBundle) {
-    const sc = document.createElement('script'); sc.src = '/privy.bundle.js';
+    const sc = document.createElement('script'); sc.src = '/privy.bundle.js?v=10';
     sc.onload = () => window.MintPrivy.mount($('#privybox'), { appId: S.cfg.privyAppId, headless: true, onWallets: ws => { S.solWallet = (ws || [])[0] || null; window.dispatchEvent(new Event('mintprivy')); } });
     document.head.append(sc);
+    // signed in to Privy but not to the server yet (or the session ended): open a session quietly; a tab using an API key is left alone
+    window.addEventListener('mintprivy', async () => {
+      const ss = window.MintPrivy?.session; if (!ss?.ready) return;
+      if (ss.authenticated && (!S.key || (S.via === 'privy' && Object.values(S.wallets).some(w => w.error === 401))) && !S.authTried) {
+        S.authTried = true; if (!(await privySignIn(true))) { await nap(2500); S.authError = null; await privySignIn(true); } if (S.key && S.via === 'privy') { if (['setup', 'portfolio', 'discover', 'copy'].includes(S.view)) route(); } else if (S.view === 'setup') route();
+      }
+      if (!ss.authenticated && S.via === 'privy') { await signOut(); if (S.view === 'setup') route(); }
+    });
   }
 }
 boot();
