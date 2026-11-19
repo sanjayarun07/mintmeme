@@ -265,8 +265,17 @@ await base.swap({ side: 'buy', token: '0x9a26…7973', eth: '0.001', slippagePct
 await bnb.swap({ side: 'buy', token: '0x55d3…7955', bnb: '0.01', slippagePct: 3 });   // BNB amounts are `bnb`
 ```
 
-Each chain is its own account under the same user: its own wallet link (`/v1/<chain>/wallet/link/*`, each against that chain's Privy policy), orders, trades, caps
-and event stream. In your own backend the same trader runs on another EVM network with `createBaseTrader({ ..., network: 'bnb' })` (or `'robinhood'`); the contracts
+Each chain is its own account under the same user: its own wallet link (`/v1/<chain>/wallet/link/*`), orders, trades, caps and event stream. The EVM chains share
+**one** Privy policy (`PRIVY_EVM_POLICY_ID`, every chain's rules pinned to its `chain_id`): Privy lets a wallet's server signer carry only one policy.
+
+**A person instead of a key.** On a server with `PRIVY_USERS`, sign in with the user's Privy login; the server checks the token and returns a session for the account
+that Privy user is mapped to (docs/HTTP_API.md → Sign in with Privy):
+
+```ts
+const { client, account, expiresAt } = await MemeClient.signInWithPrivy({ baseUrl, privyToken: await privy.getAccessToken() });
+await client.forChain('robinhood').swap({ side: 'buy', token: '0x322F…3b2d', eth: '0.001', slippagePct: 3 });
+await client.signOut();
+``` In your own backend the same trader runs on another EVM network with `createBaseTrader({ ..., network: 'bnb' })` (or `'robinhood'`); the contracts
 are in `EVM_NETWORKS` (packages/sdk/src/base.ts).
 
 ### 4.6 Apps: one key for many users, and webhooks

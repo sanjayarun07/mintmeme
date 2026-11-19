@@ -177,6 +177,25 @@ These are one machine's numbers with a local Redis: a networked Redis adds its r
 The first Docker run took 60 s per failover: nginx's default connect timeout on a stopped container. `nginx.conf` now sets `proxy_connect_timeout 2s` and node-to-node
 forwarding has a 3 s connect timeout; the numbers above are after that fix.
 
+## Deploy step by step (real funds, every chain, the trading app)
+
+1. **Privy** (README → Setup checklist): TEE on; the server's authorization key (`PRIVY_AUTH_KEY_ID`, `PRIVY_AUTH_PRIVATE_KEY`); the app secret
+   (`PRIVY_APP_SECRET`); the Solana policy (`PRIVY_SOLANA_POLICY_ID`); **one** EVM policy holding every EVM chain's rules, each pinned to its `chain_id`
+   (`PRIVY_EVM_POLICY_ID`; `npm run privy:evm-policy -- <chain>` prints one chain's rules); allowed origins: your app's address, `http://127.0.0.1:3500`,
+   `http://127.0.0.1:3700`.
+2. **RPCs and data:** `ALCHEMY_API_KEY` with Base, BNB and Robinhood enabled (or `BASE_RPC_URL`, `BNB_RPC_URL`, `ROBINHOOD_RPC_URL`), `SOLANA_RPC_URL` (for example
+   Helius), `JUPITER_API_KEY` (a paid plan: the desk and JupiterZ make many calls), `RELAY_API_KEY`.
+3. **Keys:** `npm run server:key -- <account>` for each bot or developer (the hash line goes into `API_KEYS_FILE`); for people using `/app`, map their Privy user
+   to an account in `PRIVY_USERS` (a first sign-in that is not mapped shows the `did:privy:…` to add).
+4. **Redis** with AOF (`appendonly yes`) and a password, on a private network; optional Postgres (`PG_URL`) for trade history and the audit log.
+5. **Start** the RFQ desk (`npm run rfq`), the page server (`PORT=3010 npm run web`) and the nodes:
+   `CHAINS=solana,base,robinhood,bnb SOLANA_SAMPLE_URL=http://127.0.0.1:3010 REDIS_URL=... API_KEYS_FILE=... NODE_PUBLIC_URL=http://<this node>:3500 PORT=3500 npm run server`
+   (one per machine, each with its own `NODE_PUBLIC_URL`). Docker: `deploy/server/docker-compose.yml`.
+6. **Check:** `npm run setup:check`; `GET /healthz` and `/readyz` on each node; `GET /v1/chains`; open `http://127.0.0.1:3500/app`, sign in with Privy, allow trading
+   and link each chain in Account; `GET /v1/<chain>/wallet` shows `linked` and `active` for every chain.
+7. **First trades** small, one per chain, and only with the owner's approval; caps per chain: `SOLANA_MAX_TRADE_SOL`, `BASE_MAX_TRADE_ETH`, `ROBINHOOD_MAX_TRADE_ETH`,
+   `BNB_MAX_TRADE_ETH` and their daily caps.
+
 ## Run it
 
 Local, two nodes (practice mode):
@@ -202,7 +221,10 @@ Docker (Redis with AOF and a password, three nodes, nginx on 127.0.0.1:8080): se
 | `SWEEP_MS` | 2000 | How often a node looks for unowned users. |
 | `RATE_PER_SECOND`, `RATE_BURST` | 20, 40 | Per key, **per node**. |
 | `REDIS_REQUIRE_AOF` | true | Refuse a Redis without `appendonly yes`. |
-| `SOLANA_SAMPLE_URL` | none | Serve the `/solana` test page from a running terminal (`apps/web`), to this machine only. |
+| `SOLANA_SAMPLE_URL` | none | Serve the pages of a running page server (`apps/web`) to this machine only: `/app` (the trading app), `/solana` (the test page), `/rfqdesk` (the RFQ desk, read-only) and their `/api/sol/*` calls. |
+| `PRIVY_USERS` | none | Sign in with Privy (`POST /v1/auth/privy`, used by `/app`): `did:privy:<id>=<account>,...`. Only mapped Privy users get a session; unset turns Privy sign-in off (API keys work either way). HTTP_API.md → Sign in with Privy. |
+| `PRIVY_SESSION_HOURS`, `PRIVY_VERIFICATION_KEY` | 12, none | How long a Privy session lasts (1 to 168). The PEM verification key from the Privy dashboard; without it the node fetches Privy's published keys for `PRIVY_APP_ID` (cached an hour). |
+| `PRIVY_EVM_POLICY_ID` | none | One Privy policy for every EVM chain (Base, BNB, Robinhood): it overrides the per-chain policy ids. Needed with more than one EVM chain, because Privy lets a wallet's server signer carry only one policy. |
 | `PG_URL` | none | Optional Postgres for the stored trade history and audit log, e.g. `postgres://user:pass@host:5432/db?sslmode=require` (or `verify-full`). Tables are created on start. |
 | `MAX_USERS_PER_APP` | 10000 | End users one app key may create (each is a separate account; section 4.6 of SDK_AND_API.md). |
 | `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS` | none, 0 | The operator's fee on every real trade, paid in SOL inside the trade (0 to 100 bps; SDK_AND_API.md 4.8). |
@@ -253,9 +275,12 @@ node on the private network.
   the table, app-wide records, the status page with both nodes and then one after a drain, and a trade finishing while Postgres was paused, its record written once it
   was back. On the local validator (`verify:server-sol` with `PG_TEST_URL`, S16): a buy stored with the states it went through on the chain.
 
-## The `/solana` sample page
+## The `/app`, `/solana` and `/rfqdesk` pages
 
-With `SOLANA_SAMPLE_URL=http://127.0.0.1:3000`, a node serves the Solana terminal page at `/solana` and forwards its `/api/sol/*` calls to that terminal. It answers
+With `SOLANA_SAMPLE_URL=http://127.0.0.1:3010` (a page server: `PORT=3010 npm run web`), a node serves the trading app at `/app`, the Solana terminal page at `/solana`
+and the read-only RFQ desk at `/rfqdesk`, and forwards their `/api/sol/*` and `/rfqdesk/api/*` calls to that page server. The page server reaches the desk at
+`RFQ_DESK_URL` (default `http://127.0.0.1:3700`; run it with `npm run rfq`) and forwards only the desk's quote and price routes. `/app` calls the node's own `/v1`
+routes with a Privy session. It answers
 **only requests from the same machine**; anything else gets 404. The terminal is a single-user session that can sign real-funds trades, so it must never be reachable
 through the public load balancer. The link rewrites `Host`, and an `Origin` equal to the node's own address, to the terminal's, so the terminal's CSRF check still
 applies: a request from any other origin is passed through unchanged and refused. Verified: the page renders through the node, and a "Use trading key" click on it
@@ -263,7 +288,8 @@ reached the live terminal. Privy sign-in from `127.0.0.1:3500` may be refused if
 
 ## What is not done (read before trusting it with money)
 
-- **Real accounts: Solana and Base.** `MODE=solana-mainnet` (above): local validator, plus small mainnet buys. `MODE=base-mainnet`: a local Base fork with a Privy stand-in, plus one 0.0002 ETH mainnet buy (tx `0x431b6a…`). Orders, failover and sells through the server have not run on mainnet. Base is limited to Uniswap V2 pools plus Relay or KyberSwap, with no token safety check and no fee sharing; BNB Chain and Robinhood Chain to their V2 pools, local forks only so far. `PLATFORM_FEE_BPS` with `CHAINS` charges Solana trades only.
+- **Real accounts: Solana, Base, Robinhood Chain.** `MODE=solana-mainnet` (above): local validator, plus small mainnet buys. Base: a local fork with a Privy stand-in, plus small mainnet buys (tx `0x431b6a…`). Robinhood Chain: one mainnet buy, 0.0009 ETH of TSLA through KyberSwap (2026-11-19, block 118224037), after a Relay bridge from Base the user approved in Privy. BNB Chain: linked and active, no mainnet trade yet. Orders, failover and sells through the server have not run on mainnet. The EVM chains have no token safety check and no fee sharing.
+- **`/app` is for this machine only**, like `/solana`: the node serves it only to loopback requests. Offering it to other users needs a public front end and Privy origins for its domain (not built). `PLATFORM_FEE_BPS` with `CHAINS` charges Solana trades only.
   Server-held hot keys in files are not production custody.
 - **Postgres is a record, not the source of truth.** Redis holds running accounts; with `PG_URL`, trades and an audit log are copied to Postgres in the background (below). Run it with AOF (`appendfsync everysec` loses at most about a second of state on a Redis
   crash) and back it up. No TLS to Redis, no Sentinel or Cluster support in the client.

@@ -40,5 +40,28 @@ export async function deskEvmQuote(b: any, d: Deps = {}) {
   return (await call(d, 'POST', '/api/evm/quote', body, 60_000)).json();
 }
 
+/** The whole desk (every tab and option, its own UI) inside the trading app, READ-ONLY, without changing the desk: its page is served at /rfqdesk with its API calls pointed at
+ *  /rfqdesk/api/ and the wallet button hidden, and only these desk routes are forwarded. /api/execute (the only one that sends), /api/status and the desk's RPC relay are refused. */
+export const DESK_READ_ONLY: Record<string, 'GET' | 'POST'> = { '/api/config': 'GET', '/api/liquidity': 'GET', '/api/evm/price': 'GET', '/api/token-price': 'GET',
+  '/api/quote': 'POST', '/api/ladder': 'POST', '/api/gate': 'POST', '/api/evm/quote': 'POST', '/api/base/quote': 'POST' };
+const READ_ONLY_STYLE = `<style id="mint-readonly">#connect,#wallet-pop{display:none!important}</style>`;
+/** The desk's page, made read-only for the app: API paths rewritten to /rfqdesk/api/, the wallet button hidden, the trade route pointed at a path that is refused. */
+export async function deskPage(d: Deps = {}) {
+  const r = await call(d, 'GET', '/', undefined, 10_000); let html = await r.text();
+  html = html.replace(/fetch\((['`])\/api\//g, 'fetch($1/rfqdesk/api/');
+  html = html.includes('</head>') ? html.replace('</head>', READ_ONLY_STYLE + '</head>') : READ_ONLY_STYLE + html;
+  return html;
+}
+/** Forward one read-only desk call; anything else is refused. The response body is passed through as is (a quote streams NDJSON). */
+export async function deskApi(method: string, path: string, query: string, body: Buffer | undefined, d: Deps = {}): Promise<{ status: number; type: string; body: ReadableStream<Uint8Array> | string }> {
+  const allowed = DESK_READ_ONLY[path];
+  if (!allowed) return { status: 403, type: 'application/json', body: JSON.stringify({ error: 'This view of the RFQ desk is read-only: it compares quotes and never signs or sends.' }) };
+  if (method !== allowed) return { status: 405, type: 'application/json', body: JSON.stringify({ error: `Use ${allowed}.` }) };
+  const env = d.env ?? process.env; let r: Response;
+  try { r = await (d.fetch ?? fetch)(base(env) + path + query, { method, headers: method === 'POST' ? { 'content-type': 'application/json' } : {}, body: method === 'POST' ? body : undefined, signal: AbortSignal.timeout(120_000) }); }
+  catch { return { status: 503, type: 'application/json', body: JSON.stringify({ error: 'The RFQ desk is not running (start it with npm run rfq, or set RFQ_DESK_URL).' }) }; }
+  return { status: r.status, type: r.headers.get('content-type') ?? 'application/json', body: r.body ?? '' };
+}
+
 /** One size-ladder rung: for `usd` worth, the JupiterZ price and the routers' price. */
 export async function deskLadder(b: any, d: Deps = {}) { return (await call(d, 'POST', '/api/ladder', pick(b, ['mint', 'side', 'pay', 'usd']), 60_000)).json(); }

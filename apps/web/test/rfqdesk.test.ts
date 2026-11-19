@@ -23,6 +23,19 @@ test('only the desk\'s quote routes are called, a quote\'s stages come back as a
   assert.deepEqual(seen, ['GET http://desk.test/api/config', 'POST http://desk.test/api/quote']);
 });
 
+test('the whole desk, read-only: its page calls /rfqdesk/api/, the wallet button is hidden, and only quote and price routes are forwarded', async () => {
+  const { deskPage, deskApi } = await import('../rfqdesk.ts');
+  const page = `<html><head></head><body><button id="connect">Connect wallet</button><script>fetch('/api/quote',{});fetch(\`/api/liquidity?x=1\`);fetch('/api/execute',{})</script></body></html>`;
+  const html = await deskPage({ fetch: (async () => new Response(page)) as any, env });
+  assert.ok(!/fetch\(['`]\/api\//.test(html), 'no call goes to the desk directly'); assert.match(html, /fetch\('\/rfqdesk\/api\/quote'/); assert.match(html, /#connect,#wallet-pop\{display:none!important\}/);
+  const seen: string[] = []; const f = (async (url: string, init: any) => { seen.push(init.method + ' ' + url); return new Response('{"ok":1}', { headers: { 'content-type': 'application/json' } }); }) as any;
+  for (const [m, p] of [['POST', '/api/execute'], ['GET', '/api/status'], ['POST', '/api/sol/rpc'], ['GET', '/']]) assert.equal((await deskApi(m, p, '', undefined, { fetch: f, env })).status, 403, `${m} ${p} is refused`);
+  assert.equal((await deskApi('GET', '/api/quote', '', undefined, { fetch: f, env })).status, 405, 'quote is POST only');
+  assert.equal((await deskApi('POST', '/api/quote', '', Buffer.from('{}'), { fetch: f, env })).status, 200);
+  assert.equal((await deskApi('GET', '/api/liquidity', '?chain=solana', undefined, { fetch: f, env })).status, 200);
+  assert.deepEqual(seen, ['POST http://desk.test/api/quote', 'GET http://desk.test/api/liquidity?chain=solana'], 'refused calls never reach the desk');
+});
+
 test('bad input and a stopped desk are plain refusals', async () => {
   await assert.rejects(deskQuote({ mint: 'nope', amount: '1' }, { env }), /Pick a stock/);
   await assert.rejects(deskQuote({ mint: MINT, amount: '1.5' }, { env }), /Set an amount/);

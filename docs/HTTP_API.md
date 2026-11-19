@@ -106,6 +106,32 @@ Keys are 16 to 200 characters. The server stores only their SHA-256 hashes, and 
 | `trade` | Everything for **one** account: the key's user. |
 | `app` | One key for an **app with many end users**. Each request names the end user (below). |
 
+### Sign in with Privy (sessions instead of an API key)
+
+On a server with `PRIVY_USERS` set, a person can sign in with their Privy login instead of holding an API key. The trading app (`/app`) does this; any client can.
+
+```
+POST /v1/auth/privy          { "token": "<Privy access token>" }      no key needed
+→ 200 { "session": "mts_…", "userId": "arun", "expiresAt": "2026-11-20T07:41:00.000Z" }
+```
+
+Then send the session like a key: `Authorization: Bearer mts_…`. It acts for that account with `trade` scope, on every chain (`/v1/<chain>/…`), until it expires
+(`PRIVY_SESSION_HOURS`, 12 by default) or `DELETE /v1/auth/session` ends it. Paths under `/v1/auth/` take no chain prefix.
+
+What the server checks, all required: an ES256 signature by one of Privy's published keys for this Privy app (or `PRIVY_VERIFICATION_KEY`), issuer `privy.io`,
+audience `PRIVY_APP_ID`, not expired, and a `did:privy:…` subject that `PRIVY_USERS` maps to an account (`did:privy:<id>=<account>,…`). A valid Privy login that is not
+mapped is refused, so other people who log in to the same Privy app cannot trade. Sessions are stored in Redis only as SHA-256 hashes; sign-in is limited to 10 tries a
+minute per address and refused while Redis is unreachable.
+
+| Error | Status | Meaning |
+|---|---|---|
+| `bad_token`, `bad_signature`, `wrong_app` | 401 | Not a Privy login token for this app, or not signed by Privy. |
+| `expired` | 401 | The Privy login expired: get a fresh token from Privy (`getAccessToken()`). |
+| `not_mapped` | 403 | Valid login, but no account for that Privy user. The message names the `did:privy:…` to add to `PRIVY_USERS`. |
+| `not_configured` | 404 | This server has no `PRIVY_USERS`: use an API key. |
+
+TypeScript: `const { client } = await MemeClient.signInWithPrivy({ baseUrl, privyToken, chain? })`, and `client.signOut()`.
+
 ### App keys: one key, many end users
 
 With an `app` key, every account call names the end user it acts for:
@@ -432,6 +458,8 @@ Scopes: **R** = `read` or higher; **T** = `trade`; **A** = app key. Modes: all m
 | GET | `/v1/health` | none | `{"ok":true}` |
 | GET | `/v1/openapi.json` | none | The OpenAPI spec (`/v1/<chain>/openapi.json`: that chain's routes) |
 | GET | `/v1/chains` | none | The chains this server runs and the default. Each: `id`, `label`, `kind` (practice, solana, evm), `native` (SOL, ETH, BNB), `amountKey` (the plain-units field for that coin in a trade: `sol`, `eth`, `bnb`), `chainId` (EVM), `prefix`, `default` |
+| POST | `/v1/auth/privy` | none | Sign in with a Privy access token; returns a session for the mapped account (servers with `PRIVY_USERS`) |
+| DELETE | `/v1/auth/session` | session | End the session sent as the bearer |
 | GET | `/v1/overview` | R | Account state: chain, block, active orders, running jobs |
 | POST | `/v1/quote` | R | Best price for a market trade; nothing is sent |
 | POST | `/v1/trades/buy` | T | Market buy (send `Idempotency-Key`) |
@@ -477,6 +505,7 @@ The per-field details of each body are in `GET /v1/openapi.json` (each route's `
 import { MemeClient, verifyWebhook } from 'memedesk-sdk';
 const c = new MemeClient({ baseUrl: BASE, apiKey: KEY });            // app key: new MemeClient({ ... }).forUser('user-42')
 const bnb = c.forChain('bnb');                                        // multi-chain server: every call under /v1/bnb/ (or pass chain: 'bnb' above)
+const { client } = await MemeClient.signInWithPrivy({ baseUrl: BASE, privyToken });   // a person's Privy login instead of a key; client.signOut() ends it
 const t = await c.swap({ side: 'buy', mint: '<mint>', sol: '0.01', slippagePct: 3, key: 'buy-002' });
 await c.placeOrder({ type: 'take-profit', mint: '<mint>', pct: 100, priceUsd: '0.0002' });
 const ok = await verifyWebhook(secret, rawBody, req.headers['x-memedesk-signature']);

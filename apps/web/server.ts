@@ -62,6 +62,20 @@ export function createSolServer(o: { stateDir?: string } = {}) {
     if (u.pathname === '/solana' || u.pathname === '/solana.html') return send(200, readFileSync(new URL('./solana.html', import.meta.url), 'utf8'), 'text/html');
     if (u.pathname === '/app' || u.pathname === '/app.html') return send(200, readFileSync(new URL('./app.html', import.meta.url), 'utf8'), 'text/html');
     if (STATIC[u.pathname]) { const f = new URL('.' + u.pathname, import.meta.url); if (!existsSync(f)) return send(404, '{}'); return send(200, readFileSync(f, 'utf8'), STATIC[u.pathname]); }
+    // the RFQ desk, whole and read-only, for the app's RFQ tab (rfqdesk.ts deskPage / deskApi): this machine's host names only, like everything else here
+    if (u.pathname === '/rfqdesk' || u.pathname.startsWith('/rfqdesk/')) {
+      if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host ?? '')) return send(403, ser({ ok: false, title: 'Refused', why: 'The RFQ desk is only served to this machine.', fix: '' }));
+      const desk = await import('./rfqdesk.ts');
+      if (u.pathname === '/rfqdesk' || u.pathname === '/rfqdesk/') { try { return send(200, await desk.deskPage(), 'text/html'); } catch (e) { return send(503, `<p style="font-family:sans-serif;padding:24px">${String((e as Error).message).replace(/[<&]/g, '')}</p>`, 'text/html'); } }
+      if (u.pathname.startsWith('/rfqdesk/api/')) {
+        let body: Buffer | undefined; if (req.method === 'POST') { const ch: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 64 * 1024) return send(413, '{}'); ch.push(c as Buffer); } body = Buffer.concat(ch); }
+        const out = await desk.deskApi(req.method ?? 'GET', u.pathname.slice('/rfqdesk'.length), u.search, body);
+        res.writeHead(out.status, { 'content-type': out.type, 'cache-control': 'no-cache' });
+        if (typeof out.body === 'string') return res.end(out.body);
+        const rd = out.body.getReader(); for (;;) { const { value, done } = await rd.read(); if (done) break; res.write(value); } return res.end();
+      }
+      return send(404, '{}');
+    }
     if (!u.pathname.startsWith('/api/sol/')) return send(404, ser({ ok: false, title: 'Not found', why: `No page ${u.pathname}.`, fix: 'Open /solana.' }));
     // Host first, for every /api/sol route: a DNS-rebinding page arrives with its own host name and must not even read the wallet status
     const host = req.headers.host, origin = req.headers.origin;

@@ -74,5 +74,11 @@ test('through a node: sign in, trade-scope calls work with the session, an unmap
     assert.equal((await fetch(url + '/v1/overview', { headers: { authorization: 'Bearer mts_' + 'x'.repeat(43) } })).status, 401, 'a made-up session is unknown');
     assert.equal((await fetch(url + '/v1/auth/session', { method: 'DELETE', headers: { authorization: 'Bearer ' + s.session } })).status, 200);
     assert.equal((await fetch(url + '/v1/overview', { headers: { authorization: 'Bearer ' + s.session } })).status, 401, 'signed out');
+    // the SDK: MemeClient.signInWithPrivy gives a working client; signOut ends it; an unmapped user gets the server's plain refusal
+    const { MemeClient } = await import('../../packages/sdk/src/index.ts');
+    const sdk = await MemeClient.signInWithPrivy({ baseUrl: url, privyToken: jwt(good) }); assert.equal(sdk.account, 'alice');
+    assert.equal(((await sdk.client.overview()) as any).userId, 'alice'); await sdk.client.signOut();
+    await assert.rejects(sdk.client.overview(), (e: any) => e.status === 401);
+    await assert.rejects(MemeClient.signInWithPrivy({ baseUrl: url, privyToken: jwt({ ...good, sub: OTHER }) }), (e: any) => e.code === 'not_mapped');
   } finally { await nd.drain?.(); const c = new SyncRedis(); try { for (const k of (c.cmd('KEYS', `${n}:*`) as string[] ?? [])) c.cmd('DEL', k); } finally { c.close(); } }
 });

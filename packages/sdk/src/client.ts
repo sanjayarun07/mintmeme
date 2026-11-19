@@ -31,7 +31,7 @@ export interface StockTradeOptions {
 export class MemeClient {
   constructor(private o: ClientOptions) { if (!o.apiKey) throw new SdkError('config', 'apiKey is required'); if (o.chain !== undefined && !/^[a-z][a-z0-9-]{1,23}$/.test(o.chain)) throw new SdkError('config', 'chain must be a chain id such as solana or base'); }
   /** The URL of an API path, with this client's chain prefix (not on app routes or the chain list). */
-  private url(path: string) { const c = this.o.chain, p = c && path.startsWith('/v1/') && !path.startsWith('/v1/app/') && path !== '/v1/chains' ? `/v1/${c}/${path.slice(4)}` : path; return this.o.baseUrl.replace(/\/$/, '') + p; }
+  private url(path: string) { const c = this.o.chain, p = c && path.startsWith('/v1/') && !path.startsWith('/v1/app/') && !path.startsWith('/v1/auth/') && path !== '/v1/chains' ? `/v1/${c}/${path.slice(4)}` : path; return this.o.baseUrl.replace(/\/$/, '') + p; }
   private async req(method: string, path: string, body?: unknown, headers: Record<string, string> = {}): Promise<J> {
     const f = this.o.fetch ?? fetch, ctl = new AbortController(), t = setTimeout(() => ctl.abort(), this.o.timeoutMs ?? 30_000);
     try {
@@ -41,6 +41,19 @@ export class MemeClient {
       return j;
     } catch (e) { if (e instanceof SdkError) throw e; throw new SdkError('network', `could not reach the API: ${(e as Error).message}`, 'Check baseUrl and that the server is running.', 0); } finally { clearTimeout(t); }
   }
+  /** Sign in with the user's Privy login instead of an API key (servers with PRIVY_USERS): the server checks the Privy access token and returns a session for the account
+   *  that Privy user is mapped to. Returns a client using that session (`account` says which account; `expiresAt` when it ends). Sessions act with trade scope. */
+  static async signInWithPrivy(o: Omit<ClientOptions, 'apiKey' | 'userId'> & { privyToken: string }): Promise<{ client: MemeClient; account: string; expiresAt: string }> {
+    const f = o.fetch ?? fetch; let r: Response;
+    try { r = await f(o.baseUrl.replace(/\/$/, '') + '/v1/auth/privy', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: o.privyToken }), signal: AbortSignal.timeout(o.timeoutMs ?? 30_000) }); }
+    catch (e) { throw new SdkError('network', `could not reach the API: ${(e as Error).message}`, 'Check baseUrl and that the server is running.', 0); }
+    const j: J = await r.json().catch(() => ({}));
+    if (!r.ok) throw new SdkError(j?.error?.code ?? 'http_' + r.status, j?.error?.message ?? `sign-in failed with ${r.status}`, j?.error?.fix, r.status);
+    const { privyToken: _, ...rest } = o;
+    return { client: new MemeClient({ ...rest, apiKey: j.session }), account: j.userId, expiresAt: j.expiresAt };
+  }
+  /** End this client's Privy session (no effect on an API key). */
+  signOut() { return this.req('DELETE', '/v1/auth/session'); }
   /** With an app key: the same client acting for another end user. */
   forUser(userId: string) { return new MemeClient({ ...this.o, userId }); }
   /** The same client for another chain of a multi-chain server (`forChain('base')`). */

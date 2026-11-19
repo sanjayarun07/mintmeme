@@ -211,6 +211,14 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .step.done .n { background: var(--up-soft); color: var(--up); }
 .step b { display: block; } .step small { color: var(--muted); }
 
+/* RFQ tab: the desk in a frame, filling the space between the top bar and the status bar */
+main.flush { padding: 0; }
+.deskwrap { display: flex; flex-direction: column; height: calc(100dvh - 58px - 33px); }
+.desknote { padding: 8px 20px; border-bottom: 1px solid var(--line); }
+.desknote .note { padding: 6px 10px; }
+.deskframe { flex: 1; width: 100%; border: 0; background: var(--bg); }
+@media (max-width: 760px) { .deskwrap { height: calc(100dvh - 150px - 60px); } }
+
 /* bottom bar, dialogs, toasts */
 .bar { display: flex; align-items: center; gap: 16px; padding: 6px 20px; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--muted); background: var(--bg); position: sticky; bottom: 0; z-index: 10; }
 .bar .grow { flex: 1; }
