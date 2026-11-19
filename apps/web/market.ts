@@ -229,6 +229,37 @@ export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } =
   return { chain, times: out };
 }
 
+/** What a wallet actually holds on one chain, read from the chain: every token with a balance, with symbol, decimals, price and value. Independent of which server or
+ *  app bought it (a server's positions only know its own trades). Solana: token accounts of the Token and Token-2022 programs (the repo's Solana RPC, rate limits
+ *  retried). EVM: Alchemy's alchemy_getTokenBalances on the chain (ALCHEMY_API_KEY, or a <CHAIN>_RPC_URL that serves it). Cached 15 s per wallet. */
+export async function marketHoldings(body: any, d: Deps & { env?: NodeJS.ProcessEnv } = {}) {
+  const chain = chainOf(body?.chain) as Chain, address = String(body?.address ?? '').trim(), env = d.env ?? process.env, f = d.fetch ?? fetch;
+  if (!(chain === 'solana' ? isSol(address) : isEvm(address))) throw new MarketError(chain === 'solana' ? 'That is not a Solana wallet address.' : 'That is not a 0x wallet address.');
+  const { value: raw, stale } = await cached(`holdings:${chain}:${address.toLowerCase()}`, 15_000, d, async () => {
+    const { postRpc } = await import('../../packages/sol/src/solchain.ts');
+    const rpcJson = async (url: string, method: string, params: unknown[]) => { const r = await postRpc(f, url, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), { timeoutMs: 15_000 }); if (r.status !== 200) throw new MarketError(`The ${chain} node answered HTTP ${r.status}.`, 502); const j = JSON.parse(r.text); if (j.error) throw new MarketError(String(j.error.message ?? 'RPC error'), 502); return j.result; };
+    const out = new Map<string, { raw: bigint; decimals: number | null }>();
+    if (chain === 'solana') {
+      const url = solanaRpc(env)?.url; if (!url) throw new MarketError('No Solana RPC on this server (SOLANA_RPC_URL or HELIUS_API_KEY).', 503);
+      for (const programId of ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb']) {
+        const res = await rpcJson(url, 'getTokenAccountsByOwner', [address, { programId }, { encoding: 'jsonParsed' }]);
+        for (const a of res?.value ?? []) { const i = a?.account?.data?.parsed?.info, amt = BigInt(i?.tokenAmount?.amount ?? '0'); if (!i?.mint || amt <= 0n) continue; const h = out.get(i.mint); out.set(i.mint, { raw: (h?.raw ?? 0n) + amt, decimals: Number(i.tokenAmount.decimals) }); }
+      }
+    } else {
+      const net = { base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' }[chain as 'base'], rpcEnv = { base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' }[chain as 'base'];
+      const url = env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : env[rpcEnv]; if (!url) throw new MarketError(`Listing tokens on ${chain} needs ALCHEMY_API_KEY.`, 503);
+      const res = await rpcJson(url, 'alchemy_getTokenBalances', [address, 'erc20']);
+      for (const t of res?.tokenBalances ?? []) { const amt = t?.tokenBalance ? BigInt(t.tokenBalance) : 0n; if (amt > 0n && isEvm(t.contractAddress)) out.set(String(t.contractAddress).toLowerCase(), { raw: amt, decimals: null }); }
+    }
+    return [...out].slice(0, 90).map(([token, v]) => ({ token, raw: v.raw.toString(), decimals: v.decimals }));
+  });
+  const meta = raw.length ? (await marketMeta({ chain, tokens: raw.map(x => x.token) }, d).catch(() => ({ tokens: {} as Record<string, any> }))).tokens : {};
+  const rows = raw.map(x => { const m = meta[chain === 'solana' ? x.token : x.token.toLowerCase()] ?? {}, dec = x.decimals ?? m.decimals ?? null, amount = dec == null ? null : Number(BigInt(x.raw)) / 10 ** dec;
+    return { chain, token: x.token, raw: x.raw, decimals: dec, amount, symbol: m.symbol ?? null, name: m.name ?? null, icon: m.icon ?? null, price: m.price ?? null, value: amount != null && m.price != null ? amount * m.price : null }; });
+  rows.sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
+  return { chain, address, holdings: rows, stale };
+}
+
 /** Search by name, symbol or address across the four chains (DexScreener), one row per token, most liquid first. */
 export async function marketSearch(body: any, d: Deps = {}) {
   const q = String(body?.q ?? '').trim(); if (q.length < 2) return { rows: [] };

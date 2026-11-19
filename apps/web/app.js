@@ -561,16 +561,34 @@ V.portfolio = async (main) => {
   ]);
   // positions
   const all = [];
-  await Promise.all(chains.map(async c => { try { const ps = await v1(c, 'GET', '/v1/positions'); const list = (Array.isArray(ps) ? ps : ps.positions || []).filter(p => p.balance && p.balance !== '0'); const get = await loadMeta(c, list.map(p => p.token)); list.forEach(p => all.push({ chain: c, p, m: get(p.token) })); } catch { /* chain shown as unavailable */ } }));
+  // what the wallet really holds (read from the chain), with cost and P&L from this server's own positions where it traded that token; if the chain cannot be read,
+  // the server's positions alone. A server only knows its own trades, so without the chain read, tokens bought elsewhere (another server, another app) were missing.
+  let hidden = 0;
+  await Promise.all(chains.map(async c => {
+    const ps = await v1(c, 'GET', '/v1/positions').then(x => (Array.isArray(x) ? x : x.positions || []).filter(p => p.balance && p.balance !== '0')).catch(() => []);
+    const byTok = new Map(ps.map(p => [String(p.token).toLowerCase(), p])), addr = S.wallets[c]?.address;
+    let hs = null; if (addr) hs = await market('holdings', { chain: c, address: addr }).then(r => r.holdings).catch(() => null);
+    if (hs) {
+      for (const h of hs) {
+        const p = byTok.get(h.token.toLowerCase()); byTok.delete(h.token.toLowerCase());
+        if (!p && h.value != null && h.value < 0.01) { hidden++; continue; }   // dust and airdropped junk: counted, not listed
+        const sameQty = p && BigInt(p.balance) === BigInt(h.raw);   // cost and P&L only when the server's position is the whole holding
+        all.push({ chain: c, p: { token: h.token, balance: h.raw, knownCost: sameQty ? p.knownCost : null, partial: !!p && !sameQty }, m: { symbol: h.symbol, name: h.name, decimals: h.decimals, price: h.price, icon: h.icon } });
+      }
+    }
+    const rest = [...byTok.values()]; if (rest.length) { const get = await loadMeta(c, rest.map(p => p.token)); rest.forEach(p => all.push({ chain: c, p, m: get(p.token) })); }
+  }));
   const nat = c => (bal[c] ?? 0) * (S.natives[c] ?? 0), posVal = r => { const q = fromRaw(r.p.balance, r.m.decimals); return q != null && r.m.price ? q * r.m.price : 0; };
+  all.sort((a, b) => posVal(b) - posVal(a));
   const byChain = c => nat(c) + all.filter(r => r.chain === c).reduce((s, r) => s + posVal(r), 0), total = IDS.reduce((s, c) => s + byChain(c), 0);
   $('#kpis').innerHTML = `<div class="card kpi total"><small>Total</small><b>${usd(total, { compact: false })}</b></div>` + IDS.map(c => `<div class="card kpi"><small>${badge(c)}${esc(CH[c].label)}</small><b>${usd(byChain(c), { compact: false })}</b><span class="faint" style="font-size:12px">${bal[c] != null ? amt(bal[c], 5) + ' ' + CH[c].native : S.wallets[c]?.linked ? '' : 'Not linked'}</span></div>`).join('');
   const el = $('#pbody'); if (!chains.length) return;
   if (tab === 'positions') {
     el.innerHTML = all.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Token</th><th class="num">Amount</th><th class="num hide-s">Price</th><th class="num">Value</th><th class="num hide-s">Cost</th><th class="num">Profit / loss</th><th class="num"></th></tr></thead><tbody>${all.map((r, i) => {
       const q = fromRaw(r.p.balance, r.m.decimals), v = posVal(r), cost = r.p.knownCost && S.natives[r.chain] ? fromRaw(r.p.knownCost, CH[r.chain].dec) * S.natives[r.chain] : null, pl = cost != null && v ? v - cost : null;
-      return `<tr data-i="${i}"><td><div class="tok">${icon({ ...r.m, chain: r.chain, symbol: r.m.symbol || '?' })}<div><b>${esc(r.m.symbol || short(r.p.token))}</b><small>${esc(CH[r.chain].label)}</small></div></div></td><td class="num">${q != null ? amt(q) : '—'}</td><td class="num hide-s">${usd(r.m.price)}</td><td class="num">${v ? usd(v) : '—'}</td><td class="num hide-s">${cost != null ? usd(cost) : '<span class="faint">unknown</span>'}</td><td class="num ${cls(pl)}">${pl != null ? usd(pl) + ` <small>${pct(pl / cost * 100)}</small>` : '—'}</td><td class="num"><button class="btn sm" data-sell="50">Sell 50%</button> <button class="btn sm" data-sell="100">Sell all</button></td></tr>`; }).join('')}</tbody></table></div>`
-      : `<div class="empty"><b>No positions yet</b>Buy something from <a href="#/">Discover</a>.</div>`;
+      return `<tr data-i="${i}"><td><div class="tok">${icon({ ...r.m, chain: r.chain, symbol: r.m.symbol || '?' })}<div><b>${esc(r.m.symbol || short(r.p.token))}</b><small>${esc(CH[r.chain].label)}</small></div></div></td><td class="num">${q != null ? amt(q) : '—'}</td><td class="num hide-s">${usd(r.m.price)}</td><td class="num">${v ? usd(v) : '—'}</td><td class="num hide-s">${cost != null ? usd(cost) : r.p.partial ? '<span class="faint" title="Part of this balance was bought outside this app">partly elsewhere</span>' : '<span class="faint">unknown</span>'}</td><td class="num ${cls(pl)}">${pl != null ? usd(pl) + ` <small>${pct(pl / cost * 100)}</small>` : '—'}</td><td class="num"><button class="btn sm" data-sell="50">Sell 50%</button> <button class="btn sm" data-sell="100">Sell all</button></td></tr>`; }).join('')}</tbody></table></div>`
+      : `<div class="empty"><b>No tokens in your wallets yet</b>Buy something from <a href="#/">Discover</a>.</div>`;
+    if (hidden) el.insertAdjacentHTML('beforeend', `<p class="faint pad" style="margin:0;font-size:12.5px">${hidden} token${hidden > 1 ? 's' : ''} worth under $0.01 not shown (dust or airdrops).</p>`);
     $$('tr[data-i]', el).forEach(tr => { const r = all[+tr.dataset.i];
       tr.onclick = e => { if (!e.target.closest('button')) location.hash = `#/t/${r.chain}/${r.p.token}`; };
       $$('[data-sell]', tr).forEach(b => b.onclick = () => sellPct(r, +b.dataset.sell)); });
