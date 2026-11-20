@@ -43,6 +43,13 @@ jobs:
           docker run -d --name redis -p 6379:6379 redis:7.4.11-alpine redis-server --appendonly yes --appendfsync everysec
           for i in $(seq 1 30); do docker exec redis redis-cli ping 2>/dev/null | grep -q PONG && exit 0; sleep 1; done
           echo "Redis did not start"; exit 1
+      # the MCP server's one dependency (its stdio test is skipped without it); install scripts off, from the lockfile
+      - name: Install apps/mcp
+        run: npm ci --prefix apps/mcp --ignore-scripts --no-audit --no-fund
+      # Foundry's cast: the keccak256 test checks our hash against it
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
       - name: Test
         run: npm test
 
