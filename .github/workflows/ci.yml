@@ -1,0 +1,77 @@
+# CI: the full test suite on every push and pull request, with the Redis and Postgres the cluster and trade-history tests need.
+# No secrets are used or needed: every test runs offline against stand-ins (practice chain, fake Privy, scripted RPCs). The repo is public, so never add any.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16.6-alpine
+        env:
+          POSTGRES_PASSWORD: ci-only-throwaway
+          POSTGRES_DB: memedesk_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # a throwaway database inside this job only; records.test.ts creates its tables
+      PG_TEST_URL: postgres://postgres:ci-only-throwaway@127.0.0.1:5432/memedesk_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18'
+      # Redis with AOF on, as production requires (the durability test checks it); a service container cannot take a command, so it is started here
+      - name: Start Redis
+        run: |
+          docker run -d --name redis -p 6379:6379 redis:7.4.11-alpine redis-server --appendonly yes --appendfsync everysec
+          for i in $(seq 1 30); do docker exec redis redis-cli ping 2>/dev/null | grep -q PONG && exit 0; sleep 1; done
+          echo "Redis did not start"; exit 1
+      - name: Test
+        run: npm test
+
+  # The deploy gate: a commit on the working branch reaches `deploy/prod` (the branch the server deploys) only after every test above passed on it.
+  # Forward only: if deploy/prod was rolled back to an older commit, it moves forward again with the next tested commit; anything else stops here.
+  # Roll back by pointing deploy/prod at an earlier commit that passed CI (docs/DEVOPS.md).
+  release:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/cleanup/sdk-server-only'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Move deploy/prod to the tested commit
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin deploy/prod >/dev/null; then
+            git fetch -q origin deploy/prod
+            if ! git merge-base --is-ancestor FETCH_HEAD "$GITHUB_SHA"; then
+              echo "deploy/prod ($(git rev-parse --short FETCH_HEAD)) is not an ancestor of $GITHUB_SHA: not moving it. Check the branch history."; exit 1
+            fi
+            if [ "$(git rev-parse FETCH_HEAD)" = "$GITHUB_SHA" ]; then echo "deploy/prod is already at $GITHUB_SHA"; exit 0; fi
+          fi
+          git push origin "$GITHUB_SHA:refs/heads/deploy/prod"
+          echo "deploy/prod -> $(git rev-parse --short "$GITHUB_SHA")" >> "$GITHUB_STEP_SUMMARY"
