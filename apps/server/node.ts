@@ -26,6 +26,9 @@ import type { WebhookOptions } from './webhooks.ts';
 import { CHAIN_SPECS, CHAIN_ID_RE, RESERVED_SEGMENTS, defaultChainKey, stateName } from './chains.ts';
 import { AuthError, openSession, lookupSession, closeSession } from './privyauth.ts';
 import { SIGNUP_PREFIX } from './chains.ts';
+import { AGENT_PREFIX, agentGuard, agentSpentToday, createAgentKey, listAgentKeys, lookupAgentKey, parseAgentRequest, revokeAgentKey } from './agentkeys.ts';
+import { handleMcp } from '../mcp/http.ts';
+import { createHash } from 'node:crypto';
 
 /** `prepare` runs before each API call with its JSON body (a real chain must learn a token before quoting or trading it, and can refuse early). */
 /** `copies` (optional): copy trading for this account (POST/GET/DELETE /v1/copies): the host builds the leader source and keeps the configs in the user's state. */
@@ -161,12 +164,14 @@ export async function createNode(o: NodeOptions) {
   const named = !!o.chains?.length;
   const wire = (user: string, chain: string, t: Trader) => t.on(e => { if (e.type !== 'error') void hooks.emit(user, e.type, multi ? { ...e, chain } : e); if (e.type === 'trade') history?.recordTrade(user, t.trade_(e.key), named ? { chain, prefixKey: chain !== defaultChain } : undefined); });
   /** One API per chain (same keys, one shared rate budget per key): routes, wallet linking and event streams are per chain; app routes and records are the same on all. */
+  /** An agent key (agentkeys.ts) acts like a trade session for its account, with its caps attached for the API's agentGuard. */
+  const agentSession = (h: Buffer) => { const k = lookupAgentKey(r, o.namespace, h); return k ? { userId: k.userId, scope: 'trade' as const, agent: k } : undefined; };
   const buckets = new Map<string, { tokens: number; at: number }>(), apps = [...appRoutes(hooks, r, o.namespace, o.maxAppFeeBps ?? 100), ...recordRoutes(history, true)];
   const apis = new Map(chains.map(c => {
     const copiesOf = (u: string) => { const cp = acctOf(u, c.id)?.copies; if (!cp) throw new SdkError('not_configured', `copy trading is not available for this account on ${c.id}`, 'Copy trading runs on the real chains (Solana, Base, BNB Chain, Robinhood Chain); this chain has no leader source.', 501); return cp; };
     const extra = c.extraRoutes?.({ state: u => { const x = owned.get(u); return x ? stateOf(x.lease, c.id) : undefined; }, reload: u => reload(u, c.id) });
     const audit = history ? (e: Parameters<NonNullable<Parameters<typeof createApi>[0]['onChange']>>[0]) => history.audit({ ...e, path: multi ? e.path.replace(/^\/v1\//, `/v1/${c.id}/`) : e.path, node: o.publicUrl, body: auditBody(e.body) }) : undefined;
-    return [c.id, createApi({ keys: o.keys, sessions: o.privyAuth ? h => lookupSession(r, o.namespace, h) : undefined, buckets, traderFor: u => acctOf(u, c.id)?.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: audit, prepare: (u, body, path) => acctOf(u, c.id)?.prepare?.(body, path),
+    return [c.id, createApi({ keys: o.keys, sessions: o.privyAuth ? h => lookupSession(r, o.namespace, h) ?? agentSession(h) : undefined, agentGuard: agentGuard(r, o.namespace, c.id), buckets, traderFor: u => acctOf(u, c.id)?.trader, rate: o.rate, extraRoutes: [...(extra ?? []), ...recordRoutes(history)], onChange: audit, prepare: (u, body, path) => acctOf(u, c.id)?.prepare?.(body, path),
       makeCopy: (_t, body, u) => copiesOf(u).create(body), removeCopy: (_t, id, u) => copiesOf(u).remove(id), listCopies: (t, u) => acctOf(u, c.id)?.copies?.list() ?? [...t.copies].map(([id, x]) => ({ id, lastError: x.lastError })), appRoutes: apps })] as const;
   }));
   const api = apis.get(defaultChain)!;
@@ -322,12 +327,44 @@ export async function createNode(o: NodeOptions) {
     }
   };
 
+  /** Agent keys (agentkeys.ts): list, make and revoke, only with a Privy sign-in session (the person, never an API key or another agent key). */
+  const agentKeysRoute = async (req: http.IncomingMessage, res: http.ServerResponse, path: string) => {
+    const err = (status: number, code: string, message: string, fix?: string) => json(res, status, { error: { code, message, ...(fix ? { fix } : {}) } });
+    if (!o.privyAuth) return err(404, 'not_configured', 'This server does not offer Privy sign-in, so it has no agent keys.');
+    const mt = /^Bearer (mts_[A-Za-z0-9_-]{40,60})$/.exec(String(req.headers.authorization ?? ''));
+    const s = mt ? lookupSession(r, o.namespace, createHash('sha256').update(mt[1]).digest()) : undefined;
+    if (!s) return err(401, 'unauthorized', 'Agent keys are managed only while signed in with Privy.', 'Sign in in the app (Account), then try again.');
+    try {
+      if (path === '/v1/auth/agent-keys' && req.method === 'GET') return json(res, 200, { keys: listAgentKeys(r, o.namespace, s.userId).map(k => ({ ...k, spentToday: agentSpentToday(r, o.namespace, k) })) });
+      if (path === '/v1/auth/agent-keys' && req.method === 'POST') {
+        let body: any; try { const ch: Buffer[] = []; let n = 0; for await (const c of req) { n += (c as Buffer).length; if (n > 16_384) return err(413, 'too_large', 'The request is too large.'); ch.push(c as Buffer); } body = JSON.parse(Buffer.concat(ch).toString() || '{}'); } catch { return err(400, 'bad_request', 'Send a JSON object.'); }
+        const made = createAgentKey(r, o.namespace, s.userId, parseAgentRequest(body, [...chainIds]));
+        log(`[agent] ${s.userId} made agent key ${made.key.id} (${Object.keys(made.key.caps).join(',')})`);
+        return json(res, 200, made);
+      }
+      const del = /^\/v1\/auth\/agent-keys\/([0-9a-f]{16})$/.exec(path);
+      if (del && req.method === 'DELETE') { const ok = revokeAgentKey(r, o.namespace, s.userId, del[1]); if (ok) log(`[agent] ${s.userId} revoked agent key ${del[1]}`); return ok ? json(res, 200, { revoked: del[1] }) : err(404, 'not_found', 'You have no agent key with that id.'); }
+      return err(405, 'method_not_allowed', 'GET or POST /v1/auth/agent-keys, DELETE /v1/auth/agent-keys/<id>.');
+    } catch (e) { if (e instanceof SdkError) return json(res, e.status || 400, { error: e.toJSON() }); throw e; }
+  };
+  /** The hosted MCP endpoint (apps/mcp/http.ts): agent keys only. Its tools call this node's own API over loopback with the same key, so routing, caps and audit are the API's. */
+  const mcpRoute = async (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const mt = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')), token = mt?.[1];
+    const agent = token?.startsWith(AGENT_PREFIX) && o.privyAuth ? lookupAgentKey(r, o.namespace, createHash('sha256').update(token).digest()) : undefined;
+    const ad = server.address() as { address: string; port: number } | null, host = !ad || ad.address === '0.0.0.0' || ad.address === '::' ? '127.0.0.1' : ad.address.includes(':') ? `[${ad.address}]` : ad.address;
+    const out = await handleMcp({ method: req.method ?? 'GET', body: req, agent: agent ? { label: agent.label, caps: agent.caps, maxSlippagePct: agent.maxSlippagePct, expiresAt: agent.expiresAt } : undefined, token, apiUrl: `http://${host}:${ad?.port}` });
+    res.writeHead(out.status, { 'cache-control': 'no-store', ...(out.body === undefined ? {} : { 'content-type': 'application/json; charset=utf-8' }), ...(out.status === 401 ? { 'www-authenticate': 'Bearer' } : {}), ...(out.headers ?? {}) });
+    res.end(out.body === undefined ? undefined : JSON.stringify(out.body));
+  };
+
   const server = http.createServer(async (req, res) => {
     try {
       // origin-form targets only ("/path"): "//host/..." or "http://host/..." would make forwarding reach a host the client chose
       if (!/^\/(?!\/)/.test(req.url ?? '')) return json(res, 400, { error: { code: 'bad_request', message: 'Request target must be a path.' } });
       const path = new URL(req.url!, 'http://x').pathname;
       if (path === '/v1/auth/privy' || path === '/v1/auth/session') return await authRoute(req, res, path);
+      if (path === '/v1/auth/agent-keys' || path.startsWith('/v1/auth/agent-keys/')) return await agentKeysRoute(req, res, path);
+      if (path === '/mcp') return await mcpRoute(req, res);
       if (path === '/healthz') return json(res, 200, { ok: true, node: o.publicUrl, users: owned.size, chains: [...chainIds] });
       if (path === '/status.json' || path === '/status') { const s = await status(); if (path === '/status.json') return json(res, 200, s); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' }); return res.end(statusHtml(s)); }
       if (path === '/readyz') { let ok = !draining; try { ok = ok && r.cmd('PING') === 'PONG'; } catch { ok = false; } return json(res, ok ? 200 : 503, { ready: ok, draining }); }

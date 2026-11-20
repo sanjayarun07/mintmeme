@@ -82,7 +82,34 @@ banner on stdout, which is the protocol channel (`npm run --silent mcp` works). 
 - Answers and errors never carry secrets: the values of secret-looking environment variables (`*KEY*`, `*SECRET*`, `*TOKEN*`, `*PRIVATE*`...), bearer tokens,
   `api-key=` style query values and RPC keys in URL paths are replaced with `[redacted]`. The API key goes only to the execution server, never to the desk.
 
+## Hosted endpoint: an agent that trades by itself, within caps
+
+The execution server also serves MCP at **`POST /mcp`** (https://mintmeme.openledger.dev/mcp), so an agent connects with a URL instead of running `apps/mcp`.
+It is MCP's Streamable HTTP transport in its stateless form (`apps/mcp/http.ts`, no SDK): `initialize`, `ping`, `tools/list`, `tools/call`.
+
+- **Agent keys only** (`Authorization: Bearer mta_...`). A signed-in user makes one in the app: **Account → AI agent**, choosing for each chain the most native
+  coin per buy and per UTC day, a max slippage and an expiry (1 to 90 days). The key is shown once; Redis keeps only its hash (`apps/server/agentkeys.ts`).
+  Plain API keys and sign-in sessions are refused here. Up to 10 keys per account; **Revoke** stops one on the next request.
+- **No per-trade approval.** `meme_buy` and `meme_sell` take no `confirm` here: the key's caps are the approval, and the **server** enforces them before a trade
+  is built (`agentGuard`). It refuses a buy over the per-buy or daily cap (`agent_cap_trade`, `agent_cap_daily`; a buy that fails gives its amount back), a chain
+  the key does not name, slippage over the key's limit, raw `amount` instead of the plain-units field, and `allowRiskyToken`.
+- **What a key may do:** every read route, and market buys and sells. Not standing orders, TWAP, bulk, copy, cancels (a stop loss stays), wallet linking,
+  the kill switch, settings, or making more agent keys. The hosted tool list has only these 18 tools.
+- **Self-custodial as before:** trades are signed by the user's own Privy wallet under the policy they granted, and the chain's server caps
+  (`BASE_MAX_TRADE_ETH`...) apply on top. The tools call the server's own `/v1` API over loopback with the same key, so routing, audit and rate limits are the API's.
+- Managing keys: `GET/POST /v1/auth/agent-keys`, `DELETE /v1/auth/agent-keys/<id>`, with a Privy sign-in session only.
+
+Claude Code:
+
+```bash
+claude mcp add --transport http mintmeme https://mintmeme.openledger.dev/mcp --header "Authorization: Bearer mta_..."
+```
+
+Not yet: OAuth, which Claude.ai and Claude Desktop custom connectors expect. Header auth works in Claude Code and most MCP clients.
+
 ## Tests
+
+`apps/server/agentkeys.test.ts` covers agent keys, the guard, the hosted endpoint and a node end to end (local Redis).
 
 `apps/mcp/tools.test.ts` (part of `npm test`) drives every tool against a fake HTTP backend: argument checks, the chain prefix per chain, the practice server, the
 confirm and flag gate, the plain-units field per chain, the desk's read-only paths and NDJSON stages, the event stream, and redaction. One test starts `main.ts`

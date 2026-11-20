@@ -13,6 +13,10 @@ export interface Env { [k: string]: string | undefined }
 export interface Config {
   apiUrl: string; apiKey?: string; userId?: string; practiceUrl?: string; practiceKey?: string; deskUrl: string;
   allowTrades: boolean; timeoutMs: number; deskTimeoutMs: number;
+  /** The hosted endpoint (http.ts) with an agent key: only HOSTED_TOOLS, and spending tools need no confirm, because the execution server enforces the key's caps. */
+  autonomous?: boolean;
+  /** Hosted: the agent key's caps, shown by meme_chains so the agent can plan within them. */
+  agent?: unknown;
 }
 export interface Ctx { cfg: Config; fetch: typeof fetch; secrets: string[]; now?: () => number }
 export interface ToolResult { content: { type: 'text'; text: string }[]; isError?: boolean }
@@ -162,7 +166,7 @@ const spend = (name: string, title: string, description: string, props: Json, re
 
 // ── execution server: reads ──
 ro('meme_chains', 'List chains', 'The chains the execution server runs (GET /v1/chains): id, kind (practice, solana, evm), native coin, amountKey (the plain-units field for trades: sol, eth, bnb), EIP-155 chainId, default. No key needed. Also says whether real-funds trading is enabled in this MCP server.', {}, [],
-  async (_a, c) => ({ ...(await http(c, 'GET', c.cfg.apiUrl + '/v1/chains')), mcp: { realTradesEnabled: c.cfg.allowTrades, practiceUrl: c.cfg.practiceUrl ? 'set' : 'not set (practice goes to /v1/practice/ on MEME_API_URL)' } }));
+  async (_a, c) => ({ ...(await http(c, 'GET', c.cfg.apiUrl + '/v1/chains')), mcp: c.cfg.autonomous ? { hosted: true, realTradesEnabled: true, agent: c.cfg.agent } : { realTradesEnabled: c.cfg.allowTrades, practiceUrl: c.cfg.practiceUrl ? 'set' : 'not set (practice goes to /v1/practice/ on MEME_API_URL)' } }));
 ro('meme_overview', 'Account overview', 'Account state on one chain (GET /v1/<chain>/overview): block, active orders, running bulk and TWAP jobs.', { chain: chainArg }, ['chain'], (a, c) => api(c, 'GET', a.chain, '/v1/overview'));
 ro('meme_positions', 'Positions', 'Open positions on one chain with balance, cost basis and realized P&L (GET /v1/<chain>/positions). An unknown cost basis stays null.', { chain: chainArg }, ['chain'], (a, c) => api(c, 'GET', a.chain, '/v1/positions'));
 ro('meme_quote', 'Quote (nothing sent)', 'Best venue price for a market trade, nothing is sent (POST /v1/<chain>/quote): output, guaranteed minimum, price impact, fees, alternatives. `amount` is in raw base units (lamports, wei, or the token\'s smallest unit for a sell).',
@@ -281,9 +285,17 @@ ro('rfq_evm_price', 'EVM stock price', 'The USD price of a tokenized stock on an
   { chain: deskChain, symbol: str('The stock symbol.', { pattern: '^[A-Za-z0-9.]{1,16}$' }) }, ['chain', 'symbol'], (a, c) => desk(c, 'GET', '/api/evm/price' + qs({ chain: a.chain, symbol: a.symbol })));
 ro('rfq_token_price', 'Solana token price', 'The USD price of a Solana token (GET /api/token-price).', { mint: solMint }, ['mint'], (a, c) => desk(c, 'GET', '/api/token-price' + qs({ mint: a.mint })));
 
-/** The tools as MCP lists them. */
-export function listTools() {
-  return TOOLS.map(t => ({ name: t.name, title: t.title, description: t.description, inputSchema: t.inputSchema, annotations: { title: t.title, readOnlyHint: t.readOnly, destructiveHint: !t.readOnly, idempotentHint: t.readOnly, openWorldHint: true } }));
+/** What the hosted endpoint offers an agent key: reads, and market buys and sells (the execution server refuses an agent key anything else). */
+export const HOSTED_TOOLS = new Set(['meme_chains', 'meme_overview', 'meme_positions', 'meme_quote', 'meme_wallet', 'meme_trades', 'meme_trade', 'meme_history', 'meme_orders', 'meme_order',
+  'meme_twap_status', 'meme_bulk_status', 'meme_events', 'meme_stocks', 'meme_stock', 'meme_token_safety', 'meme_buy', 'meme_sell']);
+const AUTONOMOUS = 'SPENDS REAL FUNDS from the user\'s own wallet, without asking them first: the server allows it only within this agent key\'s caps (chains, native coin per buy and per UTC day, max slippage; see meme_chains -> agent) and refuses anything over them. ';
+/** The tools as MCP lists them. Hosted (agent key): only HOSTED_TOOLS, and no confirm argument on spending tools. */
+export function listTools(o: { hosted?: boolean } = {}) {
+  return TOOLS.filter(t => !o.hosted || HOSTED_TOOLS.has(t.name)).map(t => {
+    let description = t.description, inputSchema = t.inputSchema;
+    if (o.hosted && t.spends) { const { confirm: _c, ...props } = t.inputSchema.properties; description = AUTONOMOUS + t.description.slice(SPEND.length); inputSchema = { ...t.inputSchema, properties: props, required: t.inputSchema.required.filter((x: string) => x !== 'confirm') }; }
+    return { name: t.name, title: t.title, description, inputSchema, annotations: { title: t.title, readOnlyHint: t.readOnly, destructiveHint: !t.readOnly, idempotentHint: t.readOnly, openWorldHint: true } };
+  });
 }
 export const SPENDING_TOOLS = TOOLS.filter(t => t.spends).map(t => t.name);
 
@@ -292,7 +304,12 @@ const text = (s: string, c: Ctx) => { const r = redact(s, c.secrets); return r.l
 export async function callTool(name: string, args: Json, c: Ctx): Promise<ToolResult> {
   const t = TOOLS.find(x => x.name === name);
   if (!t) return { isError: true, content: [{ type: 'text', text: `unknown tool ${name}` }] };
-  const a = args ?? {};
+  let a = args ?? {};
+  if (c.cfg.autonomous) {
+    if (!HOSTED_TOOLS.has(name)) return { isError: true, content: [{ type: 'text', text: `unknown tool ${name}` }] };
+    // the agent key's caps are the approval here, enforced by the execution server; confirm is not part of the hosted schema
+    if (t.spends && a && typeof a === 'object' && !Array.isArray(a)) a = { ...a, confirm: true };
+  }
   // a spending call without confirm gets the gate's explanation (what to show the user), not a bare "confirm is required"
   if (t.spends && a && typeof a === 'object' && a.confirm === undefined && (CHAINS as readonly string[]).includes(a.chain)) a.confirm = false;
   const errs = validate(t.inputSchema, a);

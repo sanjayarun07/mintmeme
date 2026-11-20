@@ -727,6 +727,7 @@ V.setup = async (main) => {
     <div class="grid2"><div class="card"><div class="steps" id="steps"></div></div>
     <div style="display:grid;gap:16px"><div class="card form"><h2 style="padding:0;font-size:15px">Your wallets</h2><div id="wallets" class="muted">Log in with Privy to see your wallets.</div></div>
     <div class="card form"><h2 style="padding:0;font-size:15px">Settings</h2><div id="sets" class="muted">Sign in to change settings.</div></div>
+    <div class="card form"><h2 style="padding:0;font-size:15px">AI agent</h2><div id="agents" class="muted">Sign in with Privy to let an AI agent trade for you.</div></div>
     <div class="card form"><h2 style="padding:0;font-size:15px">Quick-buy sizes</h2>${IDS.map(c => `<label class="field"><span>${badge(c)} ${esc(CH[c].label)}</span><span class="input"><input data-q="${c}" inputmode="decimal" value="${esc(S.quick[c])}"><span class="unit">${CH[c].native}</span></span></label>`).join('')}</div></div></div></div>`;
   $$('[data-q]').forEach(i => i.onchange = () => { S.quick[i.dataset.q] = i.value.trim(); store.set('quick', S.quick); toast('ok', 'Saved'); });
   const step = (n, done, title, body, action) => `<div class="step ${done ? 'done' : ''}"><span class="n">${done ? '✓' : n}</span><div><b>${title}</b><small>${body}</small></div><div>${action || ''}</div></div>`;
@@ -798,8 +799,38 @@ V.setup = async (main) => {
       '<p class="faint" style="margin:0;font-size:12.5px">Send SOL, ETH or BNB to these to fund trading. They are your Privy wallets: only you control them.</p>';
     $$('[data-copy]', el).forEach(b => b.onclick = () => navigator.clipboard?.writeText(b.dataset.copy).then(() => toast('ok', 'Address copied')).catch(() => toast('warn', 'Copy it by hand', b.dataset.copy)));
   };
-  draw(); sets(); wallets();
-  const onP = () => { if (S.view === 'setup') { draw(); wallets(); } }; window.addEventListener('mintprivy', onP); S.cleanup = [...(S.cleanup || []), () => window.removeEventListener('mintprivy', onP)];
+  /** AI agent keys: an agent (Claude or any MCP client) trades this account's own wallets by itself, only within the caps set here; the server enforces them. */
+  const AGENT_DEFAULTS = { solana: ['0.05', '0.25'], base: ['0.002', '0.01'], robinhood: ['0.002', '0.01'], bnb: ['0.01', '0.05'] };
+  const agents = async (made) => {
+    const el = $('#agents'); if (!el) return;
+    if (S.via !== 'privy' || !S.key) { el.innerHTML = '<span class="muted">Sign in with Privy to let an AI agent trade for you. API-key sign-in cannot make agent keys.</span>'; return; }
+    const call = async (method, path, body) => { const r = await fetch(path, { method, headers: { authorization: 'Bearer ' + S.key, ...(body ? { 'content-type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined }); const j = await r.json().catch(() => ({})); if (!r.ok) throw new Error([j.error?.message, j.error?.fix].filter(Boolean).join(' ') || 'HTTP ' + r.status); return j; };
+    let keys = []; try { keys = (await call('GET', '/v1/auth/agent-keys')).keys || []; } catch (e) { el.innerHTML = `<span class="muted">${esc(e.message)}</span>`; return; }
+    const real = S.served.filter(c => AGENT_DEFAULTS[c]), url = location.origin + '/mcp';
+    const capTxt = k => Object.entries(k.caps).map(([c, v]) => `${badge(c)} ${esc(v.perTrade)} per buy, ${esc(v.daily)} a day (${esc(k.spentToday?.[c] ?? '0')} used today) ${esc(CH[c]?.native || '')}`).join('<br>');
+    const cmd = made ? `claude mcp add --transport http mintmeme ${url} --header "Authorization: Bearer ${made.token}"` : '';
+    const mono = v => `<span class="input" style="min-height:38px"><span class="mono" style="flex:1;min-width:0;overflow-wrap:anywhere;padding:8px 0;font-size:12px">${esc(v)}</span><button type="button" class="btn sm ghost" data-acopy="${esc(v)}">Copy</button></span>`;
+    el.innerHTML = (made ? `<div class="note ok"><div style="display:grid;gap:6px;min-width:0"><b>Agent key made. Copy it now: it is shown only once.</b>${mono(made.token)}<small>Add it to Claude Code:</small>${mono(cmd)}<small>Any other MCP client: URL ${esc(url)}, header Authorization: Bearer &lt;key&gt;.</small></div></div>` : '')
+      + `<p class="faint" style="margin:0;font-size:12.5px">An agent with this key buys and sells from your own wallets <b>without asking you</b>, only up to the limits you set. It cannot place standing orders, cancel your stop losses, move funds out or change settings. Revoke it at any time.</p>`
+      + (keys.length ? `<div style="display:grid;gap:8px">${keys.map(k => `<div class="step done" style="grid-template-columns:1fr auto"><div><b>${esc(k.label)}</b><small>${capTxt(k)}<br>Slippage up to ${esc(k.maxSlippagePct)}% · expires ${esc(new Date(k.expiresAt).toLocaleDateString())}</small></div><div><button class="btn sm ghost" data-arev="${esc(k.id)}">Revoke</button></div></div>`).join('')}</div>` : '')
+      + `<details class="adv"${keys.length ? '' : ' open'}><summary>New agent key</summary><form id="aform" style="display:grid;gap:8px">
+          <label class="field"><span>Name</span><span class="input"><input id="alabel" value="claude" maxlength="40"></span></label>
+          ${real.map(c => `<div class="field"><label class="check"><input type="checkbox" data-aon="${c}" ${c === 'solana' ? 'checked' : ''}> ${badge(c)} ${esc(CH[c].label)}</label><span style="display:flex;gap:6px"><span class="input"><input data-apt="${c}" inputmode="decimal" value="${AGENT_DEFAULTS[c][0]}" aria-label="Most per buy on ${esc(CH[c].label)}"><span class="unit">per buy</span></span><span class="input"><input data-ad="${c}" inputmode="decimal" value="${AGENT_DEFAULTS[c][1]}" aria-label="Most per day on ${esc(CH[c].label)}"><span class="unit">${esc(CH[c].native)} a day</span></span></span></div>`).join('')}
+          <span style="display:flex;gap:6px"><label class="field" style="flex:1"><span>Max slippage</span><span class="input"><input id="aslip" inputmode="decimal" value="5"><span class="unit">%</span></span></label><label class="field" style="flex:1"><span>Expires after</span><span class="input"><input id="adays" inputmode="numeric" value="30"><span class="unit">days</span></span></label></span>
+          <button class="btn sm primary">Make agent key</button></form></details>`;
+    $$('[data-acopy]', el).forEach(b => b.onclick = () => navigator.clipboard?.writeText(b.dataset.acopy).then(() => toast('ok', 'Copied')).catch(() => toast('warn', 'Copy it by hand')));
+    $$('[data-arev]', el).forEach(b => b.onclick = async () => { b.disabled = true; try { await call('DELETE', '/v1/auth/agent-keys/' + b.dataset.arev); toast('ok', 'Agent key revoked', 'It stopped working at once.'); agents(); } catch (e) { toast('err', 'Not revoked', e.message); b.disabled = false; } });
+    $('#aform').onsubmit = async e => {
+      e.preventDefault(); const caps = {};
+      for (const c of real) if ($(`[data-aon="${c}"]`).checked) caps[c] = { perTrade: $(`[data-apt="${c}"]`).value.trim(), daily: $(`[data-ad="${c}"]`).value.trim() };
+      if (!Object.keys(caps).length) return toast('warn', 'Pick at least one chain');
+      try { agents(await call('POST', '/v1/auth/agent-keys', { label: $('#alabel').value.trim(), caps, maxSlippagePct: Number($('#aslip').value), ttlDays: Number($('#adays').value) })); }
+      catch (er) { toast('err', 'Not made', er.message); }
+    };
+  };
+  draw(); sets(); wallets(); agents();
+  let agentsFor = S.key;   // redraw the agent card once a sign-in finishes (or ends), not on every Privy event
+  const onP = () => { if (S.view === 'setup') { draw(); wallets(); if (S.key !== agentsFor) { agentsFor = S.key; agents(); } } }; window.addEventListener('mintprivy', onP); S.cleanup = [...(S.cleanup || []), () => window.removeEventListener('mintprivy', onP)];
 };
 
 /* ---------- boot ---------- */

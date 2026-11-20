@@ -16,7 +16,10 @@ const END_USER_RE = /^[A-Za-z0-9_.-]{1,64}$/;
 export interface ApiOptions {
   keys: ApiKey[]; traderFor: (userId: string) => Trader | undefined;
   /** Optional: sign-in sessions (the execution server's Privy sign-in). Given the SHA-256 of a bearer token that is not an API key, the account it acts for, or undefined. */
-  sessions?: (hash: Buffer) => { userId: string; scope: 'read' | 'trade' } | undefined;
+  sessions?: (hash: Buffer) => { userId: string; scope: 'read' | 'trade'; agent?: any } | undefined;
+  /** Optional: the server-side check of an agent key's call (agentkeys.ts), before `prepare` and the route. Throws to refuse; may return a refund for a call that then fails.
+   *  Without it, an agent key may only read. */
+  agentGuard?: (agent: any, route: { method: string; path: string; scope: string }, body: any) => (() => void) | undefined;
   /** Rate limit per key: requests per second sustained and burst. Default 20 and 40. */
   rate?: { perSecond: number; burst: number };
   /** Optional: how the host turns a JSON request into a launch or leader source. Without these, creating snipes and copy configs answers 501 with an explanation (listing still works). */
@@ -107,7 +110,7 @@ export function createApi(o: ApiOptions) {
   /** The key a request carries (Authorization: Bearer), or undefined. Hash comparison in constant time. */
   const keyOf = (req: http.IncomingMessage) => { const m = /^Bearer (.{16,200})$/.exec(String(req.headers.authorization ?? '')); if (!m) return undefined; const h = sha(m[1]);
     const k = keys.find(x => timingSafeEqual(x.h, h)); if (k || !o.sessions) return k;
-    const s = o.sessions(h); return s ? { h, userId: s.userId, scope: s.scope, label: 'session' } : undefined; };
+    const s = o.sessions(h); return s ? { h, userId: s.userId, scope: s.scope, label: s.agent ? 'agent' : 'session', agent: s.agent } : undefined; };
   /** Who a request acts for. A user key: its user. An app key: the end user named in X-User-Id, as the account `<app>:<user>` (keys files cannot hold a colon in a user id,
    *  so these never collide with plain users); on /v1/app/* the app itself. Each end user is a separate account with its own state, orders and isolation. */
   const who = (req: http.IncomingMessage, k: { userId: string; scope: string }): { userId?: string; appId?: string; endUser?: string } | { error: true } => {
@@ -149,8 +152,16 @@ export function createApi(o: ApiOptions) {
       if (hit.r.scope === 'trade' && k.scope === 'read') return send(res, 403, { error: { code: 'read_only_key', message: 'This API key is read-only.', fix: 'Use a key with the trade scope for this call.' } });
       const params = Object.fromEntries(Object.entries(hit.re.exec(path)!.groups ?? {}).map(([a, v]) => [a, decodeURIComponent(v!)]));
       let body = req.method === 'POST' || req.method === 'PATCH' || req.method === 'DELETE' ? await readBody(req) : {}; seenBody = body;
-      if (o.prepare && !(hit.r.path === '/v1/wallet' || hit.r.path.startsWith('/v1/wallet/link'))) body = (await o.prepare(uid, body, hit.r.path)) ?? body;   // linking must work while the account cannot trade yet; a host may return a rewritten body (plain units)
-      send(res, 200, plain(await hit.r.run({ t, userId: uid, body, params, query: url.searchParams, headers: req.headers })));
+      // an agent key (agentkeys.ts): its caps are checked here, on the plain-units body, before anything is built; a call that then fails gives a buy's amount back
+      let refund: (() => void) | undefined;
+      if ((k as any).agent) {
+        if (!o.agentGuard && hit.r.scope !== 'read') return send(res, 403, { error: { code: 'agent_not_allowed', message: 'Agent keys can only read on this server.' } });
+        refund = o.agentGuard?.({ ...(k as any).agent, hash: k.h.toString('hex') }, hit.r, body);
+      }
+      try {
+        if (o.prepare && !(hit.r.path === '/v1/wallet' || hit.r.path.startsWith('/v1/wallet/link'))) body = (await o.prepare(uid, body, hit.r.path)) ?? body;   // linking must work while the account cannot trade yet; a host may return a rewritten body (plain units)
+        send(res, 200, plain(await hit.r.run({ t, userId: uid, body, params, query: url.searchParams, headers: req.headers })));
+      } catch (e) { refund?.(); throw e; }
     } catch (e) { fail(res, e); }
   });
   /** End a user's open event streams (their account moved to another node or stopped here); clients reconnect and reach the new owner. */
