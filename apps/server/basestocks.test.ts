@@ -144,12 +144,13 @@ function bnbWorld(o: { perBnb?: bigint; mult?: bigint; enabled?: boolean } = {})
   return { make: () => acc.make('u1', state) };
 }
 
-test('bStocks: the official four are listed (SNDKB left out: its multiplier does not match its market); lookup by address, symbol or ticker', () => {
-  assert.deepEqual(Object.keys(BNB_STOCKS).sort(), ['CRCLB', 'MUB', 'NVDAB', 'TSLAB']);
+test('bStocks: the registry\'s tradable ones are listed, the five official ones among them; lookup by address, symbol or ticker', () => {
+  for (const s of ['CRCLB', 'MUB', 'NVDAB', 'SNDKB', 'TSLAB']) assert.ok(BNB_STOCKS[s], `${s} is listed`);
+  assert.ok(Object.keys(BNB_STOCKS).length >= 20 && Object.keys(BNB_STOCKS).every(s => s.endsWith('B')));
   assert.ok(Object.values(BNB_STOCKS).every(a => /^0x[0-9a-f]{40}$/.test(a))); assert.match(BSTOCKS_BEACON, /^0x[0-9a-f]{40}$/);
   assert.equal(findBnbStock('tslab')?.address, BNB_TSLA); assert.equal(findBnbStock('TSLA')?.symbol, 'TSLAB'); assert.equal(findBnbStock('MU')?.ticker, 'MU');
   assert.equal(findBnbStock(BNB_STOCKS.NVDAB.toUpperCase().replace('0X', '0x'))?.symbol, 'NVDAB');
-  assert.equal(findBnbStock('SNDKB'), undefined); assert.equal(findBnbStock('TSLAc'), undefined); assert.equal(findBnbStock('TSLAx'), undefined);
+  assert.equal(findBnbStock('SNDK')?.symbol, 'SNDKB'); assert.equal(findBnbStock('ADBEB'), undefined, 'verified but not tradable at the last run'); assert.equal(findBnbStock('TSLAc'), undefined); assert.equal(findBnbStock('TSLAx'), undefined);
   assert.equal(STOCK_FINDERS.bnb, findBnbStock);
 });
 
@@ -168,7 +169,7 @@ test('bStocks: the ticker becomes the address; a fair buy and sell pass; a route
   assert.equal((await off.prepare({ token: 'TSLAB', amount: String(10n ** 18n) }, '/v1/trades/sell')).token, BNB_TSLA);
 });
 
-test(`a fill more than ${MAX_TOO_GOOD_PCT}% BETTER than the share price is refused: the multiplier does not match the market (as SNDKB: 8 shares read, priced as 1)`, async () => {
+test(`a fill more than ${MAX_TOO_GOOD_PCT}% BETTER than the share price is refused: the multiplier does not match the market (as a token that reads 8 shares but trades as 1)`, async () => {
   // the token trades as 1 share ($400: 1.5 per BNB) but reads 8 shares per token: $50 a share "paid", 87.5% better than $400
   const a = await bnbWorld({ mult: 8n * 10n ** 18n }).make();
   await assert.rejects(a.prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy'), (e: any) => e?.code === 'bad_price' && /better/.test(e.message) && /shares per token \(8\./.test(e.message));
@@ -195,4 +196,14 @@ test('the share price comes from any Solana issuer of the ticker that has one (t
   const acc = baseAccounts({ rpcUrl: 'http://rpc.test', rpc, network: 'bnb', privy: { ...p.cfg, fetchFn: p.fetchFn } as any, aggregator: 'kyberswap', kyber, stocks: { enabled: true, prices } });
   const s = mem(); s('bnbwallet').write(JSON.stringify({ address: p.address.toLowerCase(), walletId: 'evm-wallet-1', linkedAt: 1 }));
   assert.equal((await (await acc.make('u1', s)).prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy')).token, BNB_TSLA);
+});
+
+test('the bStocks registry: every row is a 0x address with a positive multiplier; tradable rows passed the market check of that run', async () => {
+  const { BNB_STOCK_LIST, BNB_STOCK_LIST_META } = await import('../../packages/evm/src/bnbstocklist.generated.ts');
+  assert.equal(BNB_STOCK_LIST.length, BNB_STOCK_LIST_META.verified); assert.equal(BNB_STOCK_LIST.filter(r => r[6] === 1).length, BNB_STOCK_LIST_META.tradable);
+  for (const [sym, addr, , mult, liq, dev, ok] of BNB_STOCK_LIST) {
+    assert.match(addr, /^0x[0-9a-f]{40}$/, sym); assert.ok(Number(mult) > 0, sym);
+    if (ok) { assert.ok((liq ?? 0) >= BNB_STOCK_LIST_META.minLiquidityUsd && dev != null && dev <= 3 && dev >= -MAX_TOO_GOOD_PCT, `${sym} tradable`); }
+  }
+  assert.equal(new Set(BNB_STOCK_LIST.map(r => r[1])).size, BNB_STOCK_LIST.length, 'no address twice');
 });

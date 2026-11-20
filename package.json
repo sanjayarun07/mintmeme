@@ -26,6 +26,7 @@
     "server:loadtest": "node --experimental-transform-types --no-warnings apps/server/loadtest.ts",
     "verify:evm": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/traderfork.ts",
     "stocks:registry": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/stockregistry.ts",
+    "stocks:bnb": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/bnbstockregistry.ts",
     "verify:stocks": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/xstocksread.ts",
     "verify:jupiterz-live": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/jupiterzlive.ts",
     "verify:base-relay": "node --env-file-if-exists=.env --experimental-transform-types --no-warnings packages/live/src/baserelayread.ts",

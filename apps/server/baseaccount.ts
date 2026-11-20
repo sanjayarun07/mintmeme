@@ -42,8 +42,9 @@ export function findBnbStock(t: string): EvmStock | undefined {
 }
 /** The stock lookup of an EVM network, or undefined where it lists no stocks. BNB lists bStocks only: its xStocks and Ondo tokens hold dust on DEXes. */
 export const STOCK_FINDERS: Record<string, (t: string) => EvmStock | undefined> = { base: findBaseStock, robinhood: findRobinhoodStock, bnb: findBnbStock };
-/** A fill this much BETTER than the share price is refused too: it means the token's shares-per-token reading does not match how the market prices it (SNDKB reads 8
- *  shares and trades as 1), and then the one-sided check would let a fill several times too expensive through. */
+/** A fill this much BETTER than the share price is refused too: it means the token's shares-per-token reading does not match how the market prices it (a token that
+ *  read 8 shares but traded as 1), and then the one-sided check would let a fill several times too expensive through. A real split moves both together (SNDKB and
+ *  SNDKc read 8 after SanDisk's 8-for-1 split and trade at 8 shares' price), so it passes. */
 export const MAX_TOO_GOOD_PCT = 25;
 const isBuy = (path: string, b: any) => path === '/v1/trades/buy' || path === '/v1/orders/limit-buy' || path === '/v1/bulk/buy' || (path === '/v1/twap' && b?.side === 'buy');
 const isSell = (path: string) => path === '/v1/trades/sell' || path === '/v1/bulk/sell';

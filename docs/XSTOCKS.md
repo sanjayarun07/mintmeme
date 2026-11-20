@@ -112,12 +112,13 @@ The memecoin feature set (buy and sell, limit, take-profit, stop-loss, trailing 
 | **xStocks** | same address as on every EVM chain, e.g. TSLAx `0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0` | **18** on EVM | as on Solana | dust: we read every PancakeSwap V2 pair on chain, and the largest holds about $5 of USDT |
 
 **Tradable here now: bStocks through KyberSwap (2026-11-20), read-only checked, no mainnet trade yet.** V2 pools are thin (TSLAB and QQQB against WBNB, about $50k each); the liquidity is on PancakeSwap V3/Infinity, Uniswap V3 and Metric's prop AMM, which KyberSwap (chain name `bsc`) reaches. The router `0x6131…37b5` has code on BNB (18,652 bytes); builds for buys and sells of all five official bStocks decoded and passed `gateKyber` unchanged.
-- **Listed:** NVDAB, TSLAB, CRCLB and MUB (`packages/evm/src/bnbstocks.ts`), each checked on chain to be a beacon proxy of the bStocks beacon `0x156d6dce…93a3`. **SNDKB is left out:** its `uiMultiplier()` reads 8 shares per token, but it trades at the price of one SanDisk share (about $710), so the share-price check cannot trust it.
+- **Listed (registry, `npm run stocks:bnb` → `packages/evm/src/bnbstocklist.generated.ts`):** Binance publishes no address list, so candidates come from CoinGecko's coin list (every coin named "bStocks Tokenized Stock"). Each must be a beacon proxy of the bStocks beacon `0x156d6dce…93a3` (read on chain from the five on Trust Wallet's announcement), with 18 decimals and the same symbol. On 2026-11-20: **92 candidates, 92 verified, 33 tradable** (DexScreener liquidity at least $10k, and a 0.01 BNB KyberSwap buy within 3% worse / 25% better of the share price). The others are kept in the list with their numbers but not offered: most routes were 3% to 1,500% off the share price, or pools were under $10k.
+- **SanDisk split 1-for-8 (2026-11-19):** SNDKB and Coinbase's SNDKc both read `uiMultiplier()` 8 and trade at 8 shares' price (about $711 against an $89 share); the price check handles it. An earlier note here wrongly left SNDKB out by comparing against SNDKc's token price.
 - **Server:** ticker lookup (`TSLAB` or `TSLA`), the `STOCKS_ENABLED` / `BNB_STOCKS_ENABLED` switch for buys, and the 3% share-price check with `uiMultiplier()`, as on Robinhood Chain. The reference is Jupiter's share price from any Solana issuer of the ticker that has one (CRCL: Backpack's had none, xStocks' had).
 - **Too-good guard (every EVM chain):** a fill more than 25% better than the share price is refused too: it means the token's shares-per-token reading does not match its market, and then a several-times-too-expensive fill would look like a bargain.
-- **Checked read-only on mainnet (2026-11-20):** the server's real BNB code with KyberSwap routes, on-chain multipliers and Jupiter share prices passed a 0.01 BNB buy and a 0.01-token sell of each of the four. No mainnet trade has been made yet.
-- **Privy policy:** needs `kyberswap-swaps` and `approve-kyberswap` with `chain_id` `56` (`npm run privy:evm-policy -- bnb` prints them); without them Privy refuses KyberSwap trades, which is safe.
-- **Not listed yet:** rwa.xyz counts 112 bStocks (about $1.3B); only five are on an official list. Others share the same beacon, so the beacon is the way to verify more.
+- **Checked read-only on mainnet (2026-11-20):** the server's real BNB code with KyberSwap routes, on-chain multipliers and Jupiter share prices passed 65 of 66 checks (a 0.01 BNB buy and a 0.01-token sell of each of the 33). The one refusal was right: a PENGB sell would have received 8% under the share price (thin sell side). No mainnet trade has been made yet.
+- **Privy policy:** `bnb-kyberswap-swaps` and `bnb-approve-kyberswap` (`chain_id` `56`, router `0x6131…37b5`, at most 0.02 BNB) were added to the shared `memedesk-evm` policy on 2026-11-20 with the user's OK. `npm run privy:evm-policy -- bnb` prints the same rules for a new policy.
+- **Coverage:** rwa.xyz counts 112 bStocks; CoinGecko names 92. Ones CoinGecko does not list are not found yet. Re-run `npm run stocks:bnb` regularly: liquidity moves and new tickers appear.
 
 ## Base (8453)
 
@@ -318,7 +319,7 @@ The user supplied a survey: GeckoTerminal pools and Jupiter quotes for 1,123 scr
 | Backpack Securities | 1,175 Solana mints carry Backpack's issuer keys on chain. Glassnode (94) and tokenstock.info count far fewer, likely only listed or marketed products | Solana | 1,175 / 84 |
 | Securitize, Superstate | 49 and 3 on Solana (tokenstock.info, a third-party registry, 2026-11-17); allowlist/KYC-gated, not researched | Solana | — |
 | Coinbase | 10 on base.org/stocks (Glassnode lists 377 "Tokenized Equities" products; not reconciled) | Base | — (EVM) |
-| bStocks | 5 on an official list (Glassnode: 105) | BNB | — (EVM) |
+| bStocks | 5 on an official list (Glassnode: 105; rwa.xyz: 112) | BNB | 92 verified / 33 tradable (BNB registry, 2026-11-20) |
 
 The Glassnode tokenization registry (https://tokenization.glassnode.com/issuers) also lists issuers we have **not researched**: Reality (Bitget) with 3,154 products, Dinari with 151, Anchored (aStocks) with 66, Securitize Stocks with 15 and WisdomTree with 15. Their chains, addresses and transfer rules are unknown here.
 

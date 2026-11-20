@@ -104,7 +104,7 @@ test('marketStocks lists the Base, Robinhood and BNB Chain stock tokens, and non
   const b = await marketStocks({ chain: 'base' }); assert.equal(b.stocks.length, 10);
   const nv = b.stocks.find(x => x.symbol === 'NVDAc')!; assert.equal(nv.ticker, 'NVDA'); assert.equal(nv.issuer, 'Coinbase'); assert.match(nv.address, /^0x[0-9a-fA-F]{40}$/);
   const r = await marketStocks({ chain: 'robinhood' }); assert.ok(r.stocks.length > 200); assert.ok(r.stocks.every(x => /^0x[0-9a-fA-F]{40}$/.test(x.address) && x.ticker === x.symbol));
-  const n = await marketStocks({ chain: 'bnb' }); assert.deepEqual(n.stocks.map(x => x.symbol).sort(), ['CRCLB', 'MUB', 'NVDAB', 'TSLAB']); assert.equal(n.stocks.find(x => x.symbol === 'MUB')!.ticker, 'MU');
+  const n = await marketStocks({ chain: 'bnb' }); assert.ok(n.stocks.length >= 20); assert.ok(['CRCLB', 'MUB', 'NVDAB', 'SNDKB', 'TSLAB'].every(s => n.stocks.some(x => x.symbol === s))); assert.equal(n.stocks.find(x => x.symbol === 'MUB')!.ticker, 'MU');
   assert.deepEqual((await marketStocks({ chain: 'solana' })).stocks, []);
   await assert.rejects(marketStocks({ chain: 'eth' }), /Unknown chain/);
 });
