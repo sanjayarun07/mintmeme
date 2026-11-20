@@ -25,7 +25,7 @@ export interface SolanaTraderOptions {
   userId: string;
   /** The user's Privy Solana wallet address (the walletId used in every call). Undefined: a read-only account that refuses trades until a wallet is linked. */
   address?: string;
-  rpcUrl: string; privy: PrivyConfig | PrivyApi;
+  rpcUrl: string; /** Another Solana node for calls `rpcUrl` still rate limits after its retries (Alchemy behind Helius). */ rpcFallbackUrl?: string; privy: PrivyConfig | PrivyApi;
   persistDir?: string; state?: (name: string) => Backend;
   caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint };
   venues?: string[];
@@ -119,7 +119,7 @@ export async function createSolanaTrader(o: SolanaTraderOptions): Promise<Solana
   if (!o.address) why = 'No wallet is linked to this account.';
   else { const d = await privy.delegation(o.address);   // throws when Privy is unreachable: nothing can be signed, so the caller should retry rather than run blind
     if (d.ok && (!o.walletId || d.walletId === o.walletId)) signable = new Map([[o.address, d.walletId]]); else why = d.ok ? 'The Privy wallet at this address is not the one that was linked. Link it again.' : d.why; }
-  const rpc = new SolJsonRpc(o.rpcUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.jupiterz ? { jupiterz: { ...o.jupiterz, ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}), log: (m: string) => { if (m) log(m); } } } : {}), ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
+  const rpc = new SolJsonRpc(o.rpcUrl, fetch, o.rpcFallbackUrl), chain = new SolanaChain({ id: 'sol-main', wsol: WSOL_MINT, pools: [], pump: { mints: [] }, jupiter: { pairs: [], ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}) }, ...(o.jupiterz ? { jupiterz: { ...o.jupiterz, ...(o.jupiterApiKey ? { apiKey: o.jupiterApiKey } : {}), log: (m: string) => { if (m) log(m); } } } : {}), ...(o.priority === false ? {} : { priority: o.priority ?? {} }), ...(o.fees ? { fees: o.fees } : {}), submitter: mevSubmitter(o.mevProtection ?? false), mevDefault: mevOn(o.mevProtection) }, rpc, new PrivySolSigner(privy, signable));
   const policies = new Map<string, WalletPolicy>(), owners = new Map<string, string>();
   if (o.address) { owners.set(o.address, 'x'); policies.set(o.address, { userId: o.userId, chains: ['sol-main'], allowedVenues: venues, maxPerTx: { [NATIVE]: caps.maxTradeLamports }, dailyLimit: { [NATIVE]: caps.dailyCapLamports }, destinations: [], deviceSecret: randomBytes(16).toString('hex') }); }
   const engine = new Engine({ store: Store.open(state('engine')), chain, signer: new PolicySigner(owners, policies, backendLedger(state('ledger'))), router: new Router(chain), platformFeeBps: 0 });

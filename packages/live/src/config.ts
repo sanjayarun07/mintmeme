@@ -10,6 +10,14 @@ export function solanaRpc(e: NodeJS.ProcessEnv = process.env): { url: string; se
   if (alchemy) return { url: urls(alchemy).sol, secret: alchemy, name: 'Alchemy' };
   return undefined;
 }
+/** A second Solana node for calls the first one rate limits (postRpc fallbackUrl): SOLANA_RPC_FALLBACK_URL, else Alchemy from ALCHEMY_API_KEY when the first node is not
+ *  already Alchemy. Seen live 2026-11-20: Helius's plan answered 429 to 2-5 of every 10 parallel calls on the public site. undefined when there is none. */
+export function solanaRpcFallback(e: NodeJS.ProcessEnv = process.env): { url: string; secret: string; name: string } | undefined {
+  const own = e.SOLANA_RPC_FALLBACK_URL?.trim(), alchemy = e.ALCHEMY_API_KEY?.trim(), first = solanaRpc(e);
+  if (own) { const k = /api-key=([^&]+)/.exec(own)?.[1] ?? own.split('/').pop() ?? own; return own === first?.url ? undefined : { url: own, secret: k, name: 'SOLANA_RPC_FALLBACK_URL' }; }
+  if (alchemy && first && !first.url.includes('alchemy.com')) return { url: urls(alchemy).sol, secret: alchemy, name: 'Alchemy' };
+  return undefined;
+}
 /** Ethereum mainnet, Uniswap V2 (used by the SDK's Ethereum fork test, npm run verify:evm). WETH is not on Uniswap's page: it is read on-chain from router.WETH(). */
 export const ETH = {
   chainIdExpected: 1n,

@@ -5,7 +5,7 @@
  *    - DexScreener (every chain): one token's pairs (price, liquidity, volume, buys and sells), and search.
  *  Every row is normalized to one shape (MarketRow) so the app never cares where it came from. Nothing here signs, trades or needs a key. */
 
-import { solanaRpc } from '../../packages/live/src/config.ts';
+import { solanaRpc, solanaRpcFallback } from '../../packages/live/src/config.ts';
 export type Chain = 'solana' | 'base' | 'robinhood' | 'bnb';
 export const CHAINS: Chain[] = ['solana', 'base', 'robinhood', 'bnb'];
 const GECKO: Record<Chain, string> = { solana: 'solana', base: 'base', robinhood: 'robinhood', bnb: 'bsc' };
@@ -223,8 +223,11 @@ export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } =
   const rpc = chain === 'solana' ? (solanaRpc(env)?.url ?? '') : env[rpcEnv] || (env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : '');   // Solana: Helius first
   const out: Record<string, number | null> = {};
   if (!rpc) { hashes.forEach(h => out[h] = null); return { chain, times: out }; }
-  const call = async (method: string, params: unknown[]) => { const r = await f(rpc, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), signal: AbortSignal.timeout(10_000) }); return (await r.json() as any)?.result; };
-  await Promise.all(hashes.map(async h => {
+  // through postRpc: a rate limit is retried, and on Solana handed to the fallback node (Alchemy behind Helius)
+  const { postRpc } = await import('../../packages/sol/src/solchain.ts'), fb = chain === 'solana' ? solanaRpcFallback(env)?.url : undefined;
+  const call = async (method: string, params: unknown[]) => { const r = await postRpc(f, rpc, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), { timeoutMs: 12_000, fallbackUrl: fb }); if (r.status !== 200) throw new Error(`HTTP ${r.status}`); const j = JSON.parse(r.text); if (j.error) throw new Error(String(j.error.message)); return j.result; };
+  // at most 4 lookups at once: 40 at once (a full history page) alone went over Helius's per-second limit on the public site (2026-11-20)
+  const queue = [...hashes], one = async (h: string) => {
     try {
       const { value } = await cached(`txtime:${chain}:${h}`, 86_400_000, d, async () => {
         let t: number | null = null;
@@ -235,7 +238,8 @@ export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } =
       });
       out[h] = value;
     } catch { out[h] = null; }
-  }));
+  };
+  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => { for (let h = queue.shift(); h; h = queue.shift()) await one(h); }));
   return { chain, times: out };
 }
 
@@ -247,7 +251,7 @@ export async function marketHoldings(body: any, d: Deps & { env?: NodeJS.Process
   if (!(chain === 'solana' ? isSol(address) : isEvm(address))) throw new MarketError(chain === 'solana' ? 'That is not a Solana wallet address.' : 'That is not a 0x wallet address.');
   const { value: raw, stale } = await cached(`holdings:${chain}:${address.toLowerCase()}`, 15_000, d, async () => {
     const { postRpc } = await import('../../packages/sol/src/solchain.ts');
-    const rpcJson = async (url: string, method: string, params: unknown[]) => { const r = await postRpc(f, url, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), { timeoutMs: 15_000 }); if (r.status !== 200) throw new MarketError(`The ${chain} node answered HTTP ${r.status}.`, 502); const j = JSON.parse(r.text); if (j.error) throw new MarketError(String(j.error.message ?? 'RPC error'), 502); return j.result; };
+    const rpcJson = async (url: string, method: string, params: unknown[]) => { const r = await postRpc(f, url, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), { timeoutMs: 15_000, fallbackUrl: chain === 'solana' ? solanaRpcFallback(env)?.url : undefined }); if (r.status !== 200) throw new MarketError(`The ${chain} node answered HTTP ${r.status}.`, 502); const j = JSON.parse(r.text); if (j.error) throw new MarketError(String(j.error.message ?? 'RPC error'), 502); return j.result; };
     const out = new Map<string, { raw: bigint; decimals: number | null }>();
     if (chain === 'solana') {
       const url = solanaRpc(env)?.url; if (!url) throw new MarketError('No Solana RPC on this server (SOLANA_RPC_URL or HELIUS_API_KEY).', 503);

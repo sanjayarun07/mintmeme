@@ -39,7 +39,7 @@ const need = (k: string) => env[k] || fail(`${k} is not set. See the header of a
 const int = (k: string, d: number, min: number, max: number) => { const v = env[k] === undefined ? d : Number(env[k]); if (!Number.isInteger(v) || v < min || v > max) fail(`${k} must be a whole number from ${min} to ${max}`); return v; };
 
 import { parseKeyFile, watchKeyFile } from './keyfile.ts';
-import { solanaRpc } from '../../packages/live/src/config.ts';
+import { solanaRpc, solanaRpcFallback } from '../../packages/live/src/config.ts';
 export { parseKeyFile, watchKeyFile };
 
 /** JupiterZ RFQ fills (docs/JUPITERZ.md), off unless JUPITERZ=on. JUPITERZ_MIN_SOL (default 100): the smallest SOL side that asks market makers; JUPITERZ_MARGIN_BPS
@@ -80,7 +80,7 @@ export function solanaMode(e: NodeJS.ProcessEnv) {
   const fees = (userId: string): FeeRecipient[] => { const out: FeeRecipient[] = []; if (pbps > 0) out.push({ address: pw!, bps: pbps });
     const i = userId.indexOf(':'); if (i > 0) { const f = appFee(userId.slice(0, i)); if (f && f.bps > 0) out.push({ address: f.wallet, bps: f.bps }); } return out; };
   const jupiterz = jupiterzConfig(e), caps = solanaCaps(e, jupiterz);
-  const acc = solanaAccounts({ rpcUrl, privy: privy!, fees, caps, jupiterApiKey: e.JUPITER_API_KEY?.trim() || undefined, jupiterz });
+  const acc = solanaAccounts({ rpcUrl, rpcFallbackUrl: solanaRpcFallback(e)?.url, privy: privy!, fees, caps, jupiterApiKey: e.JUPITER_API_KEY?.trim() || undefined, jupiterz });
   // status page checks: reachability of what real trading depends on (no secrets in what is shown)
   const statusChecks = [
     { name: 'Solana RPC', run: async () => { const r = await fetch(rpcUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'getSlot', params: [] }), signal: AbortSignal.timeout(5_000) }); if (!r.ok) throw new Error(`HTTP ${r.status}`); } },

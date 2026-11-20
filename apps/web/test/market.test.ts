@@ -1,7 +1,7 @@
 /** Market data for /app (apps/web/market.ts): normalizing each source, merging chains, caching through rate limits, and refusing bad input. Network is faked. */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { marketList, marketToken, marketCandles, marketSearch, marketMeta, marketRows, marketStocks, fromGecko, fromJupiter, clearMarketCache } from '../market.ts';
+import { marketList, marketToken, marketCandles, marketSearch, marketMeta, marketRows, marketStocks, txTimes, fromGecko, fromJupiter, clearMarketCache } from '../market.ts';
 
 beforeEach(() => clearMarketCache());
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
@@ -107,4 +107,13 @@ test('marketStocks lists the Base, Robinhood and BNB Chain stock tokens, and non
   const n = await marketStocks({ chain: 'bnb' }); assert.ok(n.stocks.length >= 20); assert.ok(['CRCLB', 'MUB', 'NVDAB', 'SNDKB', 'TSLAB'].every(s => n.stocks.some(x => x.symbol === s))); assert.equal(n.stocks.find(x => x.symbol === 'MUB')!.ticker, 'MU');
   assert.deepEqual((await marketStocks({ chain: 'solana' })).stocks, []);
   await assert.rejects(marketStocks({ chain: 'eth' }), /Unknown chain/);
+});
+
+test('txTimes asks the node at most 4 at a time (40 at once went over Helius\'s per-second limit)', async () => {
+  let now = 0, peak = 0; const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz', sig = (i: number) => '5' + B58[i] + 'a'.repeat(85);
+  const fetch = (async (_u: string, init: any) => { now++; peak = Math.max(peak, now); await new Promise(r => setTimeout(r, 5)); now--;
+    const id = JSON.parse(init.body).params[0]; return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { blockTime: 1_700_000_000 + B58.indexOf(id[1]) } })); }) as any;
+  const hashes = Array.from({ length: 20 }, (_, i) => sig(i));
+  const r = await txTimes({ chain: 'solana', hashes }, { fetch, env: { HELIUS_API_KEY: 'h' } as any });
+  assert.ok(peak <= 4 && peak > 1, `peak in flight ${peak}`); assert.equal(Object.values(r.times).filter(t => t != null).length, 20);
 });

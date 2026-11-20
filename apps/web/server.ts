@@ -92,7 +92,7 @@ export function createSolServer(o: { stateDir?: string } = {}) {
     if (u.pathname === '/api/sol/rpc') {
       // the repo's Solana RPC (config.ts solanaRpc: SOLANA_RPC_URL, else Helius, else Alchemy). Seen live: Alchemy's Solana limit answered 429 to getSlot while users
       // linked wallets on the public site.
-      const sol = (await import('../../packages/live/src/config.ts')).solanaRpc();
+      const cfg = await import('../../packages/live/src/config.ts'), sol = cfg.solanaRpc(), fb = cfg.solanaRpcFallback();   // fb: Alchemy when Helius is rate limited
       if (!sol) return send(503, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'no RPC configured' } }));
       const one = (b: any) => b && typeof b.method === 'string' && RPC_OK.has(b.method);
       if (Array.isArray(body) ? !body.every(one) : !one(body)) return send(403, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32601, message: 'method not allowed by this relay' } }));
@@ -101,9 +101,9 @@ export function createSolServer(o: { stateDir?: string } = {}) {
       if (hit && Date.now() - hit.at < 1000) return send(200, ser({ jsonrpc: '2.0', id: body.id ?? null, result: hit.result }));
       try {
         const { postRpc } = await import('../../packages/sol/src/solchain.ts');   // retries the node's rate limit (429) with backoff before answering
-        const r = await postRpc(fetch, sol.url, JSON.stringify(body), { timeoutMs: 15_000 });
+        const r = await postRpc(fetch, sol.url, JSON.stringify(body), { timeoutMs: 15_000, fallbackUrl: fb?.url });
         if (ck && r.status === 200) { try { const j = JSON.parse(r.text); if (j && j.result !== undefined && !j.error) { rpcCache.set(ck, { at: Date.now(), result: j.result }); if (rpcCache.size > 200) rpcCache.delete(rpcCache.keys().next().value!); } } catch { /* not cached */ } }
-        return send(r.status, r.text.split(sol.secret).join('***'));
+        return send(r.status, [sol.secret, fb?.secret].reduce((t, k) => (k ? t.split(k).join('***') : t), r.text));
       }
       catch { return send(502, ser({ jsonrpc: '2.0', id: body?.id ?? null, error: { code: -32000, message: 'RPC unreachable' } })); }
     }

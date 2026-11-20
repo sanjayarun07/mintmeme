@@ -52,7 +52,7 @@ export function rfqFillCheck(d: { solUsd: () => Promise<{ price: number; at: num
 }
 
 /** The account factory. A user with no linked (or no longer delegated) wallet still gets an account: reads work, every call that names a wallet is refused with the reason. */
-export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?: string[]; /** Who gets fees on this user's trades (fee sharing). */ fees?: (userId: string) => FeeRecipient[]; /** Block-engine options for users who turn MEV protection on (region URL, uuid; tests pass a stand-in). */ jito?: JitoOptions; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void;
+export function solanaAccounts(c: { rpcUrl: string; /** Another Solana node for rate-limited calls (Alchemy behind Helius). */ rpcFallbackUrl?: string; privy: PrivyConfig; venues?: string[]; /** Who gets fees on this user's trades (fee sharing). */ fees?: (userId: string) => FeeRecipient[]; /** Block-engine options for users who turn MEV protection on (region URL, uuid; tests pass a stand-in). */ jito?: JitoOptions; caps?: { maxTradeLamports: bigint; dailyCapLamports: bigint }; solUsd?: () => Promise<{ price: number; at: number } | null>; log?: (m: string) => void;
   /** Tokenized stocks (docs/XSTOCKS.md). `enabled` (default: env STOCKS_ENABLED=1, else OFF) lets users BUY registered stocks; turn it on only behind your own eligibility checks
    *  (no issuer offers them to US persons). Selling what a wallet already holds always works. `maxDeviationPct` (default 3): a buy or sell whose route is that much worse than the
    *  underlying share price is refused. `prices`/`rpc` are for tests. */
@@ -62,7 +62,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
   jupiterz?: { minLamports: bigint; marginBps: number };
   stocks?: { enabled?: boolean; maxDeviationPct?: number; prices?: JupiterStockPrices; rpc?: { call<T = any>(m: string, p?: unknown[]): Promise<T> } } }) {
   const privy = new PrivyApi(c.privy), solUsd = c.solUsd ?? jupiterSolUsd(30_000, c.jupiterApiKey), status = new Map<string, Status>(); const live = new Map<string, Awaited<ReturnType<typeof createSolanaTrader>>>();
-  const stocksOn = c.stocks?.enabled ?? stocksEnabled('solana'), stockRpc = c.stocks?.rpc ?? new SolJsonRpc(c.rpcUrl), prices = c.stocks?.prices ?? new JupiterStockPrices({ apiKey: c.jupiterApiKey }), maxDev = c.stocks?.maxDeviationPct ?? 3;
+  const stocksOn = c.stocks?.enabled ?? stocksEnabled('solana'), stockRpc = c.stocks?.rpc ?? new SolJsonRpc(c.rpcUrl, fetch, c.rpcFallbackUrl), prices = c.stocks?.prices ?? new JupiterStockPrices({ apiKey: c.jupiterApiKey }), maxDev = c.stocks?.maxDeviationPct ?? 3;
   const leaderRpc = new SolJsonRpc(c.rpcUrl);   // copy trading reads leader wallets through the same node
   const stockState = async (mint: string) => { const st = (await readStockStates(stockRpc, [mint])).get(mint); if (!st) throw new SdkError('no_route', `stock mint ${mint} could not be read`, 'Retry shortly.', 503); return st; };
   /** The route's price per share against the underlying share price, at `amount` (lamports for a buy, raw tokens for a sell). */
@@ -109,7 +109,7 @@ export function solanaAccounts(c: { rpcUrl: string; privy: PrivyConfig; venues?:
         const st = stockByMint(tx.tokenOut) ?? stockByMint(tx.tokenIn); if (!st || risky.has(st.mint) || (tx.tokenIn !== NATIVE && tx.tokenOut !== NATIVE)) return undefined;
         return fallbackFill(tx, out);
       } } : undefined;
-    const s = await createSolanaTrader({ userId, jupiterApiKey: c.jupiterApiKey, jupiterz, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, privy, state, mevProtection: mev, tokenSafety: set.tokenSafety, fees: c.fees ? () => c.fees!(userId) : undefined, caps: c.caps, venues: c.venues, solUsd, log: c.log });
+    const s = await createSolanaTrader({ userId, jupiterApiKey: c.jupiterApiKey, jupiterz, address: link?.address, walletId: link?.walletId, rpcUrl: c.rpcUrl, rpcFallbackUrl: c.rpcFallbackUrl, privy, state, mevProtection: mev, tokenSafety: set.tokenSafety, fees: c.fees ? () => c.fees!(userId) : undefined, caps: c.caps, venues: c.venues, solUsd, log: c.log });
     live.set(userId, s);
     status.set(userId, { address: link?.address, active: s.active, why: s.active ? undefined : (link ? s.why : 'No wallet is linked. Link your Privy wallet: POST /v1/wallet/link/start, then /v1/wallet/link/finish.') });
     // copy trading: a copied buy passes the same checks as a manual one (token safety, and for a stock the operator switch and the fill price), never with allowRiskyToken
