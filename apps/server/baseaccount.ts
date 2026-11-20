@@ -20,6 +20,7 @@ import type { Route } from '../api/server.ts';
 import { NATIVE } from '../../packages/core/src/index.ts';
 import { STOCKS_SOLANA, underlying, JupiterStockPrices, checkFillPrice } from '../../packages/sol/src/index.ts';
 import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
+import { BNB_STOCKS } from '../../packages/evm/src/bnbstocks.ts';
 import { ROBINHOOD_STOCKS, UI_MULTIPLIER_SELECTOR } from '../../packages/evm/src/robinhoodstocks.ts';
 
 /* ---------------- Tokenized stocks on EVM chains: ticker lookup, the operator switch, the share-price check (the EVM twin of solaccount.ts) ---------------- */
@@ -34,14 +35,25 @@ export function findRobinhoodStock(t: string): EvmStock | undefined {
   const k = t.trim().toLowerCase(), e = Object.entries(ROBINHOOD_STOCKS).find(([s, a]) => a.toLowerCase() === k || s.toLowerCase() === k);
   return e ? { symbol: e[0], address: e[1].toLowerCase(), ticker: e[0] } : undefined;
 }
-/** The stock lookup of an EVM network, or undefined where it lists no stocks (BNB: its xStocks/Ondo tokens are not wired here). */
-export const STOCK_FINDERS: Record<string, (t: string) => EvmStock | undefined> = { base: findBaseStock, robinhood: findRobinhoodStock };
+/** A bStock on BNB Chain by address, symbol (NVDAB) or underlying ticker (NVDA), case-insensitive; undefined for anything else (packages/evm/src/bnbstocks.ts). */
+export function findBnbStock(t: string): EvmStock | undefined {
+  const k = t.trim().toLowerCase(), e = Object.entries(BNB_STOCKS).find(([s, a]) => a.toLowerCase() === k || s.toLowerCase() === k || s.slice(0, -1).toLowerCase() === k);
+  return e ? { symbol: e[0], address: e[1].toLowerCase(), ticker: e[0].slice(0, -1) } : undefined;
+}
+/** The stock lookup of an EVM network, or undefined where it lists no stocks. BNB lists bStocks only: its xStocks and Ondo tokens hold dust on DEXes. */
+export const STOCK_FINDERS: Record<string, (t: string) => EvmStock | undefined> = { base: findBaseStock, robinhood: findRobinhoodStock, bnb: findBnbStock };
+/** A fill this much BETTER than the share price is refused too: it means the token's shares-per-token reading does not match how the market prices it (SNDKB reads 8
+ *  shares and trades as 1), and then the one-sided check would let a fill several times too expensive through. */
+export const MAX_TOO_GOOD_PCT = 25;
 const isBuy = (path: string, b: any) => path === '/v1/trades/buy' || path === '/v1/orders/limit-buy' || path === '/v1/bulk/buy' || (path === '/v1/twap' && b?.side === 'buy');
 const isSell = (path: string) => path === '/v1/trades/sell' || path === '/v1/bulk/sell';
 /** The reference share price: Jupiter's stockData.price for a Solana stock of the same underlying (NVDAc -> NVDA -> NVDAx; Robinhood TSLA -> TSLAx). A token is
  *  uiMultiplier()/1e18 shares, read on chain, on both chains: Coinbase's B20 tokens have it too (NVDAc 1.000537 on 2026-11-19; it was first taken as 1). 198 of the 203 Robinhood tickers have a Solana reference (not ABCL, CLOV, NAVN, RUN, XNDU: those refuse
  *  with no_reference_price unless allowRiskyToken). */
-const refMint = (ticker: string) => STOCKS_SOLANA.find(a => underlying(a) === ticker)?.mint;
+const refMints = (ticker: string) => STOCKS_SOLANA.filter(a => underlying(a) === ticker).map(a => a.mint);
+/** The share price of a ticker: the first Solana issuer of it (xStocks, Ondo, Backpack) that Jupiter has a share price for. One issuer often has none (CRCL: Backpack's
+ *  token had no stockData on 2026-11-20 while xStocks' had), so every one is asked in a single call. */
+const sharePrice = async (prices: JupiterStockPrices, ticker: string) => { const ms = refMints(ticker); if (!ms.length) return null; const got = await prices.get(ms); for (const m of ms) { const p = got.get(m)?.stockPrice; if (p) return p; } return null; };
 
 /** The state name of a chain's wallet link: Base keeps `basewallet` (what single-chain Base servers wrote); another EVM chain uses `<chain>wallet`. */
 export const walletState = (chain: string) => `${chain}wallet`;
@@ -85,7 +97,7 @@ export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { m
     const [tin, tout] = side === 'buy' ? [NATIVE, stock.address] : [stock.address, NATIVE];
     const qs = s.chain.venues().filter(v => v.status === 'active' && v.supports(tin, tout)).map(v => { try { return v.quote(tin, tout, amount).amountOut; } catch { return 0n; } });
     const out = qs.length ? qs.reduce((a, b) => (b > a ? b : a)) : 0n; if (out <= 0n) throw new SdkError('no_route', `no route prices ${stock.symbol} right now`, 'Retry shortly.', 503);
-    const eth = await ethUsd(), mint = refMint(stock.ticker), ref = mint ? (await prices.get([mint])).get(mint)?.stockPrice ?? null : null;
+    const eth = await ethUsd(), ref = await sharePrice(prices, stock.ticker);
     if (!eth) throw new SdkError('no_reference_price', 'no ETH price right now, so the fill cannot be checked against the share price', 'Retry shortly, or send allowRiskyToken: true to trade without the check.', 503);
     if (!ref) throw new SdkError('no_reference_price', `the share price of ${stock.ticker} is not available right now, so the fill cannot be checked`, 'Retry shortly, or send allowRiskyToken: true to trade without the check.', 503);
     const mult = await multiplier(stock);
@@ -93,6 +105,8 @@ export function baseAccounts(c: { rpcUrl: string; privy: PrivyConfig; caps?: { m
     // checkFillPrice works in lamports (1e9) and a SOL price: wei with the ETH price divided by 1e9 is the same dollar amount
     const check = checkFillPrice({ side, solLamports: side === 'buy' ? amount : out, tokensRaw: side === 'buy' ? out : amount, decimals, multiplier: mult, solUsd: eth.price / 1e9, referenceUsd: ref, maxDeviationPct: maxDev });
     if (!check.ok) throw new SdkError('bad_price', check.why!, 'Try a smaller amount, or send allowRiskyToken: true to trade anyway.', 409);
+    const better = check.deviationPct == null ? 0 : side === 'buy' ? -check.deviationPct : check.deviationPct;
+    if (better > MAX_TOO_GOOD_PCT) throw new SdkError('bad_price', `this route ${side === 'buy' ? 'pays' : 'receives'} $${Math.round(check.perShareUsd * 100) / 100} per share against a share price of $${Math.round(ref * 100) / 100} (${Math.round(better)}% better), which means ${stock.symbol}'s shares per token (${mult}) do not match how the market prices it, so the fill cannot be checked`, 'Send allowRiskyToken: true to trade anyway.', 409);
   };
   const make = async (userId: string, state: (name: string) => Backend): Promise<Account> => {
     const stocksOk = stocksOn && stocksForUser(userId);   // a sign-up account (p-...) buys stocks only with SIGNUP_STOCKS_ENABLED=1

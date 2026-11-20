@@ -109,7 +109,7 @@ The Base account code with another network's contracts (`EVM_NETWORKS` in packag
 
 | Chain | Chain id | DEX | Wrapped native | USD price from | Env |
 |---|---|---|---|---|---|
-| BNB Chain | 56 | PancakeSwap V2 (router `0x10ed43c7…024e`, 0.25% pool fee) | WBNB | WBNB/USDT pool | `BNB_RPC_URL` (or `ALCHEMY_API_KEY` with BNB enabled), `PRIVY_BNB_POLICY_ID`, `BNB_MAX_TRADE_ETH=0.02`, `BNB_DAILY_CAP_ETH=0.1` (in BNB) |
+| BNB Chain | 56 | PancakeSwap V2 (router `0x10ed43c7…024e`, 0.25% pool fee), and KyberSwap (router `0x6131b5fa…37b5`, chain name `bsc`) for tokens with no usable V2 pool, bStocks included: `BNB_AGGREGATOR=kyberswap` (default) or `off` | WBNB | WBNB/USDT pool | `BNB_RPC_URL` (or `ALCHEMY_API_KEY` with BNB enabled), `PRIVY_BNB_POLICY_ID`, `BNB_MAX_TRADE_ETH=0.02`, `BNB_DAILY_CAP_ETH=0.1` (in BNB) |
 | Robinhood Chain | 4663 | Uniswap V2 (router `0x89e5db8b…9eba`), and KyberSwap (router `0x6131b5fa…37b5`, chain name `robinhood`) for tokens with no usable V2 pool: `ROBINHOOD_AGGREGATOR=kyberswap` (default) or `off` | WETH | WETH/USDG pool | `ROBINHOOD_RPC_URL` (or `ALCHEMY_API_KEY` with Robinhood enabled), `PRIVY_ROBINHOOD_POLICY_ID`, `ROBINHOOD_MAX_TRADE_ETH=0.01`, `ROBINHOOD_DAILY_CAP_ETH=0.05` |
 
 Plain units: `bnb` for BNB amounts on BNB Chain (`eth` on Base and Robinhood). Tokens trade only against their V2 pool with the wrapped native coin: Relay and KyberSwap

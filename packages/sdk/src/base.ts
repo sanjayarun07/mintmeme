@@ -39,7 +39,7 @@ export const EVM_NETWORKS: Record<string, EvmNetwork> = {
   // BNB Smart Chain, PancakeSwap V2 (0.25% pool fee) against WBNB; BNB/USD from the WBNB/USDT (Binance-Peg, 18 decimals) pool
   bnb: { id: 'bnb', label: 'BNB Chain', engineChain: 'bnb-main', chainId: 56, router: '0x10ed43c718714eb63d5aa57b78b54704e256024e', factory: '0xca143ce32fe78f1f7019d7d551a6402fc5350c73',
     weth: '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c', native: 'BNB', dex: 'PancakeSwap V2', usd: { token: '0x55d398326f99059ff775485246999027b3197955', decimals: 18, pair: '0x16b9a82891338f9ba80e2d6970fdda79d1eb0dae' },
-    fee: { num: 9975n, den: 10000n }, finalityDepth: 5, relay: false },
+    fee: { num: 9975n, den: 10000n }, finalityDepth: 5, relay: false, kyberChain: 'bsc' },   // KyberSwap 'bsc': router 0x6131…37b5 has code here (18,652 bytes); bStock builds decode and pass gateKyber (2026-11-20)
   // Robinhood Chain (Arbitrum Nitro, ETH gas), Uniswap V2 against WETH; ETH/USD from the WETH/USDG (Paxos Global Dollar, 6 decimals) pool
   robinhood: { id: 'robinhood', label: 'Robinhood Chain', engineChain: 'robinhood-main', chainId: 4663, router: '0x89e5db8b5aa49aa85ac63f691524311aeb649eba', factory: '0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f',
     weth: '0x0bd7d308f8e1639fab988df18a8011f41eacad73', native: 'ETH', dex: 'Uniswap V2', usd: { token: '0x5fc5360d0400a0fd4f2af552add042d716f1d168', decimals: 6, pair: '0x8803c117ccae7b5146297876c2a25df135141c4d' },

@@ -1,7 +1,7 @@
 /** Market data for /app (apps/web/market.ts): normalizing each source, merging chains, caching through rate limits, and refusing bad input. Network is faked. */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { marketList, marketToken, marketCandles, marketSearch, marketMeta, marketRows, fromGecko, fromJupiter, clearMarketCache } from '../market.ts';
+import { marketList, marketToken, marketCandles, marketSearch, marketMeta, marketRows, marketStocks, fromGecko, fromJupiter, clearMarketCache } from '../market.ts';
 
 beforeEach(() => clearMarketCache());
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
@@ -98,4 +98,13 @@ test('Solana RPC everywhere: SOLANA_RPC_URL, else Helius, else Alchemy; the key 
   assert.equal(solanaRpc({ SOLANA_RPC_URL: 'https://mainnet.helius-rpc.com/?api-key=h1', HELIUS_API_KEY: 'h2', ALCHEMY_API_KEY: 'a' } as any)!.secret, 'h1');
   const h = solanaRpc({ HELIUS_API_KEY: 'h2', ALCHEMY_API_KEY: 'a' } as any)!; assert.equal(h.url, 'https://mainnet.helius-rpc.com/?api-key=h2'); assert.equal(h.name, 'Helius');
   assert.equal(solanaRpc({ ALCHEMY_API_KEY: 'a' } as any)!.name, 'Alchemy'); assert.equal(solanaRpc({} as any), undefined);
+});
+
+test('marketStocks lists the Base, Robinhood and BNB Chain stock tokens, and none for Solana (its list comes from the trading server)', async () => {
+  const b = await marketStocks({ chain: 'base' }); assert.equal(b.stocks.length, 10);
+  const nv = b.stocks.find(x => x.symbol === 'NVDAc')!; assert.equal(nv.ticker, 'NVDA'); assert.equal(nv.issuer, 'Coinbase'); assert.match(nv.address, /^0x[0-9a-fA-F]{40}$/);
+  const r = await marketStocks({ chain: 'robinhood' }); assert.ok(r.stocks.length > 200); assert.ok(r.stocks.every(x => /^0x[0-9a-fA-F]{40}$/.test(x.address) && x.ticker === x.symbol));
+  const n = await marketStocks({ chain: 'bnb' }); assert.deepEqual(n.stocks.map(x => x.symbol).sort(), ['CRCLB', 'MUB', 'NVDAB', 'TSLAB']); assert.equal(n.stocks.find(x => x.symbol === 'MUB')!.ticker, 'MU');
+  assert.deepEqual((await marketStocks({ chain: 'solana' })).stocks, []);
+  await assert.rejects(marketStocks({ chain: 'eth' }), /Unknown chain/);
 });

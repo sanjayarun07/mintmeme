@@ -120,3 +120,79 @@ test('Robinhood stocks: an unreadable multiplier refuses (no_reference_price) un
   await assert.rejects(off.prepare({ token: 'TSLA', eth: '0.1' }, '/v1/trades/buy'), code('stocks_disabled'));
   assert.equal((await off.prepare({ token: 'TSLA', amount: String(10n ** 18n) }, '/v1/trades/sell')).token, RH_TSLA);
 });
+
+/* ---------------- bStocks on BNB Chain: KyberSwap routes, the share multiplier read on chain, and the too-good guard ---------------- */
+import { BNB_STOCKS, BSTOCKS_BEACON } from '../../packages/evm/src/bnbstocks.ts';
+import { findBnbStock, STOCK_FINDERS, MAX_TOO_GOOD_PCT } from './baseaccount.ts';
+import { CHAIN_SPECS } from './chains.ts';
+const BNB = EVM_NETWORKS.bnb, BNB_TSLA = BNB_STOCKS.TSLAB.toLowerCase();
+
+/** BNB at $600, TSLA at $400 a share, one token worth `mult` shares (1 by default, so a fair token is $400: 1.5 tokens per BNB). Routes come from a KyberSwap stand-in. */
+function bnbWorld(o: { perBnb?: bigint; mult?: bigint; enabled?: boolean } = {}) {
+  const perBnb = o.perBnb ?? 15n * 10n ** 17n, p = fakePrivyEvm();
+  const rpc = { call: async (m: string, a: any[] = []): Promise<any> => {
+    if (m === 'eth_getBlockByNumber') return { number: '0x64', timestamp: '0x' + Math.floor(Date.now() / 1000).toString(16) };
+    if (m === 'eth_call' && a[0].to === BNB.factory) return '0x' + '0'.repeat(64);                         // no PancakeSwap V2 pool
+    if (m === 'eth_call' && a[0].data === '0x313ce567') return '0x' + w(18n);                               // decimals()
+    if (m === 'eth_call' && a[0].data === UI_MULTIPLIER_SELECTOR) return '0x' + w(o.mult ?? 10n ** 18n);
+    if (m === 'eth_call' && a[0].to === BNB.usd.pair) return '0x' + w(600_000n * 10n ** 18n) + w(1000n * 10n ** 18n) + w(0n);   // USDT (token0), WBNB
+    throw new Error(`unscripted ${m} ${JSON.stringify(a[0])}`); } };
+  const kyber = { client: { quote: async (tin: string, _t: string, amt: bigint) => ({ amountOut: tin === NATIVE ? amt * perBnb / 10n ** 18n : amt * 10n ** 18n / perBnb, routeSummary: {}, path: ['pancake-v3'] }) } as any };
+  const prices = new JupiterStockPrices({ fetchFn: (async () => new Response(JSON.stringify({ [TSLA_SOL]: { usdPrice: 400, stockData: { price: 400 } } }))) as any });
+  const acc = baseAccounts({ rpcUrl: 'http://rpc.test', rpc, network: 'bnb', privy: { ...p.cfg, fetchFn: p.fetchFn } as any, aggregator: 'kyberswap', kyber, stocks: { enabled: o.enabled ?? true, prices } });
+  const state = mem(); state('bnbwallet').write(JSON.stringify({ address: p.address.toLowerCase(), walletId: 'evm-wallet-1', linkedAt: 1 }));
+  return { make: () => acc.make('u1', state) };
+}
+
+test('bStocks: the official four are listed (SNDKB left out: its multiplier does not match its market); lookup by address, symbol or ticker', () => {
+  assert.deepEqual(Object.keys(BNB_STOCKS).sort(), ['CRCLB', 'MUB', 'NVDAB', 'TSLAB']);
+  assert.ok(Object.values(BNB_STOCKS).every(a => /^0x[0-9a-f]{40}$/.test(a))); assert.match(BSTOCKS_BEACON, /^0x[0-9a-f]{40}$/);
+  assert.equal(findBnbStock('tslab')?.address, BNB_TSLA); assert.equal(findBnbStock('TSLA')?.symbol, 'TSLAB'); assert.equal(findBnbStock('MU')?.ticker, 'MU');
+  assert.equal(findBnbStock(BNB_STOCKS.NVDAB.toUpperCase().replace('0X', '0x'))?.symbol, 'NVDAB');
+  assert.equal(findBnbStock('SNDKB'), undefined); assert.equal(findBnbStock('TSLAc'), undefined); assert.equal(findBnbStock('TSLAx'), undefined);
+  assert.equal(STOCK_FINDERS.bnb, findBnbStock);
+});
+
+test('BNB Chain routes tokens with no usable V2 pool through KyberSwap ("bsc") by default', () => {
+  assert.equal(EVM_NETWORKS.bnb.kyberChain, 'bsc'); assert.equal(CHAIN_SPECS.bnb.evm!.defaultAggregator, 'kyberswap'); assert.equal(CHAIN_SPECS.bnb.evm!.aggregatorEnv, 'BNB_AGGREGATOR');
+});
+
+test('bStocks: the ticker becomes the address; a fair buy and sell pass; a route far worse than the share price is refused', async () => {
+  const a = await bnbWorld().make();
+  assert.equal((await a.prepare({ token: 'TSLA', bnb: '0.1' }, '/v1/trades/buy')).token, BNB_TSLA);
+  assert.equal((await a.prepare({ stock: 'tslab', amount: String(10n ** 18n) }, '/v1/trades/sell')).token, BNB_TSLA);
+  // 1 token per BNB: $600 a share against $400
+  await assert.rejects((await bnbWorld({ perBnb: 10n ** 18n }).make()).prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy'), (e: any) => e?.code === 'bad_price' && /\$600 per share against a share price of \$400/.test(e.message));
+  const off = await bnbWorld({ enabled: false }).make();
+  await assert.rejects(off.prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy'), code('stocks_disabled'));
+  assert.equal((await off.prepare({ token: 'TSLAB', amount: String(10n ** 18n) }, '/v1/trades/sell')).token, BNB_TSLA);
+});
+
+test(`a fill more than ${MAX_TOO_GOOD_PCT}% BETTER than the share price is refused: the multiplier does not match the market (as SNDKB: 8 shares read, priced as 1)`, async () => {
+  // the token trades as 1 share ($400: 1.5 per BNB) but reads 8 shares per token: $50 a share "paid", 87.5% better than $400
+  const a = await bnbWorld({ mult: 8n * 10n ** 18n }).make();
+  await assert.rejects(a.prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy'), (e: any) => e?.code === 'bad_price' && /better/.test(e.message) && /shares per token \(8\./.test(e.message));
+  // a sell of the same token is already refused the other way: 8 shares sold for one share's price looks 87.5% worse
+  await assert.rejects(a.prepare({ token: 'TSLAB', amount: String(10n ** 18n) }, '/v1/trades/sell'), (e: any) => e?.code === 'bad_price' && /worse/.test(e.message));
+  assert.equal((await a.prepare({ token: 'TSLAB', bnb: '0.1', allowRiskyToken: true }, '/v1/trades/buy')).token, BNB_TSLA);
+  // 10% better (a real bargain within the guard) still passes
+  assert.equal((await (await bnbWorld({ perBnb: 165n * 10n ** 16n }).make()).prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy')).token, BNB_TSLA);
+});
+
+test('the share price comes from any Solana issuer of the ticker that has one (the first issuer may have none, as Backpack CRCL on 2026-11-20)', async () => {
+  const tsla = STOCKS_SOLANA.filter(a => underlying(a) === 'TSLA').map(a => a.mint); assert.ok(tsla.length > 1, 'TSLA has more than one Solana issuer');
+  const last = tsla[tsla.length - 1], p = fakePrivyEvm(), BNBN = EVM_NETWORKS.bnb;
+  const rpc = { call: async (m: string, a: any[] = []): Promise<any> => {
+    if (m === 'eth_getBlockByNumber') return { number: '0x64', timestamp: '0x' + Math.floor(Date.now() / 1000).toString(16) };
+    if (m === 'eth_call' && a[0].to === BNBN.factory) return '0x' + '0'.repeat(64);
+    if (m === 'eth_call' && a[0].data === '0x313ce567') return '0x' + w(18n);
+    if (m === 'eth_call' && a[0].data === UI_MULTIPLIER_SELECTOR) return '0x' + w(10n ** 18n);
+    if (m === 'eth_call' && a[0].to === BNBN.usd.pair) return '0x' + w(600_000n * 10n ** 18n) + w(1000n * 10n ** 18n) + w(0n);
+    throw new Error(`unscripted ${m}`); } };
+  const kyber = { client: { quote: async (tin: string, _t: string, amt: bigint) => ({ amountOut: tin === NATIVE ? amt * 15n / 10n : amt * 10n / 15n, routeSummary: {}, path: ['pancake-v3'] }) } as any };
+  // only the LAST issuer's token has a share price
+  const prices = new JupiterStockPrices({ fetchFn: (async () => new Response(JSON.stringify({ [last]: { usdPrice: 400, stockData: { price: 400 } } }))) as any });
+  const acc = baseAccounts({ rpcUrl: 'http://rpc.test', rpc, network: 'bnb', privy: { ...p.cfg, fetchFn: p.fetchFn } as any, aggregator: 'kyberswap', kyber, stocks: { enabled: true, prices } });
+  const s = mem(); s('bnbwallet').write(JSON.stringify({ address: p.address.toLowerCase(), walletId: 'evm-wallet-1', linkedAt: 1 }));
+  assert.equal((await (await acc.make('u1', s)).prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy')).token, BNB_TSLA);
+});

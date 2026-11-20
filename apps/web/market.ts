@@ -203,6 +203,16 @@ export async function marketRows(body: any, d: Deps = {}) {
   return { chain, rows };
 }
 
+/** The tokenized stocks of an EVM chain, for the Stocks tab: Coinbase stocks on Base and Robinhood stock tokens on Robinhood Chain, from the fixed lists the trading server also
+ *  checks trades against (packages/evm/src), and bStocks on BNB Chain. Market numbers come from marketRows. Solana's list comes from the trading server (GET /v1/stocks). */
+export async function marketStocks(body: any) {
+  const chain = chainOf(body?.chain) as Chain;
+  if (chain === 'base') { const { BASE_STOCKS } = await import('../../packages/evm/src/basestocks.ts'); return { chain, stocks: Object.entries(BASE_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: symbol.slice(0, -1), issuer: 'Coinbase' })) }; }
+  if (chain === 'robinhood') { const { ROBINHOOD_STOCKS } = await import('../../packages/evm/src/robinhoodstocks.ts'); return { chain, stocks: Object.entries(ROBINHOOD_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: symbol, issuer: 'Robinhood' })) }; }
+  if (chain === 'bnb') { const { BNB_STOCKS } = await import('../../packages/evm/src/bnbstocks.ts'); return { chain, stocks: Object.entries(BNB_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: symbol.slice(0, -1), issuer: 'bStocks' })) }; }
+  return { chain, stocks: [] };
+}
+
 /** When each transaction landed, from the chain itself (the server's trade records carry no time): Solana getTransaction blockTime; EVM the receipt's block, then that block's
  *  timestamp. Unix seconds per hash, or null when the chain does not know it (yet). Up to 40 hashes; a found time is cached for a day (it never changes). */
 export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } = {}) {

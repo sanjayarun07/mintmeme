@@ -315,15 +315,27 @@ V.discover = (main) => {
         await Promise.all(IDS.map(async c => { const ws = rows.filter(r => r.chain === c); if (!ws.length) return;
           try { const m = (await market('rows', { chain: c, tokens: ws.map(r => r.address) })).rows; ws.forEach(r => Object.assign(r, m[r.address.toLowerCase()] ?? {}, { chain: c })); } catch { /* keep what was saved */ } }));
       } else if (tab === 'stocks') {
-        if (S.chain !== 'all' && S.chain !== 'solana') { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>Stocks are listed for Solana here</b>Robinhood Chain and Base stock tokens trade from their token page: search a ticker such as TSLA.</div></td></tr>`; return; }
-        if (!S.key) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>Sign in to see stocks</b>The verified stock list comes from your trading server. <a class="btn sm" href="#/setup">Open Account</a></div></td></tr>`; return; }
-        const s = await v1('solana', 'GET', '/v1/stocks?limit=60'); const list = (s.stocks || []).filter(x => x.tradable);
-        // the server's list says which stocks are verified and tradable; the market numbers (change, volume, market cap, buys and sells) come from DexScreener
-        let mk = {}; try { mk = (await market('rows', { chain: 'solana', tokens: list.map(x => x.mint) })).rows; } catch { /* show the list without them */ }
-        rows = list.map(x => { const m = mk[x.mint.toLowerCase()] || {}; return { chain: 'solana', address: x.mint, symbol: x.symbol, name: x.issuer, icon: m.icon ?? null, price: m.price ?? null, change1h: m.change1h ?? null, change24h: m.change24h ?? null, mcap: m.mcap ?? null, liquidity: m.liquidity ?? x.liquidityUsd ?? null, volume24h: m.volume24h ?? null, buys24h: m.buys24h ?? null, sells24h: m.sells24h ?? null, createdAt: null, holders: null }; })
-          .sort((a, b) => (b.volume24h ?? 0) - (a.volume24h ?? 0));
-        if (!rows.some(r => r.price != null)) { const get = await loadMeta('solana', list.map(x => x.mint)); rows.forEach(r => { const g = get(r.address); r.price = g.price ?? null; r.icon = r.icon ?? g.icon ?? null; }); }
-        extra = note('', 'Tokenized stocks', esc(s.note || ''));
+        // the market numbers (price, change, volume, market cap, buys and sells) come from DexScreener, at most 90 tokens a call
+        const rowsFor = async (chain, list) => { const mk = {}; for (let i = 0; i < list.length; i += 90) { try { Object.assign(mk, (await market('rows', { chain, tokens: list.slice(i, i + 90).map(x => x.address) })).rows); } catch { /* show the list without them */ } }
+          return list.map(x => { const m = mk[x.address.toLowerCase()] || {}; return { chain, address: x.address, symbol: x.symbol, name: x.name, icon: m.icon ?? null, price: m.price ?? null, change1h: m.change1h ?? null, change24h: m.change24h ?? null, mcap: m.mcap ?? null, liquidity: m.liquidity ?? x.liquidity ?? null, volume24h: m.volume24h ?? null, buys24h: m.buys24h ?? null, sells24h: m.sells24h ?? null, createdAt: null, holders: null }; }); };
+        const want = S.chain === 'all' ? ['solana', 'base', 'robinhood', 'bnb'] : [S.chain], notes = [];
+        const parts = await Promise.all(want.map(async c => {
+          if (c === 'solana') {
+            // Solana's verified, tradable list comes from your trading server
+            if (!S.key) { notes.push(['', 'Sign in to see Solana stocks', 'The verified Solana stock list comes from your trading server. <a href="#/setup">Open Account</a>']); return []; }
+            try { const s = await v1('solana', 'GET', '/v1/stocks?limit=60'); const list = (s.stocks || []).filter(x => x.tradable).map(x => ({ address: x.mint, symbol: x.symbol, name: x.issuer, liquidity: x.liquidityUsd }));
+              const r = await rowsFor('solana', list);
+              if (!r.some(x => x.price != null)) { const get = await loadMeta('solana', list.map(x => x.address)); r.forEach(x => { const g = get(x.address); x.price = g.price ?? null; x.icon = x.icon ?? g.icon ?? null; }); }
+              if (s.note) notes.push(['', 'Tokenized stocks', esc(s.note)]); return r;
+            } catch (e) { notes.push(['warn', 'Solana stocks did not load', esc(e.message)]); return []; }
+          }
+          try { const list = (await market('stocks', { chain: c })).stocks.map(x => ({ address: x.address, symbol: x.symbol, name: `${x.issuer} · ${x.ticker}` })); return rowsFor(c, list); }
+          catch (e) { notes.push(['warn', `${CH[c].label} stocks did not load`, esc(e.message)]); return []; }
+        }));
+        // most traded first; stocks with no market data at all go last
+        rows = parts.flat().sort((a, b) => (b.volume24h ?? -1) - (a.volume24h ?? -1));
+        if (!rows.length && !notes.length) { tb.innerHTML = `<tr><td colspan="10"><div class="empty"><b>No stocks to show</b>Try another chain.</div></td></tr>`; return; }
+        extra = notes.map(([k, t, b]) => note(k, t, b)).join('');
       } else {
         const r = await market('list', { chain: S.chain, tab }); rows = r.rows;
         if (r.unavailable?.length) extra = note('warn', 'Some chains did not answer', r.unavailable.map(u => esc(CH[u.chain].label)).join(', ') + '. Showing the rest.');

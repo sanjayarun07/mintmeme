@@ -36,9 +36,10 @@ export const CHAIN_SPECS: Record<string, ChainSpec> = {
   solana: { id: 'solana', kind: 'solana', label: 'Solana mainnet' },
   base: { id: 'base', kind: 'evm', label: 'Base mainnet', evm: { chainId: 8453, rpcEnv: 'BASE_RPC_URL', alchemyNet: 'base-mainnet', policyEnv: 'PRIVY_BASE_POLICY_ID',
     capsPrefix: 'BASE', maxTradeDefault: '0.01', dailyCapDefault: '0.05', network: 'base', relayEnv: 'BASE_RELAY', relayKeyEnv: 'RELAY_API_KEY', aggregatorEnv: 'BASE_AGGREGATOR', nativeSymbol: 'ETH' } },
-  // BNB Smart Chain: PancakeSwap V2 against WBNB. Caps are in BNB (BNB_MAX_TRADE_ETH / BNB_DAILY_CAP_ETH: the suffix names the 18-decimal native unit, not the coin).
+  // BNB Smart Chain: PancakeSwap V2 against WBNB, and KyberSwap (chain "bsc") for tokens with no usable V2 pool: bStocks trade on PancakeSwap V3/Infinity and prop AMMs.
+  // BNB_AGGREGATOR=off trades V2 pools only. Caps are in BNB (BNB_MAX_TRADE_ETH / BNB_DAILY_CAP_ETH: the suffix names the 18-decimal native unit, not the coin).
   bnb: { id: 'bnb', kind: 'evm', label: 'BNB Chain', evm: { chainId: 56, rpcEnv: 'BNB_RPC_URL', alchemyNet: 'bnb-mainnet', policyEnv: 'PRIVY_BNB_POLICY_ID',
-    capsPrefix: 'BNB', maxTradeDefault: '0.02', dailyCapDefault: '0.1', network: 'bnb', nativeSymbol: 'BNB' } },
+    capsPrefix: 'BNB', maxTradeDefault: '0.02', dailyCapDefault: '0.1', network: 'bnb', aggregatorEnv: 'BNB_AGGREGATOR', defaultAggregator: 'kyberswap', nativeSymbol: 'BNB' } },
   // Robinhood Chain (Arbitrum Nitro L2, ETH gas): Uniswap V2 against WETH, and KyberSwap for tokens with no usable V2 pool (its stock tokens trade on Uniswap V3/V4 and
   // KyberSwap's own PMM); Relay does not serve this chain. ROBINHOOD_AGGREGATOR=off trades V2 pools only.
   robinhood: { id: 'robinhood', kind: 'evm', label: 'Robinhood Chain', evm: { chainId: 4663, rpcEnv: 'ROBINHOOD_RPC_URL', alchemyNet: 'robinhood-mainnet', policyEnv: 'PRIVY_ROBINHOOD_POLICY_ID',

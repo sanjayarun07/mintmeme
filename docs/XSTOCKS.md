@@ -111,7 +111,13 @@ The memecoin feature set (buy and sell, limit, take-profit, stop-loss, trailing 
 | **Ondo** | TSLAon `0x2494b603…9d93` and 10 more (official CSV) | 18 ERC-20 proxy | KYC on mint/redeem only, non-US, blocklist | under $5k on DEXes; the real route is Ondo's GMTokenManager mint/redeem |
 | **xStocks** | same address as on every EVM chain, e.g. TSLAx `0x8ad3c73f833d3f9a523ab01476625f269aeb7cf0` | **18** on EVM | as on Solana | dust: we read every PancakeSwap V2 pair on chain, and the largest holds about $5 of USDT |
 
-**Tradable here now: no.** The only V2 pools with real money are TSLAB and QQQB against WBNB, at about $50k each. The same tokens have $0.8M–$1.3M on V3, so a V2-only fill would be much worse than the market. Wiring them would offer users a poor price, so they are deliberately not wired. The repo also has no BNB trader preset.
+**Tradable here now: bStocks through KyberSwap (2026-11-20), read-only checked, no mainnet trade yet.** V2 pools are thin (TSLAB and QQQB against WBNB, about $50k each); the liquidity is on PancakeSwap V3/Infinity, Uniswap V3 and Metric's prop AMM, which KyberSwap (chain name `bsc`) reaches. The router `0x6131…37b5` has code on BNB (18,652 bytes); builds for buys and sells of all five official bStocks decoded and passed `gateKyber` unchanged.
+- **Listed:** NVDAB, TSLAB, CRCLB and MUB (`packages/evm/src/bnbstocks.ts`), each checked on chain to be a beacon proxy of the bStocks beacon `0x156d6dce…93a3`. **SNDKB is left out:** its `uiMultiplier()` reads 8 shares per token, but it trades at the price of one SanDisk share (about $710), so the share-price check cannot trust it.
+- **Server:** ticker lookup (`TSLAB` or `TSLA`), the `STOCKS_ENABLED` / `BNB_STOCKS_ENABLED` switch for buys, and the 3% share-price check with `uiMultiplier()`, as on Robinhood Chain. The reference is Jupiter's share price from any Solana issuer of the ticker that has one (CRCL: Backpack's had none, xStocks' had).
+- **Too-good guard (every EVM chain):** a fill more than 25% better than the share price is refused too: it means the token's shares-per-token reading does not match its market, and then a several-times-too-expensive fill would look like a bargain.
+- **Checked read-only on mainnet (2026-11-20):** the server's real BNB code with KyberSwap routes, on-chain multipliers and Jupiter share prices passed a 0.01 BNB buy and a 0.01-token sell of each of the four. No mainnet trade has been made yet.
+- **Privy policy:** needs `kyberswap-swaps` and `approve-kyberswap` with `chain_id` `56` (`npm run privy:evm-policy -- bnb` prints them); without them Privy refuses KyberSwap trades, which is safe.
+- **Not listed yet:** rwa.xyz counts 112 bStocks (about $1.3B); only five are on an official list. Others share the same beacon, so the beacon is the way to verify more.
 
 ## Base (8453)
 
@@ -244,7 +250,7 @@ Tests: `packages/sol/test/stocks.test.ts`, and `apps/server/stocks.test.ts` (off
 - No market-hours warning.
 
 Stock-specific gaps that remain on every chain:
-- **EVM chains:** Base and Robinhood Chain have three of the Solana features: ticker lookup, the `STOCKS_ENABLED` switch, and the share-price check (on Robinhood Chain it uses `uiMultiplier()`). The rest have yet to be built. BNB Chain has none of them.
+- **EVM chains:** Base and Robinhood Chain have three of the Solana features: ticker lookup, the `STOCKS_ENABLED` switch, and the share-price check (on Robinhood Chain it uses `uiMultiplier()`). The rest have yet to be built. BNB Chain has the same three for its listed bStocks (2026-11-20).
 - **Solana:**
   - re-check the fill price when an automated order executes;
   - positions in shares;

@@ -345,13 +345,13 @@ async function venueQuotes(inputMint: string, outputMint: string, amount: bigint
 // (Robinhood stock tokens). Relay, KyberSwap, LI.FI and OpenOcean all answered keyless on 2026-11-19 on these chains, except Relay on Robinhood Chain ("Unsupported
 // currency" for its stock tokens). Each answer is checked for the same token and amount before it is shown. Relay and LI.FI need a sender for a quote: a busy public
 // wallet on that chain is used (nothing is signed or sent). The execution server trades through Relay (Base) or KyberSwap (BASE_AGGREGATOR, Robinhood's default);
-// BNB stocks are not wired there (docs/XSTOCKS.md). The share multiplier is read on chain (uiMultiplier(); 1 where the token has none, as Coinbase's B20 tokens).
+// BNB Chain's bStocks through KyberSwap too (BNB_AGGREGATOR, default kyberswap). The share multiplier is read on chain (uiMultiplier(); 1 where the token has none, as Coinbase's B20 tokens).
 const alchemy = (net: string) => (process.env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${process.env.ALCHEMY_API_KEY}` : undefined);
 const EVM_DESK: Record<string, { label: string; chainId: number; native: string; rpc: string; kyber: string; taker: string; stocks: Record<string, string>; ticker: (s: string) => string; net: string; serverRoute: string; bebop: string }> = {
   base: { label: 'Base', chainId: 8453, native: 'ETH', rpc: process.env.BASE_RPC_URL?.trim() || alchemy('base-mainnet') || 'https://mainnet.base.org', kyber: 'base', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
     stocks: BASE_STOCKS, ticker: s => s.replace(/c$/, ''), net: 'base', bebop: 'base', serverRoute: 'Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap' },
   bnb: { label: 'BNB Chain', chainId: 56, native: 'BNB', rpc: process.env.BNB_RPC_URL?.trim() || alchemy('bnb-mainnet') || 'https://bsc-dataseed.bnbchain.org', kyber: 'bsc', taker: '0xF977814e90dA44bFA03b6295A0616a897441aceC',
-    stocks: BNB_STOCKS, ticker: s => s.replace(/B$/, ''), net: 'bnb', bebop: 'bsc', serverRoute: 'not wired: the server trades BNB tokens only through their PancakeSwap V2 pool, which is thin for these' },
+    stocks: BNB_STOCKS, ticker: s => s.replace(/B$/, ''), net: 'bnb', bebop: 'bsc', serverRoute: 'KyberSwap (BNB_AGGREGATOR default)' },
   robinhood: { label: 'Robinhood Chain', chainId: 4663, native: 'ETH', rpc: process.env.ROBINHOOD_RPC_URL?.trim() || alchemy('robinhood-mainnet') || 'https://rpc.mainnet.chain.robinhood.com', kyber: 'robinhood', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
     stocks: ROBINHOOD_STOCKS, ticker: s => s, net: 'robinhood', bebop: 'robinhood', serverRoute: 'KyberSwap (ROBINHOOD_AGGREGATOR default)' },
 };
@@ -362,7 +362,7 @@ const checksum = (a: string) => { const x = a.toLowerCase().slice(2), h = Buffer
  *  and whether stock buys are on. Read the way apps/server/chains.ts and main.ts read them. */
 function serverPlan(id: string) {
   const sp = CHAIN_SPECS[id]?.evm, e = process.env, cap = Number(e[`${sp?.capsPrefix}_MAX_TRADE_ETH`] ?? sp?.maxTradeDefault ?? 0), agg = sp?.aggregatorEnv ? (e[sp.aggregatorEnv]?.trim() || sp.defaultAggregator || 'relay') : undefined;
-  const venue = id === 'base' ? (agg === 'kyberswap' ? 'KyberSwap' : agg === 'off' || e.BASE_RELAY?.trim() === 'off' ? null : 'Relay') : id === 'robinhood' ? (agg === 'off' ? null : 'KyberSwap') : null;
+  const venue = id === 'base' ? (agg === 'kyberswap' ? 'KyberSwap' : agg === 'off' || e.BASE_RELAY?.trim() === 'off' ? null : 'Relay') : id === 'robinhood' || id === 'bnb' ? (agg === 'off' ? null : 'KyberSwap') : null;
   const why = venue ? `the server routes ${id === 'base' ? 'Coinbase stocks' : 'stock tokens'} on ${CHAIN_SPECS[id]?.label} through ${venue}` : id === 'bnb' ? 'the server trades BNB tokens only through their PancakeSwap V2 pool, which is thin for bStocks, so it would not route this' : 'aggregator routing is off on the server';
   return { venue, why, capNative: cap, stocksOn: stocksEnabled(id), dailyCapNative: Number(e[`${sp?.capsPrefix}_DAILY_CAP_ETH`] ?? sp?.dailyCapDefault ?? 0) };
 }
