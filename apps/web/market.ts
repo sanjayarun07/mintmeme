@@ -208,7 +208,7 @@ export async function marketStocks(body: any) {
   const chain = chainOf(body?.chain) as Chain;
   if (chain === 'base') { const { BASE_STOCKS } = await import('../../packages/evm/src/basestocks.ts'); return { chain, stocks: Object.entries(BASE_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: symbol.slice(0, -1), issuer: 'Coinbase' })) }; }
   if (chain === 'robinhood') { const { ROBINHOOD_STOCKS } = await import('../../packages/evm/src/robinhoodstocks.ts'); return { chain, stocks: Object.entries(ROBINHOOD_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: symbol, issuer: 'Robinhood' })) }; }
-  if (chain === 'bnb') { const { BNB_STOCKS } = await import('../../packages/evm/src/bnbstocks.ts'); return { chain, stocks: Object.entries(BNB_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: symbol.slice(0, -1), issuer: 'bStocks' })) }; }
+  if (chain === 'bnb') { const { BNB_STOCKS, bnbTicker, bnbIssuer } = await import('../../packages/evm/src/bnbstocks.ts'); return { chain, stocks: Object.entries(BNB_STOCKS).map(([symbol, address]) => ({ symbol, address, ticker: bnbTicker(symbol), issuer: bnbIssuer(symbol) })) }; }
   return { chain, stocks: [] };
 }
 

@@ -15,7 +15,7 @@ import { base58 } from '../../packages/sol/src/tx.ts';
 import { fetchJupiterQuote } from '../../packages/sol/src/jupiter.ts';
 import { RelayClient } from '../../packages/evm/src/relay.ts';
 import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
-import { BNB_STOCKS } from '../../packages/evm/src/bnbstocks.ts';
+import { BNB_STOCKS, bnbTicker } from '../../packages/evm/src/bnbstocks.ts';
 import { ROBINHOOD_STOCKS } from '../../packages/evm/src/robinhoodstocks.ts';
 import { keccak256 } from '../../packages/evm/src/keccak.ts';
 import { CHAIN_SPECS, stocksEnabled } from '../server/chains.ts';
@@ -351,7 +351,7 @@ const EVM_DESK: Record<string, { label: string; chainId: number; native: string;
   base: { label: 'Base', chainId: 8453, native: 'ETH', rpc: process.env.BASE_RPC_URL?.trim() || alchemy('base-mainnet') || 'https://mainnet.base.org', kyber: 'base', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
     stocks: BASE_STOCKS, ticker: s => s.replace(/c$/, ''), net: 'base', bebop: 'base', serverRoute: 'Relay by default, or KyberSwap with BASE_AGGREGATOR=kyberswap' },
   bnb: { label: 'BNB Chain', chainId: 56, native: 'BNB', rpc: process.env.BNB_RPC_URL?.trim() || alchemy('bnb-mainnet') || 'https://bsc-dataseed.bnbchain.org', kyber: 'bsc', taker: '0xF977814e90dA44bFA03b6295A0616a897441aceC',
-    stocks: BNB_STOCKS, ticker: s => s.replace(/B$/, ''), net: 'bnb', bebop: 'bsc', serverRoute: 'KyberSwap (BNB_AGGREGATOR default)' },
+    stocks: BNB_STOCKS, ticker: bnbTicker, net: 'bnb', bebop: 'bsc', serverRoute: 'KyberSwap (BNB_AGGREGATOR default)' },
   robinhood: { label: 'Robinhood Chain', chainId: 4663, native: 'ETH', rpc: process.env.ROBINHOOD_RPC_URL?.trim() || alchemy('robinhood-mainnet') || 'https://rpc.mainnet.chain.robinhood.com', kyber: 'robinhood', taker: '0x43f3c1c1da83dd6a541a98a7914e3791e39aac85',
     stocks: ROBINHOOD_STOCKS, ticker: s => s, net: 'robinhood', bebop: 'robinhood', serverRoute: 'KyberSwap (ROBINHOOD_AGGREGATOR default)' },
 };

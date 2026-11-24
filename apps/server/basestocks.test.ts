@@ -146,7 +146,8 @@ function bnbWorld(o: { perBnb?: bigint; mult?: bigint; enabled?: boolean } = {})
 
 test('bStocks: the registry\'s tradable ones are listed, the five official ones among them; lookup by address, symbol or ticker', () => {
   for (const s of ['CRCLB', 'MUB', 'NVDAB', 'SNDKB', 'TSLAB']) assert.ok(BNB_STOCKS[s], `${s} is listed`);
-  assert.ok(Object.keys(BNB_STOCKS).length >= 20 && Object.keys(BNB_STOCKS).every(s => s.endsWith('B')));
+  assert.ok(Object.keys(BNB_STOCKS).length >= 20 && Object.keys(BNB_STOCKS).every(s => s.endsWith('B') || s.endsWith('on')), 'bStocks (NVDAB) and Ondo (NVDAon) only');
+  assert.equal(findBnbStock('DISon')?.ticker, 'DIS', 'an Ondo token: ticker without "on"'); assert.equal(findBnbStock(BNB_STOCKS.DISon)?.symbol, 'DISon');
   assert.ok(Object.values(BNB_STOCKS).every(a => /^0x[0-9a-f]{40}$/.test(a))); assert.match(BSTOCKS_BEACON, /^0x[0-9a-f]{40}$/);
   assert.equal(findBnbStock('tslab')?.address, BNB_TSLA); assert.equal(findBnbStock('TSLA')?.symbol, 'TSLAB'); assert.equal(findBnbStock('MU')?.ticker, 'MU');
   assert.equal(findBnbStock(BNB_STOCKS.NVDAB.toUpperCase().replace('0X', '0x'))?.symbol, 'NVDAB');
@@ -196,6 +197,18 @@ test('the share price comes from any Solana issuer of the ticker that has one (t
   const acc = baseAccounts({ rpcUrl: 'http://rpc.test', rpc, network: 'bnb', privy: { ...p.cfg, fetchFn: p.fetchFn } as any, aggregator: 'kyberswap', kyber, stocks: { enabled: true, prices } });
   const s = mem(); s('bnbwallet').write(JSON.stringify({ address: p.address.toLowerCase(), walletId: 'evm-wallet-1', linkedAt: 1 }));
   assert.equal((await (await acc.make('u1', s)).prepare({ token: 'TSLAB', bnb: '0.1' }, '/v1/trades/buy')).token, BNB_TSLA);
+});
+
+test('the Ondo registry on BNB Chain: every row an Ondo symbol and address; tradable rows passed the market check of that run', async () => {
+  const { BNB_ONDO_LIST, BNB_ONDO_LIST_META } = await import('../../packages/evm/src/bnbondolist.generated.ts');
+  const { ONDO_BNB_BEACON, bnbTicker, bnbIssuer } = await import('../../packages/evm/src/bnbstocks.ts');
+  assert.match(ONDO_BNB_BEACON, /^0x[0-9a-f]{40}$/); assert.equal(bnbTicker('NVDAon'), 'NVDA'); assert.equal(bnbTicker('NVDAB'), 'NVDA'); assert.equal(bnbIssuer('NVDAon'), 'Ondo');
+  assert.equal(BNB_ONDO_LIST.length, BNB_ONDO_LIST_META.verified); assert.equal(BNB_ONDO_LIST.filter(r => r[5] === 1).length, BNB_ONDO_LIST_META.tradable);
+  for (const [sym, addr, , liq, dev, ok] of BNB_ONDO_LIST) {
+    assert.match(sym, /on$/, sym); assert.match(addr, /^0x[0-9a-f]{40}$/, sym);
+    if (ok) { assert.ok((liq ?? 0) >= (BNB_ONDO_LIST_META as any).minLiquidityUsd && dev != null && dev <= 3 && dev >= -MAX_TOO_GOOD_PCT, `${sym} tradable`); assert.equal(BNB_STOCKS[sym], addr, `${sym} is listed`); }
+    else assert.equal(BNB_STOCKS[sym], undefined, `${sym} not tradable: not listed`);
+  }
 });
 
 test('the bStocks registry: every row is a 0x address with a positive multiplier; tradable rows passed the market check of that run', async () => {

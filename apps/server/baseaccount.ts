@@ -20,7 +20,7 @@ import type { Route } from '../api/server.ts';
 import { NATIVE } from '../../packages/core/src/index.ts';
 import { STOCKS_SOLANA, underlying, JupiterStockPrices, checkFillPrice } from '../../packages/sol/src/index.ts';
 import { BASE_STOCKS } from '../../packages/evm/src/basestocks.ts';
-import { BNB_STOCKS } from '../../packages/evm/src/bnbstocks.ts';
+import { BNB_STOCKS, bnbTicker } from '../../packages/evm/src/bnbstocks.ts';
 import { ROBINHOOD_STOCKS, UI_MULTIPLIER_SELECTOR } from '../../packages/evm/src/robinhoodstocks.ts';
 
 /* ---------------- Tokenized stocks on EVM chains: ticker lookup, the operator switch, the share-price check (the EVM twin of solaccount.ts) ---------------- */
@@ -35,12 +35,15 @@ export function findRobinhoodStock(t: string): EvmStock | undefined {
   const k = t.trim().toLowerCase(), e = Object.entries(ROBINHOOD_STOCKS).find(([s, a]) => a.toLowerCase() === k || s.toLowerCase() === k);
   return e ? { symbol: e[0], address: e[1].toLowerCase(), ticker: e[0] } : undefined;
 }
-/** A bStock on BNB Chain by address, symbol (NVDAB) or underlying ticker (NVDA), case-insensitive; undefined for anything else (packages/evm/src/bnbstocks.ts). */
+/** A stock on BNB Chain (bStocks NVDAB, Ondo NVDAon) by address, symbol or underlying ticker (NVDA: bStocks first), case-insensitive; undefined for anything else
+ *  (packages/evm/src/bnbstocks.ts). */
 export function findBnbStock(t: string): EvmStock | undefined {
-  const k = t.trim().toLowerCase(), e = Object.entries(BNB_STOCKS).find(([s, a]) => a.toLowerCase() === k || s.toLowerCase() === k || s.slice(0, -1).toLowerCase() === k);
-  return e ? { symbol: e[0], address: e[1].toLowerCase(), ticker: e[0].slice(0, -1) } : undefined;
+  const k = t.trim().toLowerCase(), es = Object.entries(BNB_STOCKS);
+  const e = es.find(([s, a]) => a.toLowerCase() === k || s.toLowerCase() === k) ?? es.find(([s]) => bnbTicker(s).toLowerCase() === k);
+  return e ? { symbol: e[0], address: e[1].toLowerCase(), ticker: bnbTicker(e[0]) } : undefined;
 }
-/** The stock lookup of an EVM network, or undefined where it lists no stocks. BNB lists bStocks only: its xStocks and Ondo tokens hold dust on DEXes. */
+/** The stock lookup of an EVM network, or undefined where it lists no stocks. BNB lists bStocks and the Ondo tokens with real liquidity (most Ondo tokens there, and
+ *  its xStocks, hold dust on DEXes: the registries keep only the tradable ones). */
 export const STOCK_FINDERS: Record<string, (t: string) => EvmStock | undefined> = { base: findBaseStock, robinhood: findRobinhoodStock, bnb: findBnbStock };
 /** A fill this much BETTER than the share price is refused too: it means the token's shares-per-token reading does not match how the market prices it (a token that
  *  read 8 shares but traded as 1), and then the one-sided check would let a fill several times too expensive through. A real split moves both together (SNDKB and
