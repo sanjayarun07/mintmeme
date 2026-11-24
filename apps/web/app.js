@@ -579,7 +579,7 @@ V.portfolio = async (main) => {
   await Promise.all(chains.map(async c => {
     const ps = await v1(c, 'GET', '/v1/positions').then(x => (Array.isArray(x) ? x : x.positions || []).filter(p => p.balance && p.balance !== '0')).catch(() => []);
     const byTok = new Map(ps.map(p => [String(p.token).toLowerCase(), p])), addr = S.wallets[c]?.address;
-    let hs = null; if (addr) hs = await market('holdings', { chain: c, address: addr }).then(r => r.holdings).catch(() => null);
+    let hs = null; if (addr) hs = await market('holdings', { chain: c, address: addr, tokens: c === 'solana' ? undefined : ps.map(p => p.token) }).then(r => r.holdings).catch(() => null);
     if (hs) {
       for (const h of hs) {
         const p = byTok.get(h.token.toLowerCase()); byTok.delete(h.token.toLowerCase());
@@ -611,17 +611,30 @@ V.portfolio = async (main) => {
     wireCancel(el, () => route());
   }
   if (tab === 'history') {
-    // the server's trade records carry no time: it comes from the chain (the transaction's block), else from a key this app or the old page made (ui-/app-<ms>)
-    const rows = []; await Promise.all(chains.map(async c => { try {
-      const ts = await v1(c, 'GET', '/v1/trades?limit=40'), list = (Array.isArray(ts) ? ts : ts.trades || []).map(t => { const buy = t.tokenIn === 'NATIVE' || t.side === 'buy'; return { ...t, side: t.side || (buy ? 'buy' : 'sell'), token: t.token || (buy ? t.tokenOut : t.tokenIn) }; });
-      const [, times] = await Promise.all([loadMeta(c, list.map(t => t.token).filter(t => t && t !== 'NATIVE')), market('txtimes', { chain: c, hashes: list.map(t => t.txHash).filter(Boolean) }).then(r => r.times).catch(() => ({}))]);
-      list.forEach(t => { const k = /(?:^|[.-])(?:ui|app)-(\d{13})/.exec(String(t.key || ''))?.[1]; t.when = times[t.txHash] ? times[t.txHash] * 1000 : k ? +k : null; rows.push([c, t]); });
-    } catch { /* that chain is skipped */ } }));
+    // trades this server made (state, origin), merged by transaction with the wallet's trades read from the chain (made anywhere: another server, another app, the wallet)
+    const rows = [], notes = []; await Promise.all(chains.map(async c => {
+      const addr = S.wallets[c]?.address;
+      const [srv, act] = await Promise.all([
+        v1(c, 'GET', '/v1/trades?limit=40').then(ts => (Array.isArray(ts) ? ts : ts.trades || []).map(t => { const buy = t.tokenIn === 'NATIVE' || t.side === 'buy'; return { ...t, side: t.side || (buy ? 'buy' : 'sell'), token: t.token || (buy ? t.tokenOut : t.tokenIn) }; })).catch(() => []),
+        addr ? market('activity', { chain: c, address: addr }).catch(e => ({ trades: [], error: e.message })) : { trades: [] },
+      ]);
+      if (act.unsupported) notes.push(act.unsupported); else if (act.error) notes.push(`${CH[c].label}: on-chain history not available (${act.error})`);
+      const seen = new Set(srv.map(t => t.txHash).filter(Boolean)), chainTimes = {};
+      for (const a of act.trades || []) { if (a.txHash) chainTimes[a.txHash] = a.when; if (seen.has(a.txHash)) continue;
+        const amountIn = a.side === 'buy' ? a.native : a.side === 'swap' ? a.fromRaw : a.tokenRaw;
+        srv.push({ side: a.side, token: a.token, fromToken: a.fromToken, amountIn, txHash: a.txHash, state: a.failed ? 'failed' : 'finalized', origin: 'wallet', when: a.when }); }
+      const need = srv.filter(t => t.txHash && t.when == null && chainTimes[t.txHash] == null).map(t => t.txHash);
+      const [, times] = await Promise.all([loadMeta(c, srv.flatMap(t => [t.token, t.fromToken]).filter(t => t && t !== 'NATIVE')), need.length ? market('txtimes', { chain: c, hashes: need }).then(r => r.times).catch(() => ({})) : {}]);
+      srv.forEach(t => { if (t.when == null) { const k = /(?:^|[.-])(?:ui|app)-(\d{13})/.exec(String(t.key || ''))?.[1]; t.when = chainTimes[t.txHash] ?? (times[t.txHash] ? times[t.txHash] * 1000 : k ? +k : null); } rows.push([c, t]); });
+    }));
     rows.sort((a, b) => (b[1].when ?? 0) - (a[1].when ?? 0));
     const ago = ms => { const s = (Date.now() - ms) / 1000; return s < 60 ? 'just now' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 86400 ? Math.round(s / 3600) + ' h ago' : null; };
-    const amount = (c, t) => { if (t.amountIn == null) return ''; const buy = t.side === 'buy', m = meta[c + ':' + String(t.token).toLowerCase()] || {}, v = fromRaw(t.amountIn, buy ? CH[c].dec : m.decimals); return v == null ? '' : `${amt(v, 6)} ${buy ? CH[c].native : esc(m.symbol || '')}`; };
-    el.innerHTML = rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Trade</th><th>Token</th><th class="num hide-s">Spent</th><th>State</th><th class="num"></th></tr></thead><tbody>${rows.map(([c, t]) => { const m = meta[c + ':' + String(t.token).toLowerCase()] || {};
-      return `<tr><td class="muted" style="white-space:nowrap">${t.when ? `${new Date(t.when).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${ago(t.when) ? `<br><small class="faint">${ago(t.when)}</small>` : ''}` : '<span class="faint">unknown</span>'}</td><td>${badge(c)} <span class="${t.side === 'buy' ? 'up' : 'down'}" style="font-weight:600">${t.side === 'buy' ? 'Buy' : 'Sell'}</span>${t.origin && t.origin !== 'manual' ? ` <span class="faint">${esc(t.origin)}</span>` : ''}</td><td>${esc(m.symbol || short(t.token))}</td><td class="num hide-s">${amount(c, t)}</td><td class="${t.state === 'failed' ? 'down' : t.state === 'finalized' ? 'up' : 'muted'}">${esc(t.state === 'finalized' ? 'Done' : t.state)}${t.failure ? ` <span class="faint">${esc(t.failure).slice(0, 80)}</span>` : ''}</td><td class="num">${t.txHash ? `<a class="btn sm ghost" href="${esc(explorer(c, t.txHash))}" target="_blank" rel="noopener noreferrer">View</a>` : ''}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty"><b>No trades yet</b></div>';
+    const mt = (c, tok) => meta[c + ':' + String(tok).toLowerCase()] || meta[c + ':' + tok] || {};
+    const amount = (c, t) => { if (t.amountIn == null) return ''; const nat = t.side === 'buy', tok = t.side === 'swap' ? t.fromToken : t.token, m = mt(c, tok), v = fromRaw(t.amountIn, nat ? CH[c].dec : m.decimals); return v == null ? '' : `${amt(v, 6)} ${nat ? CH[c].native : esc(m.symbol || short(tok))}`; };
+    const SIDE = { buy: ['Buy', 'up'], sell: ['Sell', 'down'], swap: ['Swap', 'up'], receive: ['Received', 'muted'], send: ['Sent', 'muted'] };
+    el.innerHTML = (rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>When</th><th>Trade</th><th>Token</th><th class="num hide-s">Amount</th><th>State</th><th class="num"></th></tr></thead><tbody>${rows.map(([c, t]) => { const m = mt(c, t.token), [label, kl] = SIDE[t.side] || [t.side, 'muted'];
+      return `<tr><td class="muted" style="white-space:nowrap">${t.when ? `${new Date(t.when).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}${ago(t.when) ? `<br><small class="faint">${ago(t.when)}</small>` : ''}` : '<span class="faint">unknown</span>'}</td><td>${badge(c)} <span class="${kl}" style="font-weight:600">${label}</span>${t.origin && t.origin !== 'manual' ? ` <span class="faint">${esc(t.origin === 'wallet' ? 'outside this app' : t.origin)}</span>` : ''}</td><td>${esc(m.symbol || short(t.token))}</td><td class="num hide-s">${amount(c, t)}</td><td class="${t.state === 'failed' ? 'down' : t.state === 'finalized' ? 'up' : 'muted'}">${esc(t.state === 'finalized' ? 'Done' : t.state)}${t.failure ? ` <span class="faint">${esc(t.failure).slice(0, 80)}</span>` : ''}</td><td class="num">${t.txHash ? `<a class="btn sm ghost" href="${esc(explorer(c, t.txHash))}" target="_blank" rel="noopener noreferrer">View</a>` : ''}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty"><b>No trades yet</b></div>')
+      + (notes.length ? `<p class="faint pad" style="margin:0;font-size:12.5px">${notes.map(esc).join('<br>')}</p>` : '');
   }
 };
 function sellPct(r, p) {

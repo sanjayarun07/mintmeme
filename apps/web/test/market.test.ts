@@ -1,7 +1,7 @@
 /** Market data for /app (apps/web/market.ts): normalizing each source, merging chains, caching through rate limits, and refusing bad input. Network is faked. */
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { marketList, marketToken, marketCandles, marketSearch, marketMeta, marketRows, marketStocks, txTimes, fromGecko, fromJupiter, clearMarketCache } from '../market.ts';
+import { marketList, marketToken, marketCandles, marketSearch, marketMeta, marketRows, marketStocks, txTimes, fromGecko, fromJupiter, clearMarketCache, balancesOf, solActivity, marketHoldings, marketActivity, chainRpc } from '../market.ts';
 
 beforeEach(() => clearMarketCache());
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
@@ -116,4 +116,55 @@ test('txTimes asks the node at most 4 at a time (40 at once went over Helius\'s 
   const hashes = Array.from({ length: 20 }, (_, i) => sig(i));
   const r = await txTimes({ chain: 'solana', hashes }, { fetch, env: { HELIUS_API_KEY: 'h' } as any });
   assert.ok(peak <= 4 && peak > 1, `peak in flight ${peak}`); assert.equal(Object.values(r.times).filter(t => t != null).length, 20);
+});
+
+// ---- holdings and history from the chain on any node (QuickNode on the public site), 2026-11-24 ----
+const w = (n: bigint | number) => BigInt(n).toString(16).padStart(64, '0');
+/** aggregate3's answer: (bool success, bytes returnData)[] */
+const agg3 = (rs: (bigint | null)[]) => { let head = '', body = '', off = rs.length * 32;
+  for (const r of rs) { head += w(off); const el = r == null ? w(0) + w(0x40) + w(0) : w(1) + w(0x40) + w(32) + w(r); body += el; off += el.length / 2; }
+  return '0x' + w(32) + w(rs.length) + head + body; };
+
+test('balancesOf reads many balanceOf answers out of one Multicall3 call, null where a call failed', async () => {
+  let sent: any; const out = await balancesOf([A, B, '0x' + '3'.repeat(40)], '0x' + '9'.repeat(40), async (m, p: any) => { sent = { m, p }; return agg3([5n, null, 10n ** 24n]); });
+  assert.deepEqual(out, [5n, null, 10n ** 24n]);
+  assert.equal(sent.m, 'eth_call'); assert.equal(sent.p[0].to, '0xcA11bde05977b3631167028862bE2a173976CA11'); assert.ok(sent.p[0].data.startsWith('0x82ad56cb'));
+  assert.ok(sent.p[0].data.includes('70a08231' + '9'.repeat(40).padStart(64, '0')), 'each call is balanceOf(owner)');
+});
+
+test('chainRpc uses <CHAIN>_RPC_URL first and Alchemy only when it is unset', () => {
+  assert.equal(chainRpc('base', { BASE_RPC_URL: ' https://x.quiknode.pro/k/ ', ALCHEMY_API_KEY: 'a' } as any), 'https://x.quiknode.pro/k/');
+  assert.equal(chainRpc('bnb', { ALCHEMY_API_KEY: 'a' } as any), 'https://bnb-mainnet.g.alchemy.com/v2/a');
+  assert.equal(chainRpc('robinhood', {} as any), '');
+});
+
+test('EVM holdings work on a plain node: balanceOf for stock tokens and the tokens the app names, when the Token API add-on is off', async () => {
+  const calls: string[] = [];
+  const fetch = (async (url: string, init?: any) => {
+    if (String(url).includes('dexscreener')) return json([]);
+    const b = JSON.parse(init.body); calls.push(b.method);
+    if (b.method === 'qn_getWalletTokenBalance') return json({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'token api is not enabled' } });
+    if (b.method === 'eth_call' && b.params[0].to === '0xcA11bde05977b3631167028862bE2a173976CA11') { const n = Number(BigInt('0x' + b.params[0].data.slice(2 + 8 + 64, 2 + 8 + 128))); return json({ jsonrpc: '2.0', id: 1, result: agg3(Array.from({ length: n }, (_, i) => i === 0 ? 7n : 0n)) }); }
+    return json({ jsonrpc: '2.0', id: 1, result: '0x12' });   // decimals() = 18
+  }) as any;
+  const r = await marketHoldings({ chain: 'base', address: '0x' + '9'.repeat(40), tokens: [A] }, { fetch, env: { BASE_RPC_URL: 'https://x.quiknode.pro/k/' } as any });
+  assert.deepEqual(r.holdings.map((h: any) => [h.token, h.raw]), [[A, '7']], 'the named token first in the batch, held 7');
+  assert.ok(calls.includes('qn_getWalletTokenBalance') && !calls.some(m => m.startsWith('alchemy_')), 'QuickNode tried, Alchemy never');
+});
+
+test('solActivity reads a buy, a sell and a received token from the wallet\'s balance changes (fee given back, wrapped SOL counted as SOL)', () => {
+  const me = 'Me11111111111111111111111111111111111111111', tok = (owner: string, mint: string, amount: string) => ({ owner, mint, uiTokenAmount: { amount } });
+  const tx = (pre: number, post: number, preT: any[], postT: any[], fee = 5000, err: any = null) => ({ blockTime: 1_700_000_000, transaction: { message: { accountKeys: [{ pubkey: me }, { pubkey: 'Other' }] } }, meta: { err, fee, preBalances: [pre, 0], postBalances: [post, 0], preTokenBalances: preT, postTokenBalances: postT } });
+  const buy = solActivity(tx(1_000_000_000, 499_995_000, [], [tok(me, MINT, '123')]), 'sig1', me)!;
+  assert.deepEqual([buy.side, buy.token, buy.tokenRaw, buy.native, buy.when], ['buy', MINT, '123', '500000000', 1_700_000_000_000]);
+  const sell = solActivity(tx(0, 0, [tok(me, MINT, '123'), tok(me, 'So11111111111111111111111111111111111111112', '0')], [tok(me, MINT, '0'), tok(me, 'So11111111111111111111111111111111111111112', '200000000')], 0), 'sig2', me)!;
+  assert.deepEqual([sell.side, sell.tokenRaw, sell.native], ['sell', '123', '200000000'], 'wrapped SOL received counts as SOL');
+  assert.equal(solActivity(tx(10, 10, [], [tok(me, MINT, '5')], 0), 's', 'Someone1111111111111111111111111111111111111')?.side, undefined, 'another wallet\'s change is not this wallet\'s');
+  assert.equal(solActivity(tx(10, 10, [], [tok(me, MINT, '5')], 0), 's', me)?.side, 'receive');
+});
+
+test('EVM history says plainly that it needs QuickNode\'s Token API add-on when the endpoint lacks it', async () => {
+  const fetch = (async () => json({ jsonrpc: '2.0', id: 1, error: { code: -32601, message: 'token api is not enabled' } })) as any;
+  const r = await marketActivity({ chain: 'bnb', address: '0x' + '9'.repeat(40) }, { fetch, env: { BNB_RPC_URL: 'https://x.quiknode.pro/k/' } as any });
+  assert.equal(r.trades.length, 0); assert.match(r.unsupported!, /Token and NFT API.*BNB_RPC_URL/);
 });

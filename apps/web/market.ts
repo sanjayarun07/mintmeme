@@ -167,8 +167,7 @@ export async function marketMeta(body: any, d: Deps & { env?: NodeJS.ProcessEnv 
     for (const t of Array.isArray(value) ? value : []) if (tokens.includes(t?.id)) out[t.id] = { symbol: t.symbol ?? null, name: t.name ?? null, decimals: num(t.decimals), price: num(t.usdPrice), icon: t.icon ?? null };
     return { chain, tokens: out };
   }
-  const env = d.env ?? process.env, rpcEnv = { base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' }[chain as 'base'], net = { base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' }[chain as 'base'];
-  const rpc = env[rpcEnv] || (env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : '');
+  const env = d.env ?? process.env, rpc = chainRpc(chain, env);
   const [{ value: pairs }, decs] = await Promise.all([
     cached(`dexsmeta:${chain}:${tokens.slice().sort().join(',').toLowerCase()}`, 30_000, d, () => getJson(d, `https://api.dexscreener.com/tokens/v1/${DEXS[chain]}/${tokens.join(',')}`)),
     Promise.all(tokens.map(async a => { if (!rpc) return null;
@@ -219,8 +218,7 @@ export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } =
   const chain = chainOf(body?.chain) as Chain, env = d.env ?? process.env, f = d.fetch ?? fetch;
   const ok = (h: string) => chain === 'solana' ? /^[1-9A-HJ-NP-Za-km-z]{64,90}$/.test(h) : /^0x[0-9a-fA-F]{64}$/.test(h);
   const hashes = [...new Set((Array.isArray(body?.hashes) ? body.hashes : []).map((x: unknown) => String(x).trim()).filter(ok))].slice(0, 40) as string[];
-  const net = { solana: 'solana-mainnet', base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' }[chain], rpcEnv = { solana: 'SOLANA_RPC_URL', base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' }[chain];
-  const rpc = chain === 'solana' ? (solanaRpc(env)?.url ?? '') : env[rpcEnv] || (env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : '');   // Solana: Helius first
+  const rpc = chainRpc(chain, env);
   const out: Record<string, number | null> = {};
   if (!rpc) { hashes.forEach(h => out[h] = null); return { chain, times: out }; }
   // through postRpc: a rate limit is retried, and on Solana handed to the fallback node (Alchemy behind Helius)
@@ -243,13 +241,63 @@ export async function txTimes(body: any, d: Deps & { env?: NodeJS.ProcessEnv } =
   return { chain, times: out };
 }
 
+const RPC_ENV: Record<Chain, string> = { solana: 'SOLANA_RPC_URL', base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' };
+const ALCHEMY_NET: Record<Chain, string> = { solana: 'solana-mainnet', base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' };
+/** The chain's node: <CHAIN>_RPC_URL (QuickNode on the public site) first, Alchemy (ALCHEMY_API_KEY) only when that is unset. Solana: SOLANA_RPC_URL, else Helius, else Alchemy. */
+export function chainRpc(chain: Chain, env: NodeJS.ProcessEnv = process.env): string {
+  if (chain === 'solana') return solanaRpc(env)?.url ?? '';
+  const own = env[RPC_ENV[chain]]?.trim(), k = env.ALCHEMY_API_KEY?.trim();
+  return own || (k ? `https://${ALCHEMY_NET[chain]}.g.alchemy.com/v2/${k}` : '');
+}
+async function stockTokens(chain: Chain): Promise<string[]> {
+  if (chain === 'solana') return [];
+  return ((await marketStocks({ chain })).stocks as { address: string }[]).map(s => s.address).filter(isEvm);
+}
+type RpcJson = (url: string, method: string, params: unknown[]) => Promise<any>;
+/** QuickNode Token API (qn_getWalletTokenBalance, the endpoint's "Token and NFT API" add-on): every ERC-20 the wallet holds. Throws when the add-on is not enabled. */
+async function qnWalletTokens(url: string, wallet: string, rpcJson: RpcJson) {
+  const out: { token: string; raw: bigint; decimals: number | null }[] = [];
+  for (let page = 1; page <= 3; page++) {
+    const r = await rpcJson(url, 'qn_getWalletTokenBalance', [{ wallet, page, perPage: 100 }]);
+    const list: any[] = Array.isArray(r?.result) ? r.result : Array.isArray(r?.assets) ? r.assets : [];
+    for (const t of list) { const a = String(t?.address ?? t?.contractAddress ?? '').toLowerCase(), raw = t?.totalBalance ?? t?.balance ?? t?.amount; if (!isEvm(a) || raw == null) continue;
+      try { const v = BigInt(String(raw)); if (v > 0n) out.push({ token: a, raw: v, decimals: num(t?.decimals) }); } catch { /* not a raw integer */ } }
+    if (!r?.totalPages || page >= r.totalPages) break;
+  }
+  return out;
+}
+const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';   // same address on Base, BNB Chain and Robinhood Chain (checked 2026-11-24)
+const word = (n: bigint | number) => BigInt(n).toString(16).padStart(64, '0');
+/** ERC-20 balanceOf(owner) for many tokens in one eth_call (Multicall3 aggregate3, failures allowed). null where a token's call failed. Batches of 250. */
+export async function balancesOf(tokens: string[], owner: string, call: (method: string, params: unknown[]) => Promise<any>): Promise<(bigint | null)[]> {
+  const out: (bigint | null)[] = [];
+  for (let i = 0; i < tokens.length; i += 250) {
+    const part = tokens.slice(i, i + 250), n = part.length;
+    // aggregate3((address target, bool allowFailure, bytes callData)[]): each element 6 words (target, allowFailure, offset 0x60, length 36, 2 words of data)
+    let data = '0x82ad56cb' + word(32) + word(n);
+    for (let j = 0; j < n; j++) data += word(n * 32 + j * 192);
+    const callData = '70a08231' + owner.slice(2).toLowerCase().padStart(64, '0');
+    for (const t of part) data += t.slice(2).toLowerCase().padStart(64, '0') + word(1) + word(0x60) + word(36) + callData.padEnd(128, '0');
+    const hex: string = String(await call('eth_call', [{ to: MULTICALL3, data }, 'latest'])).slice(2);
+    const at = (byte: number) => BigInt('0x' + (hex.slice(byte * 2, byte * 2 + 64) || '0'));
+    const arr = Number(at(0)), len = Number(at(arr)), base = arr + 32;
+    for (let j = 0; j < n; j++) {
+      if (j >= len) { out.push(null); continue; }
+      const el = base + Number(at(base + j * 32)), ok = at(el) === 1n, bl = Number(at(el + Number(at(el + 32))));
+      out.push(ok && bl >= 32 ? at(el + Number(at(el + 32)) + 32) : null);
+    }
+  }
+  return out;
+}
+
 /** What a wallet actually holds on one chain, read from the chain: every token with a balance, with symbol, decimals, price and value. Independent of which server or
  *  app bought it (a server's positions only know its own trades). Solana: token accounts of the Token and Token-2022 programs (the repo's Solana RPC, rate limits
- *  retried). EVM: Alchemy's alchemy_getTokenBalances on the chain (ALCHEMY_API_KEY, or a <CHAIN>_RPC_URL that serves it). Cached 15 s per wallet. */
+ *  retried). EVM, on the chain's node (<CHAIN>_RPC_URL): QuickNode's Token API when the endpoint has it (alchemy_getTokenBalances on an Alchemy URL), plus balanceOf for
+ *  the chain's stock tokens and the tokens the app sends in `tokens` (one Multicall3 call), so plain RPC works too. Cached 15 s per wallet. */
 export async function marketHoldings(body: any, d: Deps & { env?: NodeJS.ProcessEnv } = {}) {
   const chain = chainOf(body?.chain) as Chain, address = String(body?.address ?? '').trim(), env = d.env ?? process.env, f = d.fetch ?? fetch;
   if (!(chain === 'solana' ? isSol(address) : isEvm(address))) throw new MarketError(chain === 'solana' ? 'That is not a Solana wallet address.' : 'That is not a 0x wallet address.');
-  const { value: raw, stale } = await cached(`holdings:${chain}:${address.toLowerCase()}`, 15_000, d, async () => {
+  const { value: raw, stale } = await cached(`holdings:${chain}:${address.toLowerCase()}:${(Array.isArray(body?.tokens) ? body.tokens : []).map(String).sort().join(',').toLowerCase()}`, 15_000, d, async () => {
     const { postRpc } = await import('../../packages/sol/src/solchain.ts');
     const rpcJson = async (url: string, method: string, params: unknown[]) => { const r = await postRpc(f, url, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), { timeoutMs: 15_000, fallbackUrl: chain === 'solana' ? solanaRpcFallback(env)?.url : undefined }); if (r.status !== 200) throw new MarketError(`The ${chain} node answered HTTP ${r.status}.`, 502); const j = JSON.parse(r.text); if (j.error) throw new MarketError(String(j.error.message ?? 'RPC error'), 502); return j.result; };
     const out = new Map<string, { raw: bigint; decimals: number | null }>();
@@ -260,10 +308,23 @@ export async function marketHoldings(body: any, d: Deps & { env?: NodeJS.Process
         for (const a of res?.value ?? []) { const i = a?.account?.data?.parsed?.info, amt = BigInt(i?.tokenAmount?.amount ?? '0'); if (!i?.mint || amt <= 0n) continue; const h = out.get(i.mint); out.set(i.mint, { raw: (h?.raw ?? 0n) + amt, decimals: Number(i.tokenAmount.decimals) }); }
       }
     } else {
-      const net = { base: 'base-mainnet', robinhood: 'robinhood-mainnet', bnb: 'bnb-mainnet' }[chain as 'base'], rpcEnv = { base: 'BASE_RPC_URL', robinhood: 'ROBINHOOD_RPC_URL', bnb: 'BNB_RPC_URL' }[chain as 'base'];
-      const url = env.ALCHEMY_API_KEY ? `https://${net}.g.alchemy.com/v2/${env.ALCHEMY_API_KEY}` : env[rpcEnv]; if (!url) throw new MarketError(`Listing tokens on ${chain} needs ALCHEMY_API_KEY.`, 503);
-      const res = await rpcJson(url, 'alchemy_getTokenBalances', [address, 'erc20']);
-      for (const t of res?.tokenBalances ?? []) { const amt = t?.tokenBalance ? BigInt(t.tokenBalance) : 0n; if (amt > 0n && isEvm(t.contractAddress)) out.set(String(t.contractAddress).toLowerCase(), { raw: amt, decimals: null }); }
+      const url = chainRpc(chain, env); if (!url) throw new MarketError(`No ${chain} node on this server (${RPC_ENV[chain]}).`, 503);
+      let listed = false;
+      if (url.includes('alchemy.com')) {
+        const res = await rpcJson(url, 'alchemy_getTokenBalances', [address, 'erc20']); listed = true;
+        for (const t of res?.tokenBalances ?? []) { const amt = t?.tokenBalance ? BigInt(t.tokenBalance) : 0n; if (amt > 0n && isEvm(t.contractAddress)) out.set(String(t.contractAddress).toLowerCase(), { raw: amt, decimals: null }); }
+      } else {
+        // QuickNode's Token API (an add-on of the endpoint) lists every token; without it, the plain-RPC read below
+        try { for (const t of await qnWalletTokens(url, address, rpcJson)) out.set(t.token, { raw: t.raw, decimals: t.decimals }); listed = true; } catch { /* add-on not enabled */ }
+      }
+      // Plain RPC (any node): balanceOf, in one Multicall3 call, for the tokens this wallet could hold: the chain's stock tokens and the tokens the app asks about
+      // (the server's positions, past trades). Also run next to a listing, so a token the listing missed still shows.
+      const ask = new Set<string>([...(Array.isArray(body?.tokens) ? body.tokens : []).map((x: unknown) => String(x).trim().toLowerCase()).filter(isEvm).slice(0, 60), ...(await stockTokens(chain)).map(a => a.toLowerCase())]);
+      for (const t of out.keys()) ask.delete(t);
+      if (ask.size || !listed) {
+        const toks = [...ask], bals = await balancesOf(toks, address, (m, p) => rpcJson(url, m, p));
+        toks.forEach((t, i) => { if (bals[i] != null && bals[i]! > 0n) out.set(t, { raw: bals[i]!, decimals: null }); });
+      }
     }
     return [...out].slice(0, 90).map(([token, v]) => ({ token, raw: v.raw.toString(), decimals: v.decimals }));
   });
@@ -272,6 +333,81 @@ export async function marketHoldings(body: any, d: Deps & { env?: NodeJS.Process
     return { chain, token: x.token, raw: x.raw, decimals: dec, amount, symbol: m.symbol ?? null, name: m.name ?? null, icon: m.icon ?? null, price: m.price ?? null, value: amount != null && m.price != null ? amount * m.price : null }; });
   rows.sort((a, b) => (b.value ?? -1) - (a.value ?? -1));
   return { chain, address, holdings: rows, stale };
+}
+
+export type Activity = { txHash: string; when: number | null; side: 'buy' | 'sell' | 'swap' | 'receive' | 'send'; token: string; tokenRaw: string; native: string | null; fromToken?: string; fromRaw?: string; failed: boolean };
+const WSOL = 'So11111111111111111111111111111111111111112';
+/** One Solana transaction, seen from one wallet: its SOL change (the fee given back when it paid it; wrapped SOL counted as SOL) and each token's change. */
+export function solActivity(tx: any, sig: string, wallet: string): Activity | null {
+  const m = tx?.meta; if (!m) return null;
+  const keys: string[] = (tx?.transaction?.message?.accountKeys ?? []).map((k: any) => typeof k === 'string' ? k : k?.pubkey);
+  const i = keys.indexOf(wallet); let sol = i >= 0 ? BigInt(m.postBalances?.[i] ?? 0) - BigInt(m.preBalances?.[i] ?? 0) : 0n;
+  if (i === 0) sol += BigInt(m.fee ?? 0);
+  const d = new Map<string, bigint>(), add = (b: any, s: bigint) => { if (b?.owner !== wallet || !b?.mint) return; d.set(b.mint, (d.get(b.mint) ?? 0n) + s * BigInt(b?.uiTokenAmount?.amount ?? '0')); };
+  for (const b of m.postTokenBalances ?? []) add(b, 1n); for (const b of m.preTokenBalances ?? []) add(b, -1n);
+  if (d.has(WSOL)) { sol += d.get(WSOL)!; d.delete(WSOL); }
+  const up = [...d].filter(([, v]) => v > 0n), down = [...d].filter(([, v]) => v < 0n), when = typeof tx.blockTime === 'number' ? tx.blockTime * 1000 : null, failed = m.err != null;
+  const base = { txHash: sig, when, failed };
+  if (up.length === 1 && !down.length && sol < 0n) return { ...base, side: 'buy', token: up[0][0], tokenRaw: up[0][1].toString(), native: (-sol).toString() };
+  if (down.length === 1 && !up.length && sol > 0n) return { ...base, side: 'sell', token: down[0][0], tokenRaw: (-down[0][1]).toString(), native: sol.toString() };
+  if (up.length === 1 && down.length === 1) return { ...base, side: 'swap', token: up[0][0], tokenRaw: up[0][1].toString(), native: null, fromToken: down[0][0], fromRaw: (-down[0][1]).toString() };
+  if (up.length === 1 && !down.length) return { ...base, side: 'receive', token: up[0][0], tokenRaw: up[0][1].toString(), native: null };
+  if (down.length === 1 && !up.length) return { ...base, side: 'send', token: down[0][0], tokenRaw: (-down[0][1]).toString(), native: null };
+  return null;   // SOL-only transfers, or several tokens at once: not a trade
+}
+
+/** A wallet's trades read from the chain, so trades made anywhere (another server, another app, the wallet itself) show in History. Newest first, up to 40.
+ *  Solana: the wallet's signatures (getSignaturesForAddress), each transaction's balance changes. EVM: QuickNode's Token API (qn_getWalletTokenTransactions, the
+ *  endpoint's "Token and NFT API" add-on), per token the wallet holds or the app names in `tokens`; without the add-on, `unsupported` says so and the list is empty
+ *  (scanning transfer logs is not an option: a node answers 10,000 blocks per call, under an hour on these chains). Transactions are cached a day (they never change). */
+export async function marketActivity(body: any, d: Deps & { env?: NodeJS.ProcessEnv } = {}) {
+  const chain = chainOf(body?.chain) as Chain, address = String(body?.address ?? '').trim(), env = d.env ?? process.env, f = d.fetch ?? fetch;
+  if (!(chain === 'solana' ? isSol(address) : isEvm(address))) throw new MarketError(chain === 'solana' ? 'That is not a Solana wallet address.' : 'That is not a 0x wallet address.');
+  const url = chainRpc(chain, env); if (!url) throw new MarketError(`No ${chain} node on this server (${RPC_ENV[chain]}).`, 503);
+  const { postRpc } = await import('../../packages/sol/src/solchain.ts'), fb = chain === 'solana' ? solanaRpcFallback(env)?.url : undefined;
+  const call = async (method: string, params: unknown[]) => { const r = await postRpc(f, url, JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }), { timeoutMs: 15_000, fallbackUrl: fb }); if (r.status !== 200) throw new MarketError(`The ${chain} node answered HTTP ${r.status}.`, 502); const j = JSON.parse(r.text); if (j.error) throw new MarketError(String(j.error.message ?? 'RPC error'), 502); return j.result; };
+  const pool = async <T,>(items: T[], n: number, fn: (x: T) => Promise<void>) => { const q = [...items]; await Promise.all(Array.from({ length: Math.min(n, q.length) }, async () => { for (let x = q.shift(); x !== undefined; x = q.shift()) await fn(x); })); };
+  const { value, stale } = await cached(`activity:${chain}:${address.toLowerCase()}`, 20_000, d, async () => {
+    const out: Activity[] = [];
+    if (chain === 'solana') {
+      const sigs: any[] = (await call('getSignaturesForAddress', [address, { limit: 40 }])) ?? [];
+      await pool(sigs.map(s => String(s.signature)), 4, async sig => {
+        try { const { value: tx } = await cached(`soltx:${sig}`, 86_400_000, d, () => call('getTransaction', [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]));
+          const a = solActivity(tx, sig, address); if (a) out.push(a); } catch { /* skipped: asked again next time */ }
+      });
+      return { trades: out, unsupported: null as string | null };
+    }
+    // EVM: per token, the wallet's transfers (QuickNode Token API), grouped by transaction; WETH/WBNB counted as the native coin
+    const tokens = new Set<string>((Array.isArray(body?.tokens) ? body.tokens : []).map((x: unknown) => String(x).trim().toLowerCase()).filter(isEvm).slice(0, 30));
+    try { for (const t of await qnWalletTokens(url, address, (_u, m, p) => call(m, p))) tokens.add(t.token); }
+    catch (e) { return { trades: out, unsupported: `Trades made outside this app on ${chain} need the "Token and NFT API" add-on on the ${RPC_ENV[chain]} QuickNode endpoint (${String((e as Error).message).slice(0, 80)}).` }; }
+    const me = address.toLowerCase(), wrapped = WRAPPED[chain].toLowerCase(), byTx = new Map<string, { when: number | null; d: Map<string, bigint> }>();
+    await pool([...tokens, wrapped].filter(t => t !== '0x0000000000000000000000000000000000000000'), 3, async token => {
+      try {
+        const r = await call('qn_getWalletTokenTransactions', [{ address, contract: token, page: 1, perPage: 40 }]);
+        for (const x of (r?.transfers ?? r?.result ?? []) as any[]) {
+          const h = String(x?.transactionHash ?? x?.txHash ?? ''), from = String(x?.from ?? '').toLowerCase(), to = String(x?.to ?? '').toLowerCase(); if (!/^0x[0-9a-f]{64}$/i.test(h)) continue;
+          let v: bigint; try { v = BigInt(String(x?.sentAmount ?? x?.receivedAmount ?? x?.amount ?? x?.value ?? '0')); } catch { continue; }
+          const e = byTx.get(h) ?? { when: x?.timestamp ? Date.parse(x.timestamp) || Number(x.timestamp) * 1000 || null : null, d: new Map() };
+          const s = to === me ? v : from === me ? -v : 0n; if (s) e.d.set(token, (e.d.get(token) ?? 0n) + s); byTx.set(h, e);
+        }
+      } catch { /* that token skipped */ }
+    });
+    const txs = [...byTx].sort((a, b) => (b[1].when ?? 0) - (a[1].when ?? 0)).slice(0, 40);
+    await pool(txs, 4, async ([h, e]) => {
+      let native = e.d.get(wrapped) ?? 0n, mine = false; e.d.delete(wrapped);
+      try { const { value: tx } = await cached(`evmtx:${chain}:${h}`, 86_400_000, d, () => call('eth_getTransactionByHash', [h]));
+        mine = String(tx?.from).toLowerCase() === me; if (mine && tx?.value) native -= BigInt(tx.value); } catch { /* value unknown */ }
+      const up = [...e.d].filter(([, v]) => v > 0n), down = [...e.d].filter(([, v]) => v < 0n), base = { txHash: h, when: e.when, failed: false };
+      if (up.length === 1 && !down.length) out.push(native < 0n ? { ...base, side: 'buy', token: up[0][0], tokenRaw: up[0][1].toString(), native: (-native).toString() } : { ...base, side: 'receive', token: up[0][0], tokenRaw: up[0][1].toString(), native: null });
+      else if (down.length === 1 && !up.length) out.push(native > 0n || mine ? { ...base, side: 'sell', token: down[0][0], tokenRaw: (-down[0][1]).toString(), native: native > 0n ? native.toString() : null } :   // a sell's coin often comes back unwrapped by the router (an internal transfer, not seen here): amount unknown
+         { ...base, side: 'send', token: down[0][0], tokenRaw: (-down[0][1]).toString(), native: null });
+      else if (up.length === 1 && down.length === 1) out.push({ ...base, side: 'swap', token: up[0][0], tokenRaw: up[0][1].toString(), native: null, fromToken: down[0][0], fromRaw: (-down[0][1]).toString() });
+    });
+    return { trades: out, unsupported: null as string | null };
+  });
+  const trades = [...value.trades].sort((a, b) => (b.when ?? 0) - (a.when ?? 0));
+  return { chain, address, trades, unsupported: value.unsupported, stale };
 }
 
 /** Search by name, symbol or address across the four chains (DexScreener), one row per token, most liquid first. */
